@@ -1,4 +1,6 @@
 sources:
+  local: .mogent/library
+  personal: /home/qix/dev/cdint/Agents/libraries/personal
   shared: /home/qix/dev/cdint/Agents/libraries/cdint
 output: AGENTS.md
 doc:
@@ -8,7 +10,7 @@ doc:
       - Source Of Truth: shared:shared-baseline/identity/source-of-truth
   - heading: Instructions
     children:
-      - Focused Change Loop: shared:shared-baseline/instructions/focused-change-loop
+      - Focused Change Loop: local:shared-baseline/instructions/focused-change-loop
       - Test Strategy: shared:engineering/test-strategy
   - heading: Constraints
     children:
@@ -19,3 +21,5 @@ doc:
   - Code Quality: shared:engineering/code-quality
   - Comment Intent: shared:engineering/comment-intent
   - Coordination IDs: shared:engineering/coordination-ids
+  - Rust: personal:lang/rust
+  - Accessibility: personal:communication/accessibility
