@@ -24,35 +24,11 @@ other material conflicts.
 
 ## Test Strategy
 
-### Scope
-
-Scale validation to risk. Use focused checks for narrow changes and broader
-suites when shared behavior, public interfaces, persistence, or user-facing
-workflows change.
-
-### Determinism
-
-Keep tests deterministic and offline by default. Use fixtures, mocks, or local
-servers instead of live services unless the task explicitly requires an
-integration against a real external system.
-
-### Coverage Shape
-
-For new behavior, cover the main success path, meaningful error paths, and at
-least one boundary or migration case. Keep tests close to the code they
-exercise unless the repository has an established integration-test location.
-
 ### Assertions
 
 Prefer structured assertions over manual string or JSON digging when helpers or
 parsers exist. Compare complete objects when that is clearer than asserting
 individual fields.
-
-### UI And Text Output
-
-When user-visible UI or text output changes, update or add snapshot, golden, or
-before/after coverage when the repository uses that style. Review generated
-snapshot changes before accepting them.
 
 ### Corpus Variants
 
@@ -60,6 +36,30 @@ The corpus includes Go `testing`, Rust `cargo`/`just` workflows, static-site
 file-browser checks, notebook/data-pipeline smoke checks, and lab-machine smoke
 tests. Keep the shared question stable: what evidence would reveal the likely
 failure mode of this change?
+
+### Coverage Shape
+
+For new behavior, cover the main success path, meaningful error paths, and at
+least one boundary or migration case. Keep tests close to the code they
+exercise unless the repository has an established integration-test location.
+
+### Determinism
+
+Keep tests deterministic and offline by default. Use fixtures, mocks, or local
+servers instead of live services unless the task explicitly requires an
+integration against a real external system.
+
+### Scope
+
+Scale validation to risk. Use focused checks for narrow changes and broader
+suites when shared behavior, public interfaces, persistence, or user-facing
+workflows change.
+
+### UI And Text Output
+
+When user-visible UI or text output changes, update or add snapshot, golden, or
+before/after coverage when the repository uses that style. Review generated
+snapshot changes before accepting them.
 
 # Constraints
 
@@ -79,38 +79,6 @@ understand.
 
 # Code Quality
 
-## Local Design Fit
-
-Prefer the repository's existing architecture, helper APIs, and naming style
-over introducing a new pattern. Add an abstraction only when it removes real
-complexity, reduces meaningful duplication, or matches an established local
-pattern.
-
-## Small Surfaces
-
-Keep public APIs, crate/package exports, configuration keys, and command-line
-surfaces as small as practical. Do not add test-only helpers to production code
-when a test can use an existing public path or a local fixture.
-
-## Dependency Restraint
-
-Prefer standard libraries and well-known dependencies. Add or upgrade a
-dependency only when the task needs it, and include the associated lockfile or
-schema updates required by the repository.
-
-## Module Size
-
-Avoid growing large central files. Prefer adding a focused module or file when
-new behavior would otherwise make a high-touch orchestration file harder to
-review. Move tests and module documentation with extracted logic so invariants
-stay near their owner.
-
-## Helper Discipline
-
-Do not create a small helper that is referenced only once unless it names a
-non-obvious concept or isolates a risky boundary. Remove duplication when the
-shared pattern is real, not just visually similar.
-
 ## Corpus Variants
 
 The corpus contains both object-oriented guidance for Go-like projects
@@ -119,25 +87,39 @@ prefers enums, typed domain structures, and small explicit APIs. The shared
 principle is not a single paradigm; it is readable ownership, small surfaces,
 and avoiding stringly-typed behavior where the language offers a clearer shape.
 
+## Dependency Restraint
+
+Prefer standard libraries and well-known dependencies. Add or upgrade a
+dependency only when the task needs it, and include the associated lockfile or
+schema updates required by the repository.
+
+## Helper Discipline
+
+Do not create a small helper that is referenced only once unless it names a
+non-obvious concept or isolates a risky boundary. Remove duplication when the
+shared pattern is real, not just visually similar.
+
+## Local Design Fit
+
+Prefer the repository's existing architecture, helper APIs, and naming style
+over introducing a new pattern. Add an abstraction only when it removes real
+complexity, reduces meaningful duplication, or matches an established local
+pattern.
+
+## Module Size
+
+Avoid growing large central files. Prefer adding a focused module or file when
+new behavior would otherwise make a high-touch orchestration file harder to
+review. Move tests and module documentation with extracted logic so invariants
+stay near their owner.
+
+## Small Surfaces
+
+Keep public APIs, crate/package exports, configuration keys, and command-line
+surfaces as small as practical. Do not add test-only helpers to production code
+when a test can use an existing public path or a local fixture.
+
 # Comment Intent
-
-## Preservation
-
-Never remove existing explanatory comments unless the same change replaces them
-with equal-or-better explanation near the same logic. When refactoring, port the
-old intent first, then improve wording.
-
-## Non-Obvious Logic
-
-Add short plain-English comments for non-obvious parser, encoding, rendering,
-concurrency, storage, protocol, or recovery logic. Avoid comments that merely
-repeat the code.
-
-## Behavior Provenance
-
-For non-trivial behavior changes in repos that use Decision Intent records, add
-a behavior-level comment with `Intent:` and `Source: DI-<handle>` where it will
-help future maintainers understand why the behavior exists.
 
 ## Audit
 
@@ -151,25 +133,25 @@ git diff -U0 -- <file> | rg -n '^-\s*//|^-\s*/\*|^\+\s*//|^\+\s*/\*'
 Resolve removed-comment lines before finalizing unless the user explicitly
 approved dropping the comment.
 
+## Behavior Provenance
+
+For non-trivial behavior changes in repos that use Decision Intent records, add
+a behavior-level comment with `Intent:` and `Source: DI-<handle>` where it will
+help future maintainers understand why the behavior exists.
+
+## Non-Obvious Logic
+
+Add short plain-English comments for non-obvious parser, encoding, rendering,
+concurrency, storage, protocol, or recovery logic. Avoid comments that merely
+repeat the code.
+
+## Preservation
+
+Never remove existing explanatory comments unless the same change replaces them
+with equal-or-better explanation near the same logic. When refactoring, port the
+old intent first, then improve wording.
+
 # Coordination IDs
-
-## Proquint Handles
-
-Use proquint handles for durable coordination artifacts when the repository has
-adopted them. New TODO, TE, DR, and DI records should share one handle
-namespace so references do not depend on timestamps or integer allocation.
-
-## Minting
-
-Mint new handles with the repository's supported tool, usually
-`tools/mint-handle`. Do not invent a handle by inspection when a minting tool
-exists. Existing numeric or timestamp IDs may remain as historical records.
-
-## TODO Files
-
-When using handle-based TODOs, name files `TODO/TODO-<handle>-<slug>.md` and
-keep `TODO/TODO.md` as the priority-sorted index. Inside TODO files, use
-handle-prefixed subtasks where helpful.
 
 ## Decision Intent
 
@@ -177,19 +159,31 @@ Record locked decisions as append-only `DI-<handle>` entries in the relevant
 TODO or decision log. If intent changes, add a new DI that supersedes the old
 one instead of rewriting history.
 
+## Minting
+
+Mint new handles with the repository's supported tool, usually
+`tools/mint-handle`. Do not invent a handle by inspection when a minting tool
+exists. Existing numeric or timestamp IDs may remain as historical records.
+
+## Proquint Handles
+
+Use proquint handles for durable coordination artifacts when the repository has
+adopted them. New TODO, TE, DR, and DI records should share one handle
+namespace so references do not depend on timestamps or integer allocation.
+
 ## Thought Experiments
 
 Name thought experiments `docs/thought-experiments/TE-<handle>-<slug>.md`.
 Treat filed TE documents as durable analysis records; use refinements or a
 superseding TE for material changes.
 
+## TODO Files
+
+When using handle-based TODOs, name files `TODO/TODO-<handle>-<slug>.md` and
+keep `TODO/TODO.md` as the priority-sorted index. Inside TODO files, use
+handle-prefixed subtasks where helpful.
+
 # Rust
-
-## Development
-
-Run `cargo fmt`, `cargo check`, and focused `cargo test` unless the repository
-wraps these with `just`, `make`, or another documented command. Use the wrapper
-when it encodes repository policy.
 
 ## API Shape
 
@@ -198,11 +192,24 @@ through command handling. Avoid boolean or ambiguous `Option` parameters that
 make call sites hard to read; prefer enums, named methods, newtypes, or builder
 style when that clarifies intent.
 
+## Corpus Variants
+
+Rust guidance ranges from early CLI prototypes to large multi-crate workspaces.
+Small projects emphasize `cargo check` and plain output; large workspaces may
+require `just test -p <crate>`, snapshot updates, schema generation, or Bazel
+lock refreshes.
+
 ## Dependencies
 
 Do not introduce a database, async runtime, GUI framework, or broad dependency
 unless the change clearly needs it. If dependency files change, run the
 repository's lockfile refresh command and include the generated updates.
+
+## Development
+
+Run `cargo fmt`, `cargo check`, and focused `cargo test` unless the repository
+wraps these with `just`, `make`, or another documented command. Use the wrapper
+when it encodes repository policy.
 
 ## First Implementation Slice
 
@@ -223,13 +230,6 @@ multi-crate prematurely.
 Keep tests deterministic. Prefer whole-object equality when it makes failures
 clear. Avoid tests for static constants or negative tests for behavior that was
 removed.
-
-## Corpus Variants
-
-Rust guidance ranges from early CLI prototypes to large multi-crate workspaces.
-Small projects emphasize `cargo check` and plain output; large workspaces may
-require `just test -p <crate>`, snapshot updates, schema generation, or Bazel
-lock refreshes.
 
 # Accessibility
 
