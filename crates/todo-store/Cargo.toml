@@ -1,0 +1,21 @@
+[package]
+name = "todo-store"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+cid.workspace = true
+dirs.workspace = true
+serde.workspace = true
+todo-core = { path = "../todo-core" }
+toml.workspace = true
+turso.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio.workspace = true
+

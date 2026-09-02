@@ -1,0 +1,15 @@
+[package]
+name = "todo-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+chrono.workspace = true
+cid.workspace = true
+minicbor.workspace = true
+multihash.workspace = true
+sha2.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
