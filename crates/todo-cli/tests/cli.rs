@@ -238,7 +238,12 @@ fn markdown_import_is_dry_runnable_and_exports_all_fidelity_tiers() {
         "--dry-run",
     ]);
     assert!(dry.contains("- [>] Plan release"));
-    assert_eq!(harness.ok(&["--project", "import", "ls", "--all"]), "No items.\n");
+    // DI-0006: a dry-run import writes nothing, so the project namespace
+    // does not exist yet; listing it is an empty view, not an error.
+    assert_eq!(
+        harness.ok(&["--project", "import", "ls", "--all"]),
+        "No items.\n"
+    );
 
     harness.ok(&[
         "--project",
@@ -276,7 +281,11 @@ fn markdown_import_is_dry_runnable_and_exports_all_fidelity_tiers() {
     ]);
     harness.ok(&["export", "cbor", "--output", cbor.to_str().unwrap()]);
 
-    assert!(std::fs::read_to_string(markdown).unwrap().contains("  - [x] Record decision"));
+    assert!(
+        std::fs::read_to_string(markdown)
+            .unwrap()
+            .contains("  - [x] Record decision")
+    );
     let json: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(json).unwrap()).unwrap();
     assert_eq!(json.as_array().unwrap().len(), 3);

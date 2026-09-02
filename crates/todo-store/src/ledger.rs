@@ -1036,12 +1036,10 @@ impl Ledger {
         all_states: bool,
     ) -> Result<Vec<StoredItem>> {
         let project_id = match scope {
-            ItemScope::Project(path) => Some(
-                self.namespace_by_path(path)
-                    .await?
-                    .ok_or_else(|| anyhow!("unknown project {path}"))?
-                    .id,
-            ),
+            ItemScope::Project(path) => match self.namespace_by_path(path).await? {
+                Some(entry) => Some(entry.id),
+                None => return Ok(Vec::new()),
+            },
             ItemScope::All | ItemScope::Unscoped => None,
         };
         let (sql, params) = match (scope, project_id, all_states) {
@@ -1744,7 +1742,10 @@ mod tests {
         assert_eq!(imported[0].item.state, ItemState::Active);
         assert_eq!(imported[1].item.parent_id, Some(imported[0].item.id));
         assert_eq!(imported[1].item.state, ItemState::Done);
-        assert_eq!(ledger.citations(imported[1].item.id).await.unwrap().len(), 1);
+        assert_eq!(
+            ledger.citations(imported[1].item.id).await.unwrap().len(),
+            1
+        );
         assert!(!ledger.event_envelopes().await.unwrap().is_empty());
 
         let invalid = [BatchItem {
@@ -1752,7 +1753,12 @@ mod tests {
             state: ItemState::Inbox,
             parent_index: Some(3),
         }];
-        assert!(ledger.import_batch(Some(&project), &invalid, None).await.is_err());
+        assert!(
+            ledger
+                .import_batch(Some(&project), &invalid, None)
+                .await
+                .is_err()
+        );
         assert_eq!(
             ledger
                 .list_items(ItemScope::Project(&project), true)
