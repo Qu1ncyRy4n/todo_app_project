@@ -16,7 +16,7 @@ Other tools limit extensibility. This one targets:
 - automatic prioritization / selection
 - better visualization through a time-graph
 
-## v0.2 model
+## Current model
 
 ```text
 one global ledger
@@ -65,7 +65,14 @@ todo note <id> "What happened while doing it"
 todo cite <id> docs/architecture.md --label design
 todo done <id>
 todo show <id> --history
+todo backup /path/to/new/backup-directory
 ```
+
+`todo backup` writes exact event bytes, a full JSON view, and Markdown files
+that can be imported through the CLI into a clean ledger. The destination must
+not already exist, so an older recovery point is never overwritten. See
+[DI-0009](DI/DI-0009-tiered-dogfood-backup.md) for the recovery guarantees and
+known fidelity limits.
 
 Item references may be full UUIDs or a unique trailing fragment printed by the
 CLI. Outside an attached directory, items enter the global ledger without a
@@ -77,5 +84,24 @@ Hierarchical namespace examples include `project/todo`, `goal/todo/v0_1`,
 `todo tag mv`; assignments retain stable internal IDs and the old path remains
 an alias.
 
-See [the versioned tutorial](docs/tutorial.md) for complete v0.1 capture and
-v0.2 focus workflows.
+See [the versioned tutorial](docs/tutorial.md) for complete capture, focus, and
+backup workflows.
+
+For a practical mapping from weekly Obsidian task notes into global and
+project-scoped work, see [the weekly-notes tutorial](docs/weekly-notes-tutorial.md).
+
+## Current direction
+
+Development proceeds from one working local global ledger, to interaction with
+one-to-three repositories, and then to personal/shared spaces and multiple
+users. See [DI-0007](DI/DI-0007-staged-global-to-shared-rollout.md).
+
+The current PromiseGrid and `todo-report` comparison is recorded in
+[the integration review](docs/integration-review-2026-09-04.md). Direct Grid
+reuse and a possible Go migration remain open under
+[DR-0002](DR/DR-0002-promisegrid-runtime-and-language.md). Editable Markdown,
+including a possible `TODO/TODO.md` layout and readable stable IDs, is deferred
+under [DR-0003](DR/DR-0003-editable-markdown-identity.md).
+
+The latest hands-on command review and prioritized usability gaps are recorded
+in [the CLI UX audit](docs/cli-ux-audit-2026-09-04.md).

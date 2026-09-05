@@ -13,9 +13,8 @@ serde.workspace = true
 todo-core = { path = "../todo-core" }
 toml.workspace = true
 turso.workspace = true
+tokio.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-tokio.workspace = true
-

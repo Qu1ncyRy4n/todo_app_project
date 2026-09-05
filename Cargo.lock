@@ -2663,7 +2663,7 @@ dependencies = [
 
 [[package]]
 name = "todo-cli"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2678,7 +2678,7 @@ dependencies = [
 
 [[package]]
 name = "todo-core"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "cid",
@@ -2692,7 +2692,7 @@ dependencies = [
 
 [[package]]
 name = "todo-store"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "chrono",

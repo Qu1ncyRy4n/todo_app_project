@@ -1,6 +1,6 @@
 use std::{
     path::Path,
-    process::{Command, Output},
+    process::{Command, Output, Stdio},
 };
 use tempfile::TempDir;
 
@@ -31,13 +31,17 @@ impl Harness {
     }
 
     fn run_in(&self, cwd: &Path, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_todo"))
+        self.command_in(cwd, args).output().unwrap()
+    }
+
+    fn command_in(&self, cwd: &Path, args: &[&str]) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_todo"));
+        command
             .args(args)
             .current_dir(cwd)
             .env("TODO_CONFIG_HOME", &self.config)
-            .env("TODO_DATA_HOME", &self.data)
-            .output()
-            .unwrap()
+            .env("TODO_DATA_HOME", &self.data);
+        command
     }
 
     fn ok(&self, args: &[&str]) -> String {
@@ -48,6 +52,35 @@ impl Harness {
             String::from_utf8_lossy(&output.stderr)
         );
         String::from_utf8(output.stdout).unwrap()
+    }
+}
+
+#[test]
+fn simultaneous_readers_wait_for_the_local_ledger() {
+    let harness = Harness::new();
+    harness.ok(&["init"]);
+    harness.ok(&["add", "Visible to every reader"]);
+
+    // DI-0007: short-lived human and agent invocations must coexist during
+    // stage-one dogfooding instead of leaking Turso's transient WAL lock race.
+    let children: Vec<_> = (0..16)
+        .map(|_| {
+            harness
+                .command_in(&harness.work, &["ls"])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap()
+        })
+        .collect();
+    for child in children {
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("Visible to every reader"));
     }
 }
 
@@ -305,4 +338,55 @@ fn markdown_import_is_dry_runnable_and_exports_all_fidelity_tiers() {
     assert!(!failed.status.success());
     let items = harness.ok(&["--project", "import", "ls", "--all"]);
     assert_eq!(items.lines().count(), 3);
+}
+
+#[test]
+fn backup_is_new_and_markdown_restorable_by_scope() {
+    let source = Harness::new();
+    source.ok(&["init"]);
+    source.ok(&["add", "Unscoped root"]);
+    let project_root = source.ok(&["--project", "alpha", "add", "Project root"]);
+    let project_root = id_from_add(&project_root);
+    let child = source.ok(&[
+        "--project",
+        "alpha",
+        "add",
+        "Completed child",
+        "--parent",
+        project_root,
+    ]);
+    source.ok(&["done", id_from_add(&child)]);
+
+    let directory = source.work.join("backup-generation-1");
+    source.ok(&["backup", directory.to_str().unwrap()]);
+    assert!(directory.join("events.cbor").is_file());
+    assert!(directory.join("items.json").is_file());
+    assert!(directory.join("global-inbox.md").is_file());
+    assert!(directory.join("project--alpha.md").is_file());
+    let instructions = std::fs::read_to_string(directory.join("RESTORE.md")).unwrap();
+    assert!(instructions.contains("todo import markdown global-inbox.md"));
+    assert!(instructions.contains("todo --project project/alpha import markdown"));
+
+    let repeated = source.run(&["backup", directory.to_str().unwrap()]);
+    assert!(!repeated.status.success());
+
+    let restored = Harness::new();
+    restored.ok(&["init"]);
+    restored.ok(&[
+        "import",
+        "markdown",
+        directory.join("global-inbox.md").to_str().unwrap(),
+    ]);
+    restored.ok(&[
+        "--project",
+        "alpha",
+        "import",
+        "markdown",
+        directory.join("project--alpha.md").to_str().unwrap(),
+    ]);
+    assert!(restored.ok(&["ls", "--all"]).contains("Unscoped root"));
+    let project = restored.ok(&["--project", "alpha", "ls", "--tree", "--all"]);
+    assert!(project.contains("Project root"));
+    assert!(project.contains("  [x]"));
+    assert!(project.contains("Completed child"));
 }

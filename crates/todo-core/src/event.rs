@@ -1,19 +1,19 @@
-use crate::{ItemId, NamespaceId};
+use crate::{GridEnvelopeBuilder, GridError, ItemId, NamespaceId, grid_cbor_cid, raw_cid};
 use chrono::{DateTime, Utc};
 use cid::Cid;
-use minicbor::{Encoder, data::Tag};
-use multihash::Multihash;
+use minicbor::Encoder;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, fmt};
 use thiserror::Error;
 use uuid::Uuid;
 
-const GRID_TAG: u64 = 1_735_551_332;
-const CID_TAG: u64 = 42;
+#[cfg(test)]
 const PROTOCOL_V1_BYTES: &[u8] = include_bytes!("../../../docs/protocols/todo-ledger-event-v1.md");
+#[cfg(test)]
 const PROTOCOL_V2_BYTES: &[u8] = include_bytes!("../../../docs/protocols/todo-ledger-event-v2.md");
+#[cfg(test)]
 const PROTOCOL_V3_BYTES: &[u8] = include_bytes!("../../../docs/protocols/todo-ledger-event-v3.md");
+const PROTOCOL_V4_BYTES: &[u8] = include_bytes!("../../../docs/protocols/todo-ledger-event-v4.md");
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum EventKind {
@@ -34,7 +34,6 @@ pub enum EventKind {
     NamespaceRenamed,
     NamespaceAssigned,
     NamespaceRemoved,
-    ProjectPathAttached,
 }
 
 impl fmt::Display for EventKind {
@@ -57,25 +56,7 @@ impl fmt::Display for EventKind {
             Self::NamespaceRenamed => "namespace.renamed",
             Self::NamespaceAssigned => "namespace.assigned",
             Self::NamespaceRemoved => "namespace.removed",
-            Self::ProjectPathAttached => "project.path-attached",
         })
-    }
-}
-
-impl EventKind {
-    fn protocol_bytes(&self) -> &'static [u8] {
-        match self {
-            Self::ItemPriorityChanged
-            | Self::ItemDueDateChanged
-            | Self::ItemDeferDateChanged
-            | Self::ItemDependencyAdded
-            | Self::ItemDependencyRemoved => PROTOCOL_V2_BYTES,
-            Self::ItemTitleChanged
-            | Self::ItemParentCleared
-            | Self::ItemProjectChanged
-            | Self::NamespaceRemoved => PROTOCOL_V3_BYTES,
-            _ => PROTOCOL_V1_BYTES,
-        }
     }
 }
 
@@ -161,9 +142,11 @@ impl EventBuilder {
     }
 
     pub fn build(self) -> Result<Event, EventEncodeError> {
-        let protocol_cid = cid_for(self.payload.kind.protocol_bytes());
+        // All new writes use the v4 Grid-CBOR codec. Historical v1-v3 rows are
+        // never rebuilt or relabeled. Source: DI-0008.
+        let protocol_cid = raw_cid(PROTOCOL_V4_BYTES);
         let bytes = encode_envelope(&protocol_cid, self.parent.as_ref(), &self.payload)?;
-        let cid = cid_for(&bytes);
+        let cid = grid_cbor_cid(&bytes);
         Ok(Event {
             cid,
             parent: self.parent,
@@ -174,13 +157,11 @@ impl EventBuilder {
 }
 
 #[derive(Debug, Error)]
-#[error("encode event: {0}")]
-pub struct EventEncodeError(#[from] minicbor::encode::Error<std::convert::Infallible>);
-
-fn cid_for(bytes: &[u8]) -> Cid {
-    let digest = Sha256::digest(bytes);
-    let hash = Multihash::<64>::wrap(0x12, &digest).expect("SHA-256 fits the CID digest");
-    Cid::new_v1(0x55, hash)
+pub enum EventEncodeError {
+    #[error("encode event slot: {0}")]
+    Encode(#[from] minicbor::encode::Error<std::convert::Infallible>),
+    #[error("build Grid envelope: {0}")]
+    Grid(#[from] GridError),
 }
 
 fn encode_envelope(
@@ -188,67 +169,54 @@ fn encode_envelope(
     parent: Option<&Cid>,
     payload: &EventPayload,
 ) -> Result<Vec<u8>, EventEncodeError> {
-    let mut encoder = Encoder::new(Vec::new());
-    encoder.tag(Tag::new(GRID_TAG))?.array(4)?;
-    encode_cid(&mut encoder, protocol_cid)?;
-
-    encoder.array(u64::from(parent.is_some()))?;
+    let mut parents = Encoder::new(Vec::new());
+    parents.array(u64::from(parent.is_some()))?;
     if let Some(parent) = parent {
-        encode_cid(&mut encoder, parent)?;
+        crate::grid::encode_cid(&mut parents, parent)?;
     }
 
-    encoder.map(10)?;
-    encoder.str("schema_version")?.u8(1)?;
-    encoder.str("action")?.str("record")?;
-    encoder.str("kind")?.str(&payload.kind.to_string())?;
-    encoder
-        .str("event_id")?
-        .str(&payload.event_id.to_string())?;
-    encoder.str("actor_id")?.str(&payload.actor_id)?;
-    encoder.str("subject_id")?.str(&payload.subject_id)?;
-    encoder.str("project_id")?;
+    let mut body = Encoder::new(Vec::new());
+    body.map(10)?;
+    body.str("schema_version")?.u8(1)?;
+    body.str("action")?.str("record")?;
+    body.str("kind")?.str(&payload.kind.to_string())?;
+    body.str("event_id")?.str(&payload.event_id.to_string())?;
+    body.str("actor_id")?.str(&payload.actor_id)?;
+    body.str("subject_id")?.str(&payload.subject_id)?;
+    body.str("project_id")?;
     match payload.project_id {
-        Some(project_id) => encoder.str(&project_id.to_string())?,
-        None => encoder.null()?,
+        Some(project_id) => body.str(&project_id.to_string())?,
+        None => body.null()?,
     };
-    encoder
-        .str("recorded_at")?
+    body.str("recorded_at")?
         .str(&payload.recorded_at.to_rfc3339())?;
-    encoder.str("data")?.map(payload.data.len() as u64)?;
+    body.str("data")?.map(payload.data.len() as u64)?;
     for (key, value) in &payload.data {
-        encoder.str(key)?.str(value)?;
+        body.str(key)?.str(value)?;
     }
-    encoder.str("links")?.array(payload.links.len() as u64)?;
+    body.str("links")?.array(payload.links.len() as u64)?;
     for link in &payload.links {
-        encoder
-            .map(2)?
+        body.map(2)?
             .str("relation")?
             .str(&link.relation)?
             .str("target")?
             .str(&link.target)?;
     }
-    encoder.null()?;
-    Ok(encoder.into_writer())
-}
 
-fn encode_cid(
-    encoder: &mut Encoder<Vec<u8>>,
-    cid: &Cid,
-) -> Result<(), minicbor::encode::Error<std::convert::Infallible>> {
-    let mut content = Vec::with_capacity(cid.encoded_len() + 1);
-    content.push(0);
-    content.extend_from_slice(&cid.to_bytes());
-    encoder.tag(Tag::new(CID_TAG))?.bytes(&content)?;
-    Ok(())
+    let mut builder = GridEnvelopeBuilder::new(protocol_cid.to_owned());
+    builder.put_slot(1, &parents.into_writer())?;
+    builder.put_slot(2, &body.into_writer())?;
+    builder.put_slot(3, &[0xf6])?;
+    Ok(builder.build()?.bytes().to_vec())
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        EventBuilder, EventKind, GRID_TAG, PROTOCOL_V1_BYTES, PROTOCOL_V2_BYTES, PROTOCOL_V3_BYTES,
-        cid_for,
+        EventBuilder, EventKind, PROTOCOL_V1_BYTES, PROTOCOL_V2_BYTES, PROTOCOL_V3_BYTES,
+        PROTOCOL_V4_BYTES,
     };
-    use crate::ItemId;
+    use crate::{GRID_CBOR_CODEC, GRID_TAG, GridEnvelope, ItemId, raw_cid};
     use chrono::DateTime;
     use minicbor::{Decoder, data::Type};
 
@@ -276,6 +244,12 @@ mod tests {
         assert_eq!(decoder.tag().unwrap().as_u64(), GRID_TAG);
         assert_eq!(decoder.array().unwrap(), Some(4));
         assert_eq!(decoder.datatype().unwrap(), Type::Tag);
+        assert_eq!(first.cid.codec(), GRID_CBOR_CODEC);
+
+        let parsed = GridEnvelope::parse(&first.bytes).unwrap();
+        assert_eq!(parsed.slot_count(), 3);
+        assert_eq!(parsed.protocol_cid(), &raw_cid(PROTOCOL_V4_BYTES));
+        assert_eq!(parsed.cid(), first.cid);
     }
 
     #[test]
@@ -293,15 +267,34 @@ mod tests {
     }
 
     #[test]
+    fn v4_event_can_extend_a_legacy_raw_codec_head() {
+        let legacy_head = raw_cid(b"legacy event bytes");
+        let event = EventBuilder::new(EventKind::ItemNoteAdded, "one")
+            .parent(Some(legacy_head.to_owned()))
+            .data("note", "continued after migration")
+            .build()
+            .unwrap();
+
+        assert_eq!(event.parent.as_ref(), Some(&legacy_head));
+        assert_eq!(event.cid.codec(), GRID_CBOR_CODEC);
+        GridEnvelope::parse(&event.bytes).unwrap();
+    }
+
+    #[test]
     fn protocol_versions_have_distinct_content_identities() {
         assert_eq!(
-            cid_for(PROTOCOL_V1_BYTES).to_string(),
+            raw_cid(PROTOCOL_V1_BYTES).to_string(),
             "bafkreieeg4aciqnmr2eze5zq5yxmcweoi5zropjjdir7vultwijcsluumq"
         );
         assert_eq!(
-            cid_for(PROTOCOL_V2_BYTES).to_string(),
+            raw_cid(PROTOCOL_V2_BYTES).to_string(),
             "bafkreib343dtizusqbavpevtkbfxmqdqshfl2tgd2uq7iqg2boi2pldlha"
         );
-        assert_ne!(cid_for(PROTOCOL_V2_BYTES), cid_for(PROTOCOL_V3_BYTES));
+        assert_ne!(raw_cid(PROTOCOL_V2_BYTES), raw_cid(PROTOCOL_V3_BYTES));
+        assert_ne!(raw_cid(PROTOCOL_V3_BYTES), raw_cid(PROTOCOL_V4_BYTES));
+        assert_eq!(
+            raw_cid(PROTOCOL_V4_BYTES).to_string(),
+            "bafkreie4yxx5msmhvfcspqoh55v5mwt3htr7sc34yx54igg5usx2yiylie"
+        );
     }
 }

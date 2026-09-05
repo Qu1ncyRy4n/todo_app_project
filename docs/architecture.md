@@ -1,6 +1,8 @@
 # Architecture
 
-Status: implemented through v0.2 by DI-0001 through DI-0005.
+Status: implemented through v0.3.0 by DI-0001 through DI-0009. DI-0007 sets the
+staged local-to-shared product direction; its later stages are not implemented.
+DI-0008 and DI-0009 add PromiseGrid framing compatibility and dogfood recovery.
 
 ## Global space and project scopes
 
@@ -21,20 +23,22 @@ dogfooding shows the global mapping is awkward.
 
 ## Durable records and local views
 
-The durable record is a ledger Grid-CBOR message:
+The durable record is a ledger Grid message:
 
 ```text
 grid([42(pCID), parents, payload, proof])
 ```
 
-The v0.1 proof slot is `null`. The format therefore borrows Grid framing but
-does not claim PromiseGrid compatibility, identity, or authentication. The
-payload protocols are frozen, content-addressed files under `docs/protocols/`.
-v0.1 event kinds retain the v1 pCID; v0.2 focus kinds use the v2 pCID.
+The proof slot remains `null`, and semantic validity is checked before an event
+is persisted. Historical v1-v3 events retain their exact bytes and raw-codec
+CIDs. New v4 events use the registered Grid-CBOR codec (`0x1027`) and generic
+envelope validation from DI-0008. The payload protocols are frozen,
+content-addressed files under `docs/protocols/`.
 
 Turso stores the exact envelope bytes and extracted fields used to build local
-views. Exact CBOR is the durable exchange unit. JSON and plain-text
-import/export are planned adapters, not part of v0.2.
+views. Exact CBOR archives are the durable exchange format. JSON and Markdown
+backups are lower-fidelity, CLI-restorable safety layers; exact replay/import
+remains planned.
 
 ## User-facing lifecycle
 

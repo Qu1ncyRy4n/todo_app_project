@@ -179,3 +179,21 @@ why:
 `depends:1` reports declared dependency edges, including already-satisfied
 ones. `next` never silently asks an LLM to choose; a later advisor can record a
 suggestion without changing this deterministic policy.
+
+## v0.3: Back up before dogfooding
+
+Create each backup at a new path:
+
+```text
+todo backup /path/to/backups/todo-2026-09-04
+```
+
+The directory contains `events.cbor` with every exact immutable event,
+`items.json` with the rich current view, and one importable Markdown tree for
+the global inbox and each non-empty project. Follow its generated `RESTORE.md`
+commands to recover titles, lifecycle states, project scopes, and hierarchy in
+a clean ledger. IDs and richer facts are retained as evidence in JSON/CBOR but
+are not yet restored by the Markdown path.
+
+New events use the Grid-CBOR codec while existing v1-v3 event bytes and CIDs
+remain valid. This is an event-format transition, not a database reset.

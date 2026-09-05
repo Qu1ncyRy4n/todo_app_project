@@ -97,6 +97,8 @@ enum Command {
     Import(ImportArgs),
     /// Export a human view, rich view, or exact event archive.
     Export(ExportArgs),
+    /// Create a new tiered recovery directory for dogfooding.
+    Backup { directory: PathBuf },
 }
 
 #[derive(Args)]
@@ -510,14 +512,11 @@ async fn run() -> Result<()> {
                     .output
                     .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("CBOR export requires --output FILE"))?;
-                let envelopes = ledger.event_envelopes().await?;
-                let mut encoder = minicbor::Encoder::new(Vec::new());
-                encoder.array(envelopes.len() as u64)?;
-                for envelope in envelopes {
-                    encoder.bytes(&envelope)?;
-                }
-                fs::write(output, encoder.into_writer())
-                    .with_context(|| format!("write {}", output.display()))?;
+                fs::write(
+                    output,
+                    encode_event_archive(ledger.event_envelopes().await?)?,
+                )
+                .with_context(|| format!("write {}", output.display()))?;
                 println!("Exported exact event ledger to {}", output.display());
             }
             ExportFormat::Markdown | ExportFormat::Json => {
@@ -542,8 +541,83 @@ async fn run() -> Result<()> {
                 }
             }
         },
+        Command::Backup { directory } => {
+            backup(&ledger, &directory).await?;
+            println!("Backed up ledger to {}", directory.display());
+        }
     }
     Ok(())
+}
+
+/// Write independent fidelity tiers rather than pretending one format can be
+/// both human-restorable and an exact protocol archive. Source: DI-0009.
+async fn backup(ledger: &Ledger, directory: &Path) -> Result<()> {
+    if directory.exists() {
+        bail!(
+            "backup destination {} already exists; choose a new directory",
+            directory.display()
+        );
+    }
+    fs::create_dir_all(directory)
+        .with_context(|| format!("create backup directory {}", directory.display()))?;
+
+    let all_items = ledger.list_items(ItemScope::All, true).await?;
+    fs::write(
+        directory.join("items.json"),
+        format!("{}\n", serde_json::to_string_pretty(&all_items)?),
+    )
+    .context("write backup items.json")?;
+    fs::write(
+        directory.join("events.cbor"),
+        encode_event_archive(ledger.event_envelopes().await?)?,
+    )
+    .context("write backup events.cbor")?;
+
+    let mut restore = String::from(
+        "# Todo ledger recovery\n\nRun these commands from this backup directory. Markdown preserves titles, lifecycle states, and parent trees. It does not preserve original IDs, tags, priority, dates, dependencies, notes, citations, or event history. JSON and CBOR retain additional evidence but are not importable yet.\n\n```sh\n",
+    );
+    let unscoped = ledger.list_items(ItemScope::Unscoped, true).await?;
+    if !unscoped.is_empty() {
+        fs::write(
+            directory.join("global-inbox.md"),
+            markdown_for_stored(&unscoped),
+        )
+        .context("write backup global-inbox.md")?;
+        restore.push_str("todo import markdown global-inbox.md\n");
+    }
+
+    for project in ledger
+        .namespaces()
+        .await?
+        .into_iter()
+        .filter(|entry| entry.path.as_str().starts_with("project/"))
+    {
+        let items = ledger
+            .list_items(ItemScope::Project(&project.path), true)
+            .await?;
+        if items.is_empty() {
+            continue;
+        }
+        let filename = format!("{}.md", project.path.as_str().replace('/', "--"));
+        fs::write(directory.join(&filename), markdown_for_stored(&items))
+            .with_context(|| format!("write backup {filename}"))?;
+        restore.push_str(&format!(
+            "todo --project {} import markdown {}\n",
+            project.path, filename
+        ));
+    }
+    restore.push_str("```\n");
+    fs::write(directory.join("RESTORE.md"), restore).context("write backup RESTORE.md")?;
+    Ok(())
+}
+
+fn encode_event_archive(envelopes: Vec<Vec<u8>>) -> Result<Vec<u8>> {
+    let mut encoder = minicbor::Encoder::new(Vec::new());
+    encoder.array(envelopes.len() as u64)?;
+    for envelope in envelopes {
+        encoder.bytes(&envelope)?;
+    }
+    Ok(encoder.into_writer())
 }
 
 fn resolve_project(

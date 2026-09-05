@@ -9,6 +9,9 @@ use todo_core::{
 };
 use turso::{Builder, Connection, Value};
 
+const OPEN_RETRY_ATTEMPTS: usize = 50;
+const OPEN_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(20);
+
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS meta (
   key TEXT PRIMARY KEY,
@@ -139,10 +142,20 @@ impl Ledger {
         let path = path
             .to_str()
             .ok_or_else(|| anyhow!("database path is not valid UTF-8: {}", path.display()))?;
-        let database = Builder::new_local(path)
-            .build()
-            .await
-            .context("open Turso database")?;
+        // Stage-one dogfooding includes short-lived CLI and agent processes. Turso
+        // can transiently reject a second process while opening its local WAL, so
+        // wait briefly rather than exposing an implementation-level race. Source: DI-0007.
+        let mut attempt = 0;
+        let database = loop {
+            match Builder::new_local(path).build().await {
+                Ok(database) => break database,
+                Err(error) if attempt + 1 < OPEN_RETRY_ATTEMPTS && is_lock_error(&error) => {
+                    attempt += 1;
+                    tokio::time::sleep(OPEN_RETRY_DELAY).await;
+                }
+                Err(error) => return Err(error).context("open Turso database"),
+            }
+        };
         let connection = database.connect().context("connect Turso database")?;
         let ledger = Self { connection };
         ledger.migrate().await?;
@@ -1421,6 +1434,11 @@ impl Ledger {
             }
         }
     }
+}
+
+fn is_lock_error(error: &turso::Error) -> bool {
+    matches!(error, turso::Error::Busy(_) | turso::Error::BusySnapshot(_))
+        || error.to_string().contains("locked by another process")
 }
 
 fn values<const N: usize>(items: [String; N]) -> Vec<Value> {
