@@ -9,6 +9,7 @@ chrono.workspace = true
 cid.workspace = true
 minicbor.workspace = true
 multihash.workspace = true
+serde_json.workspace = true
 sha2.workspace = true
 serde.workspace = true
 thiserror.workspace = true

@@ -12,7 +12,7 @@
         let pkgs = import nixpkgs { inherit system; };
         in {
           default = pkgs.mkShell {
-            packages = with pkgs; [ cargo rustc rustfmt clippy pkg-config cmake clang ];
+            packages = with pkgs; [ cargo rustc rustfmt clippy pkg-config cmake clang git ];
           };
         });
     };

@@ -3,11 +3,15 @@
 mod event;
 mod grid;
 mod item;
+mod log;
 mod namespace;
 
-pub use event::{Event, EventBuilder, EventKind, EventLink, EventPayload};
+pub use event::{
+    Event, EventBuilder, EventDecodeError, EventKind, EventLink, EventPayload, decode_envelope,
+};
 pub use grid::{
     GRID_CBOR_CODEC, GRID_TAG, GridEnvelope, GridEnvelopeBuilder, GridError, grid_cbor_cid, raw_cid,
 };
 pub use item::{Item, ItemId, ItemState, Priority};
+pub use log::LogLine;
 pub use namespace::{NamespaceId, NamespaceKind, NamespacePath};

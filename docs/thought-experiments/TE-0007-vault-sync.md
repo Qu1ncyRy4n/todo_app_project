@@ -1,7 +1,7 @@
-# TE-0007: Vault-Piggyback Sync
+# TE-0007: Machine-to-Machine Sync
 
 Date: 2026-09-01
-Status: draft
+Status: selected
 
 ## Pressure
 
@@ -29,39 +29,32 @@ Rejected as a sync record; remains useful as a human export.
 
 ### C: Sync the exact CBOR event archive with idempotent replay
 
-Selected. `todo export cbor` already emits the exact immutable envelopes.
-Add `todo import cbor` that inserts only envelopes whose CID is absent,
-verifies parent linkage, and rebuilds views from events. Views stay local and
-rebuildable (AGENTS.md: exact events separate from views).
-
-The wrapper loop for v0:
-
-```text
-pull:   copy vault archive aside, import cbor (CID dedup), rebuild views
-work:   ordinary todo commands, events append locally
-push:   export cbor to the vault archive, sync moves it
-```
-
-Failure mode to accept in v0: the ledger keeps one parent-linked chain and
-one head. Two devices appending between syncs produce two heads, so push
-refuses when the vault head differs from the last-synced head, and the human
-resolves by choosing which side is authoritative. Single user, short windows:
-acceptable. A multi-parent merge (the Grid envelope already carries a parents
-array) is the later real fix and belongs to the PromiseGrid protocol family.
+`todo export cbor` already emits the exact immutable envelopes. An archive
+import would insert only envelopes whose CID is absent and rebuild views from
+events. Sound as an interchange snapshot, but a whole-file archive gives git
+no line-level merge story; see route D for the selected refinement.
 
 ### D: Git as the transport
 
-A bare repo or branch under the vault gives versioned archives and visible
-conflicts. Compatible with route C (git is just the mover), but assumes the
-vault is git-synced, which is not yet true here.
+A private git remote gives versioned archives, visible conflicts, and real
+merge semantics from any machine. Obsidian Sync skips `.git/`, so a repo
+inside the vault cannot ride the vault sync; git needs its own remote.
 
-## Open questions before a DI
+## Resolution
 
-- What actually syncs the vault (Syncthing, Obsidian Sync, git, other)?
-  Conflict visibility and atomicity differ per mechanism.
-- Single-writer-between-syncs acceptable for dogfooding? (Assumed yes.)
-- Plain CBOR in the vault, or encrypted at rest?
-- Does `import cbor` need to verify the full parent chain before accepting an
-  archive, or is CID membership enough for v0?
-- Should push/pull be a native `todo sync` subcommand or a wrapper script
-  until the semantics settle?
+The sync mechanism is Obsidian Sync, but as a per-file last-writer-wins mover
+it can silently drop one side's events, and a single archive file gives no
+merge story. Selected route D combined with an append-only log shape:
+
+- The interchange artifact is an append-only JSONL log: one line per event
+  envelope, carrying the CID and the exact envelope bytes (hex).
+- Lines are canonically ordered by CID and deduplicated, so any union of the
+  same event set produces identical file content.
+- Git with the `merge=union` driver merges concurrent appends from two
+  machines; replay deduplicates by CID, so convergence is automatic and
+  lossless.
+- Views are derived per event in canonical `(recorded_at, event_id)` order.
+  A forked history after concurrent writes stays as a DAG in `parent_cid`;
+  the head pointer becomes the newest event by the same ordering.
+- SQLite stays local and never syncs; it remains a rebuildable view over the
+  events (DI-0002). See DI-0007.

@@ -1,7 +1,10 @@
-use crate::{GridEnvelopeBuilder, GridError, ItemId, NamespaceId, grid_cbor_cid, raw_cid};
+use crate::{
+    GRID_TAG, GridEnvelopeBuilder, GridError, ItemId, NamespaceId, grid::CID_TAG, grid_cbor_cid,
+    raw_cid,
+};
 use chrono::{DateTime, Utc};
 use cid::Cid;
-use minicbor::Encoder;
+use minicbor::{Decoder, Encoder};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fmt};
 use thiserror::Error;
@@ -60,6 +63,36 @@ impl fmt::Display for EventKind {
     }
 }
 
+impl std::str::FromStr for EventKind {
+    type Err = EventDecodeError;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        Ok(match text {
+            "item.created" => Self::ItemCreated,
+            "item.state-changed" => Self::ItemStateChanged,
+            "item.note-added" => Self::ItemNoteAdded,
+            "item.citation-added" => Self::ItemCitationAdded,
+            "item.parent-set" => Self::ItemParentSet,
+            "item.title-changed" => Self::ItemTitleChanged,
+            "item.parent-cleared" => Self::ItemParentCleared,
+            "item.project-changed" => Self::ItemProjectChanged,
+            "item.priority-changed" => Self::ItemPriorityChanged,
+            "item.due-date-changed" => Self::ItemDueDateChanged,
+            "item.defer-date-changed" => Self::ItemDeferDateChanged,
+            "item.dependency-added" => Self::ItemDependencyAdded,
+            "item.dependency-removed" => Self::ItemDependencyRemoved,
+            "namespace.created" => Self::NamespaceCreated,
+            "namespace.renamed" => Self::NamespaceRenamed,
+            "namespace.assigned" => Self::NamespaceAssigned,
+            "namespace.removed" => Self::NamespaceRemoved,
+            other => {
+                return Err(EventDecodeError::Invalid(format!(
+                    "unknown event kind {other:?}"
+                )));
+            }
+        })
+    }
+}
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct EventLink {
     pub relation: String,
@@ -162,6 +195,151 @@ pub enum EventEncodeError {
     Encode(#[from] minicbor::encode::Error<std::convert::Infallible>),
     #[error("build Grid envelope: {0}")]
     Grid(#[from] GridError),
+}
+
+#[derive(Debug, Error)]
+pub enum EventDecodeError {
+    #[error("decode event: {0}")]
+    Cbor(#[from] minicbor::decode::Error),
+    #[error("decode event: {0}")]
+    Invalid(String),
+    #[error("decode event timestamp: {0}")]
+    Timestamp(#[from] chrono::ParseError),
+}
+
+pub fn decode_envelope(bytes: &[u8]) -> Result<Event, EventDecodeError> {
+    let cid = grid_cbor_cid(bytes);
+    let mut decoder = Decoder::new(bytes);
+    let grid = decoder.tag()?;
+    if grid.as_u64() != GRID_TAG {
+        return Err(EventDecodeError::Invalid(
+            "envelope is not Grid-framed".to_owned(),
+        ));
+    }
+    if decoder.array()? != Some(4) {
+        return Err(EventDecodeError::Invalid(
+            "envelope is not a 4-element Grid array".to_owned(),
+        ));
+    }
+    decode_cid(&mut decoder)?;
+    let parent = match decoder.array()? {
+        Some(0) => None,
+        Some(1) => Some(decode_cid(&mut decoder)?),
+        _ => return Err(EventDecodeError::Invalid("invalid parent count".to_owned())),
+    };
+    if decoder.map()? != Some(10) {
+        return Err(EventDecodeError::Invalid(
+            "envelope payload is not a 10-entry map".to_owned(),
+        ));
+    }
+    expect_field(&mut decoder, "schema_version")?;
+    let _schema_version = decoder.u8()?;
+    expect_field(&mut decoder, "action")?;
+    if decoder.str()? != "record" {
+        return Err(EventDecodeError::Invalid(
+            "envelope action is not record".to_owned(),
+        ));
+    }
+    expect_field(&mut decoder, "kind")?;
+    let kind: EventKind = decoder.str()?.parse()?;
+    expect_field(&mut decoder, "event_id")?;
+    let event_id = Uuid::parse_str(decoder.str()?)
+        .map_err(|error| EventDecodeError::Invalid(format!("invalid event id: {error}")))?;
+    expect_field(&mut decoder, "actor_id")?;
+    let actor_id = decoder.str()?.to_owned();
+    expect_field(&mut decoder, "subject_id")?;
+    let subject_id = decoder.str()?.to_owned();
+    expect_field(&mut decoder, "project_id")?;
+    let project_id = match decoder.datatype()? {
+        minicbor::data::Type::Null => {
+            decoder.skip()?;
+            None
+        }
+        _ => {
+            let text = decoder.str()?;
+            let id = NamespaceId::parse(text).map_err(|error| {
+                EventDecodeError::Invalid(format!("invalid project id: {error}"))
+            })?;
+            Some(id)
+        }
+    };
+    expect_field(&mut decoder, "recorded_at")?;
+    let recorded_at = DateTime::parse_from_rfc3339(decoder.str()?)?.to_utc();
+    expect_field(&mut decoder, "data")?;
+    let entries = decoder.map()?;
+    let mut data = BTreeMap::new();
+    for _ in 0..entries.unwrap_or(0) {
+        let key = decoder.str()?.to_owned();
+        let value = decoder.str()?.to_owned();
+        data.insert(key, value);
+    }
+    expect_field(&mut decoder, "links")?;
+    let link_count = decoder.array()?;
+    let mut links = Vec::new();
+    for _ in 0..link_count.unwrap_or(0) {
+        if decoder.map()? != Some(2) {
+            return Err(EventDecodeError::Invalid(
+                "link is not a 2-entry map".to_owned(),
+            ));
+        }
+        expect_field(&mut decoder, "relation")?;
+        let relation = decoder.str()?.to_owned();
+        expect_field(&mut decoder, "target")?;
+        let target = decoder.str()?.to_owned();
+        links.push(EventLink { relation, target });
+    }
+    if decoder.datatype()? != minicbor::data::Type::Null {
+        return Err(EventDecodeError::Invalid(
+            "expected a null proof slot".to_owned(),
+        ));
+    }
+    decoder.skip()?;
+    if decoder.datatype().is_ok() {
+        return Err(EventDecodeError::Invalid(
+            "trailing bytes after envelope".to_owned(),
+        ));
+    }
+    Ok(Event {
+        cid,
+        parent,
+        payload: EventPayload {
+            event_id,
+            kind,
+            actor_id,
+            subject_id,
+            project_id,
+            recorded_at,
+            data,
+            links,
+        },
+        bytes: bytes.to_vec(),
+    })
+}
+
+fn expect_field(decoder: &mut Decoder<'_>, name: &str) -> Result<(), EventDecodeError> {
+    if decoder.str()? != name {
+        return Err(EventDecodeError::Invalid(format!(
+            "expected field {name:?}"
+        )));
+    }
+    Ok(())
+}
+
+fn decode_cid(decoder: &mut Decoder<'_>) -> Result<Cid, EventDecodeError> {
+    let tag = decoder.tag()?;
+    if tag.as_u64() != CID_TAG {
+        return Err(EventDecodeError::Invalid("expected CID tag 42".to_owned()));
+    }
+    let content = decoder.bytes()?;
+    let Some((&marker, body)) = content.split_first() else {
+        return Err(EventDecodeError::Invalid("empty CID content".to_owned()));
+    };
+    if marker != 0 {
+        return Err(EventDecodeError::Invalid(
+            "unsupported CID content marker".to_owned(),
+        ));
+    }
+    Cid::try_from(body).map_err(|error| EventDecodeError::Invalid(format!("invalid CID: {error}")))
 }
 
 fn encode_envelope(
