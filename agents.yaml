@@ -1,0 +1,20 @@
+sources:
+  qmr: /home/qix/dev/cdint/qmr-agents-library/agents
+output: AGENTS.md
+doc:
+  - Intro:
+      - Assistant Agent: qmr:intro/assistant-agent
+      - Author Ownership, No Agent Signatures: qmr:intro/author-ownership-no-agent-signatures
+      - Flag AGENTS.md Or Other Conflicts: qmr:intro/flag-agents-md-or-other-conflicts
+  - Workflow / Process:
+      - Principled Code And Tool Use: qmr:workflow/principled-code-and-tool-use
+      - Developer Decision Involvement Level: qmr:workflow/developer-decision-involvement-level
+      - Decision First:
+          - Plan Ahead: qmr:workflow/decision-first/plan-ahead
+      - Staged Interface Development: qmr:workflow/staged-interface-development
+  - Constraints / Safety:
+      - Focused Change Loop: qmr:constraints/focused-change-loop
+      - Unknown Work Caution: qmr:constraints/unknown-work-caution
+      - Don't Reinvent The Wheel, Consult Docs First: qmr:constraints/don-t-reinvent-the-wheel-consult-docs-first
+      - Keep Costly Or Irreversible Actions Approval Only, Visible, And Trackable: qmr:constraints/keep-costly-or-irreversible-actions-approval-only-visible-and-trackable
+      - Security: qmr:constraints/security
