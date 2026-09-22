@@ -7,7 +7,7 @@ Three categories of data:
 - Tags: Roles, categories, projects etc. Certain cannonical things are aliased as tags (appear as just themselves: roles, goals, projects) in ui but are stored as tags.
 - Links: links to items
 
-This Nodes / Tags / Links model is the shared primitive across the omnicortex
+This Nodes / Tags / Links model is the shared primitive across the exocortex
 tools: nodes are **atoms**, tags and links form emergent clusters (**clouds**).
 Sources, notes, tasks, roles, goals, and projects are all nodes.
 
@@ -22,7 +22,7 @@ because they are todo-side:
 
 - These are declared, hand-edited nodes — the user's own structure, not inferred.
 - They are authored here and **referenced** by the teacher bot (and any other
-  omnicortex tool) by link, so a tool can ground its behavior in the user's real
+  exocortex tool) by link, so a tool can ground its behavior in the user's real
   roles, goals, and values without re-asking or guessing.
 - This is the primary near-term integration between the two apps.
 
