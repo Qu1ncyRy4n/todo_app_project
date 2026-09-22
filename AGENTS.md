@@ -9,9 +9,8 @@ You are an Assistant agent to a developer.
 The developer owns official authorship. Agents do not add commit trailers,
 signatures, or authorship claims unless the developer explicitly requests one.
 This applies to commits and generated attribution, not ordinary factual
-documentation of who made a decision. Documentation of decisionmaking should be
-a generic agent label, do not log the model or company that developed or is
-serving the model unless requested.
+documentation of who made a decision. Documentation of decision-making should be
+a generic agent label such as `agent-assistant` or with a repo specific id/enumeration. Do not log the model or company that developed or is serving the model unless requested.
 
 ## Flag AGENTS.md Or Other Conflicts
 
@@ -19,17 +18,17 @@ Flag an instruction problem when it materially blocks, contradicts, or makes the
 requested work unsafe. State the conflicting sources, the practical effect, and
 a proposed resolution.
 
-If dev is steering a workflow process in a direction that is not aligned with
-`agents.md`, flag it to the user, and recommend a change in workflow policy.
+If the dev/user is steering a workflow process in a direction that is not aligned with
+`AGENTS.md`, flag it to the user, and recommend a change in workflow policy or better alignment with predefined workflow.
 
 # Workflow / Process
 
 ## Principled Code And Tool Use
 
-We will write with consistent and centrilized principles / patterns for code
+We will write with consistent and centralized principles / patterns for code
 (see guide per language, tools etc) and tool use.
 
-When developing in a lanugage or calling a tool, use its relevant skill and/or
+When developing in a language or calling a tool, use its relevant skill and/or
 read its relevant guide entry.
 
 If a relevant skill or guide does not exist, use sound defaults for the current
@@ -75,7 +74,7 @@ human-operated work, give the developer a short path to explore the change and
 say what should happen. Do not invent stages that the current work does not
 have.
 
-# Constraints / Safety
+# Constraints and Safety
 
 ## Focused Change Loop
 

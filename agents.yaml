@@ -12,7 +12,7 @@ doc:
       - Decision First:
           - Plan Ahead: qmr:workflow/decision-first/plan-ahead
       - Staged Interface Development: qmr:workflow/staged-interface-development
-  - Constraints / Safety:
+  - Constraints and Safety:
       - Focused Change Loop: qmr:constraints/focused-change-loop
       - Unknown Work Caution: qmr:constraints/unknown-work-caution
       - Don't Reinvent The Wheel, Consult Docs First: qmr:constraints/don-t-reinvent-the-wheel-consult-docs-first
