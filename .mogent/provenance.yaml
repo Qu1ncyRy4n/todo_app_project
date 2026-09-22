@@ -1,8 +1,0 @@
-version: 1
-overrides:
-  local:shared-baseline/instructions/focused-change-loop:
-    source_ref: shared:shared-baseline/instructions/focused-change-loop
-    source_location: /home/qix/dev/cdint/Agents/libraries/cdint
-    source_file: shared-baseline.md
-    localized_at: 2026-08-12T01:06:27.676569815Z
-    original_sha256: 65b525f42a756de597bac835e1ebae43054caa5a3a0b5d4a429c838c8b469e91
