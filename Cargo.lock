@@ -2669,6 +2669,7 @@ dependencies = [
  "chrono",
  "clap",
  "minicbor",
+ "serde",
  "serde_json",
  "tempfile",
  "todo-core",

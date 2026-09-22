@@ -1,13 +1,15 @@
 use anyhow::{Context, Result, bail};
 use chrono::{Local, NaiveDate};
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use serde::Serialize;
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     env, fs,
     path::{Path, PathBuf},
+    process::Command as ProcessCommand,
 };
-use todo_core::{ItemId, ItemState, NamespacePath, Priority};
-use todo_store::{AppConfig, AppPaths, BatchItem, ItemScope, Ledger, StoredItem};
+use todo_core::{ItemId, ItemState, LogLine, NamespaceKind, NamespacePath, Priority};
+use todo_store::{AppConfig, AppPaths, BatchItem, EventRecord, ItemScope, Ledger, StoredItem};
 
 #[derive(Parser)]
 #[command(name = "todo", version, about = "A global, local-first todo ledger")]
@@ -99,6 +101,8 @@ enum Command {
     Export(ExportArgs),
     /// Create a new tiered recovery directory for dogfooding.
     Backup { directory: PathBuf },
+    /// Synchronize exact events through an explicitly configured Git repository.
+    Sync(SyncArgs),
 }
 
 #[derive(Args)]
@@ -145,6 +149,7 @@ struct FocusArgs {
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum ImportFormat {
     Markdown,
+    Log,
 }
 
 #[derive(Args)]
@@ -163,7 +168,23 @@ struct ImportArgs {
 enum ExportFormat {
     Markdown,
     Json,
+    /// Export a versioned graph-viewer projection.
+    Graph,
     Cbor,
+    Log,
+}
+
+#[derive(Serialize)]
+struct GraphExport<'a> {
+    format: &'static str,
+    items: &'a [StoredItem],
+    projects: Vec<GraphProject>,
+}
+
+#[derive(Serialize)]
+struct GraphProject {
+    id: String,
+    path: String,
 }
 
 #[derive(Args)]
@@ -216,6 +237,21 @@ struct TagArgs {
     command: TagCommand,
 }
 
+#[derive(Args)]
+struct SyncArgs {
+    #[command(subcommand)]
+    command: Option<SyncCommand>,
+}
+
+#[derive(Subcommand)]
+enum SyncCommand {
+    /// Configure a dedicated local Git checkout for exact event synchronization.
+    Init {
+        #[arg(long)]
+        repo: PathBuf,
+    },
+}
+
 #[derive(Subcommand)]
 enum TagCommand {
     /// Attach a namespace path such as `topic/rust/turso` to an item.
@@ -245,9 +281,10 @@ async fn run() -> Result<()> {
     let paths = AppPaths::discover()?;
     if matches!(cli.command, Command::Init) {
         paths.create_dirs()?;
-        let _ledger = Ledger::open(&paths.database()).await?;
-        let config = AppConfig::load(&paths.config())?;
+        let mut config = AppConfig::load(&paths.config())?;
+        let actor_id = config.ensure_actor_id().to_owned();
         config.save(&paths.config())?;
+        let _ledger = Ledger::open_with_actor(&paths.database(), actor_id).await?;
         println!(
             "Initialized global ledger at {}",
             paths.database().display()
@@ -259,11 +296,19 @@ async fn run() -> Result<()> {
     }
 
     let mut config = AppConfig::load(&paths.config())?;
-    let ledger = Ledger::open(&paths.database()).await?;
+    let actor_id = match config.actor_id.clone() {
+        Some(actor_id) => actor_id,
+        None => {
+            let actor_id = config.ensure_actor_id().to_owned();
+            config.save(&paths.config())?;
+            actor_id
+        }
+    };
+    let ledger = Ledger::open_with_actor(&paths.database(), actor_id).await?;
     let cwd = env::current_dir().context("determine current directory")?;
 
     match cli.command {
-        Command::Init => unreachable!(),
+        Command::Init => bail!("initialization should return before command dispatch"),
         Command::Add(args) => {
             let project = resolve_project(cli.project.as_deref(), &config, &cwd)?;
             let tags = args
@@ -476,33 +521,47 @@ async fn run() -> Result<()> {
                 }
             }
         },
-        Command::Import(args) => {
-            let contents = fs::read_to_string(&args.file)
-                .with_context(|| format!("read {}", args.file.display()))?;
-            let items = parse_markdown_tasks(&contents)?;
-            if args.dry_run {
-                print!("{}", markdown_for_batch(&items));
-            } else {
-                let project = resolve_project(cli.project.as_deref(), &config, &cwd)?;
-                let source = if args.cite_source {
-                    Some(
-                        args.file
-                            .canonicalize()
-                            .with_context(|| format!("resolve {}", args.file.display()))?,
-                    )
+        Command::Import(args) => match args.format {
+            ImportFormat::Markdown => {
+                let contents = fs::read_to_string(&args.file)
+                    .with_context(|| format!("read {}", args.file.display()))?;
+                let items = parse_markdown_tasks(&contents)?;
+                if args.dry_run {
+                    print!("{}", markdown_for_batch(&items));
                 } else {
-                    None
-                };
-                let imported = ledger
-                    .import_batch(
-                        project.as_ref(),
-                        &items,
-                        source.as_ref().and_then(|path| path.to_str()),
-                    )
-                    .await?;
-                println!("Imported {} items.", imported.len());
+                    let project = resolve_project(cli.project.as_deref(), &config, &cwd)?;
+                    let source = if args.cite_source {
+                        Some(
+                            args.file
+                                .canonicalize()
+                                .with_context(|| format!("resolve {}", args.file.display()))?,
+                        )
+                    } else {
+                        None
+                    };
+                    let imported = ledger
+                        .import_batch(
+                            project.as_ref(),
+                            &items,
+                            source.as_ref().and_then(|path| path.to_str()),
+                        )
+                        .await?;
+                    println!("Imported {} items.", imported.len());
+                }
             }
-        }
+            ImportFormat::Log => {
+                if args.cite_source || cli.project.is_some() {
+                    bail!("event-log import does not accept --cite-source or --project");
+                }
+                let records = read_event_log(&args.file)?;
+                if args.dry_run {
+                    println!("Validated {} exact events.", records.len());
+                } else {
+                    let imported = ledger.import_events(&records).await?;
+                    println!("Imported {imported} exact events.");
+                }
+            }
+        },
         Command::Export(args) => match args.format {
             ExportFormat::Cbor => {
                 if args.all || args.global {
@@ -519,7 +578,19 @@ async fn run() -> Result<()> {
                 .with_context(|| format!("write {}", output.display()))?;
                 println!("Exported exact event ledger to {}", output.display());
             }
-            ExportFormat::Markdown | ExportFormat::Json => {
+            ExportFormat::Log => {
+                if args.all || args.global {
+                    bail!("event-log export is always complete; omit --all and --global");
+                }
+                let output = args
+                    .output
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("event-log export requires --output FILE"))?;
+                fs::write(output, event_log(&ledger.event_records().await?)?)
+                    .with_context(|| format!("write {}", output.display()))?;
+                println!("Exported exact event log to {}", output.display());
+            }
+            ExportFormat::Markdown | ExportFormat::Json | ExportFormat::Graph => {
                 let project = if args.global {
                     None
                 } else {
@@ -530,7 +601,23 @@ async fn run() -> Result<()> {
                 let rendered = match args.format {
                     ExportFormat::Markdown => markdown_for_stored(&items),
                     ExportFormat::Json => serde_json::to_string_pretty(&items)?,
-                    ExportFormat::Cbor => unreachable!(),
+                    ExportFormat::Graph => serde_json::to_string_pretty(&GraphExport {
+                        format: "todo-graph-v1",
+                        items: &items,
+                        projects: ledger
+                            .namespaces()
+                            .await?
+                            .into_iter()
+                            .filter(|namespace| namespace.kind == NamespaceKind::Project)
+                            .map(|namespace| GraphProject {
+                                id: namespace.id.to_string(),
+                                path: namespace.path.to_string(),
+                            })
+                            .collect(),
+                    })?,
+                    ExportFormat::Cbor | ExportFormat::Log => {
+                        bail!("unexpected export format while rendering a view")
+                    }
                 };
                 if let Some(output) = args.output {
                     fs::write(&output, format!("{rendered}\n"))
@@ -545,8 +632,195 @@ async fn run() -> Result<()> {
             backup(&ledger, &directory).await?;
             println!("Backed up ledger to {}", directory.display());
         }
+        Command::Sync(args) => match args.command {
+            Some(SyncCommand::Init { repo }) => {
+                let repo = init_sync_repo(&repo)?;
+                config.sync_repo = Some(repo.clone());
+                config.save(&paths.config())?;
+                println!(
+                    "Configured exact-event sync repository at {}",
+                    repo.display()
+                );
+            }
+            None => {
+                let repo = config.sync_repo.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("sync is not configured; run `todo sync init --repo PATH`")
+                })?;
+                sync(&ledger, repo).await?;
+                println!("Synchronized exact events with {}", repo.display());
+            }
+        },
     }
     Ok(())
+}
+
+fn event_log(records: &[EventRecord]) -> Result<String> {
+    let mut records = records.to_vec();
+    records.sort_by_key(|record| record.cid.to_string());
+    let lines = records
+        .iter()
+        .map(|record| LogLine::encode(&record.cid, &record.bytes))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(format!("{}\n", lines.join("\n")))
+}
+
+const SYNC_MANIFEST: &str = "format_version = 1\ntransport = \"todo-ledger-jsonl\"\n";
+const SYNC_ATTRIBUTES: &str = "events.jsonl merge=union\n";
+
+fn init_sync_repo(path: &Path) -> Result<PathBuf> {
+    fs::create_dir_all(path)
+        .with_context(|| format!("create sync repository {}", path.display()))?;
+    let repo = path
+        .canonicalize()
+        .with_context(|| format!("resolve sync repository {}", path.display()))?;
+    if !repo.join(".git").exists() {
+        run_git(&repo, &["init"])?;
+    }
+    ensure_sync_layout(&repo)?;
+    Ok(repo)
+}
+
+async fn sync(ledger: &Ledger, repo: &Path) -> Result<()> {
+    if !repo.join(".git").exists() {
+        bail!("sync repository {} is not a Git checkout", repo.display());
+    }
+    ensure_sync_layout(repo)?;
+    if git_succeeds(
+        repo,
+        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+    )? {
+        run_git(repo, &["pull", "--no-rebase"])?;
+    }
+    let imported = ledger
+        .import_events(&read_event_log(&repo.join("events.jsonl"))?)
+        .await?;
+    fs::write(
+        repo.join("events.jsonl"),
+        event_log(&ledger.event_records().await?)?,
+    )
+    .context("write canonical event log")?;
+    run_git(
+        repo,
+        &["add", "ledger.toml", ".gitattributes", "events.jsonl"],
+    )?;
+    if !git_succeeds(repo, &["diff", "--cached", "--quiet"])? {
+        run_git(repo, &["commit", "-m", "Sync todo ledger events"])?;
+        if git_succeeds(repo, &["remote", "get-url", "origin"])? {
+            let push = if git_succeeds(
+                repo,
+                &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+            )? {
+                run_git(repo, &["push"])
+            } else {
+                run_git(repo, &["push", "--set-upstream", "origin", "HEAD"])
+            };
+            if push.is_err() {
+                // A peer may have pushed after this invocation pulled. Union
+                // merge, normalize the log, then retry once.
+                run_git(repo, &["pull", "--no-rebase"])?;
+                let recovered = ledger
+                    .import_events(&read_event_log(&repo.join("events.jsonl"))?)
+                    .await?;
+                fs::write(
+                    repo.join("events.jsonl"),
+                    event_log(&ledger.event_records().await?)?,
+                )
+                .context("rewrite canonical event log after merge")?;
+                run_git(repo, &["add", "events.jsonl"])?;
+                if !git_succeeds(repo, &["diff", "--cached", "--quiet"])? {
+                    run_git(repo, &["commit", "-m", "Canonicalize merged todo events"])?;
+                }
+                run_git(repo, &["push"])?;
+                if recovered > 0 {
+                    println!("Imported {recovered} exact events after concurrent push.");
+                }
+            }
+        }
+    }
+    if imported > 0 {
+        println!("Imported {imported} exact events.");
+    }
+    Ok(())
+}
+
+fn ensure_sync_layout(repo: &Path) -> Result<()> {
+    let manifest = repo.join("ledger.toml");
+    if manifest.exists() {
+        if fs::read_to_string(&manifest)? != SYNC_MANIFEST {
+            bail!(
+                "sync repository {} has an unsupported ledger.toml",
+                repo.display()
+            );
+        }
+    } else {
+        fs::write(&manifest, SYNC_MANIFEST).context("write ledger format manifest")?;
+    }
+    let attributes = repo.join(".gitattributes");
+    if attributes.exists() {
+        let contents = fs::read_to_string(&attributes)?;
+        if !contents
+            .lines()
+            .any(|line| line == "events.jsonl merge=union")
+        {
+            bail!(
+                "sync repository {} does not configure union merging for events.jsonl",
+                repo.display()
+            );
+        }
+    } else {
+        fs::write(&attributes, SYNC_ATTRIBUTES).context("write sync Git attributes")?;
+    }
+    let log = repo.join("events.jsonl");
+    if !log.exists() {
+        fs::write(log, "").context("create event log")?;
+    }
+    Ok(())
+}
+
+fn run_git(repo: &Path, arguments: &[&str]) -> Result<()> {
+    let output = ProcessCommand::new("git")
+        .args(arguments)
+        .current_dir(repo)
+        .output()
+        .with_context(|| format!("run git {}", arguments.join(" ")))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    bail!(
+        "git {} failed in {}: {}",
+        arguments.join(" "),
+        repo.display(),
+        String::from_utf8_lossy(&output.stderr).trim()
+    )
+}
+
+fn git_succeeds(repo: &Path, arguments: &[&str]) -> Result<bool> {
+    let status = ProcessCommand::new("git")
+        .args(arguments)
+        .current_dir(repo)
+        .output()
+        .with_context(|| format!("run git {}", arguments.join(" ")))?;
+    Ok(status.status.success())
+}
+
+fn read_event_log(path: &Path) -> Result<Vec<EventRecord>> {
+    let contents = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let mut records = BTreeSet::new();
+    let mut result = Vec::new();
+    for (line_number, line) in contents.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let line = LogLine::parse(line)
+            .with_context(|| format!("parse event log line {}", line_number + 1))?;
+        if records.insert(line.cid.to_string()) {
+            result.push(EventRecord {
+                cid: line.cid,
+                bytes: line.bytes,
+            });
+        }
+    }
+    Ok(result)
 }
 
 /// Write independent fidelity tiers rather than pretending one format can be
@@ -613,7 +887,7 @@ async fn backup(ledger: &Ledger, directory: &Path) -> Result<()> {
 
 fn encode_event_archive(envelopes: Vec<Vec<u8>>) -> Result<Vec<u8>> {
     let mut encoder = minicbor::Encoder::new(Vec::new());
-    encoder.array(envelopes.len() as u64)?;
+    encoder.array(u64::try_from(envelopes.len()).context("too many event envelopes")?)?;
     for envelope in envelopes {
         encoder.bytes(&envelope)?;
     }
@@ -795,7 +1069,7 @@ fn parse_markdown_tasks(contents: &str) -> Result<Vec<BatchItem>> {
             marker => bail!(
                 "line {} has unknown task marker {:?}",
                 line_index + 1,
-                marker as char
+                char::from(marker)
             ),
         };
         let title = trimmed[5..].trim();

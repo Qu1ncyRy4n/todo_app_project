@@ -1,0 +1,52 @@
+#!/usr/bin/env sh
+set -eu
+
+usage() {
+  cat <<'EOF'
+Usage: ./dev <command> [arguments]
+
+Commands:
+  build             Build the workspace.
+  test              Run workspace tests.
+  check             Check formatting and run Clippy with warnings denied.
+  fmt               Format Rust sources.
+  run -- <args>     Run the todo CLI with <args>.
+  install           Install todo into Cargo's bin directory.
+EOF
+}
+
+command=${1:-help}
+case "$command" in
+  build)
+    nix develop --command cargo build --workspace
+    ;;
+  test)
+    nix develop --command cargo test --workspace
+    ;;
+  check)
+    nix develop --command cargo fmt --check
+    nix develop --command cargo clippy --workspace --all-targets --all-features -- -D warnings
+    ;;
+  fmt)
+    nix develop --command cargo fmt
+    ;;
+  run)
+    shift
+    if [ "${1:-}" != "--" ]; then
+      usage >&2
+      exit 2
+    fi
+    shift
+    nix develop --command cargo run -p todo-cli -- "$@"
+    ;;
+  install)
+    nix develop --command cargo install --path crates/todo-cli --locked
+    ;;
+  help|-h|--help)
+    usage
+    ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac

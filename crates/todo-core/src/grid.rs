@@ -106,10 +106,16 @@ impl GridEnvelopeBuilder {
             validate_item(slot)?;
         }
 
+        let slot_count = self
+            .slots
+            .len()
+            .checked_add(1)
+            .and_then(|count| u64::try_from(count).ok())
+            .ok_or_else(|| GridError::InvalidEnvelope("too many Grid slots".to_owned()))?;
         let mut encoder = Encoder::new(Vec::new());
         encoder
             .tag(Tag::new(GRID_TAG))
-            .and_then(|encoder| encoder.array((self.slots.len() + 1) as u64))
+            .and_then(|encoder| encoder.array(slot_count))
             .map_err(|error| GridError::InvalidCbor(error.to_string()))?;
         encode_cid(&mut encoder, &self.protocol_cid)
             .map_err(|error| GridError::InvalidCbor(error.to_string()))?;
@@ -440,7 +446,10 @@ impl<'a> Scanner<'a> {
         let mut cursor = Cursor::new(&content[1..]);
         let cid = Cid::read_bytes(&mut cursor)
             .map_err(|error| GridError::InvalidCid(error.to_string()))?;
-        if cursor.position() as usize != content.len() - 1 {
+        let position = usize::try_from(cursor.position()).map_err(|_| {
+            GridError::InvalidCid("CID cursor position exceeds platform size".to_owned())
+        })?;
+        if position != content.len() - 1 {
             return Err(GridError::InvalidCid(
                 "tag 42 content contains trailing bytes".to_owned(),
             ));

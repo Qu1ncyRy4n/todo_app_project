@@ -1,4 +1,4 @@
-# Tutorial: From v0.1 Capture to v0.2 Focus
+# Tutorial: From Capture to Portable Sync
 
 This tutorial follows the product in release order. Each section introduces
 only the concepts available in that version and explains how the underlying
@@ -20,7 +20,7 @@ ledger and its configuration. Items are not stored in each source repository.
 
 ```text
 todo project attach cdint --path ~/dev/cdint
-todo project attach todo --path ~/dev/omnicortex/todo-app
+todo project attach todo --path ~/dev/exocortex/todo_app_project
 ```
 
 The longest matching directory mapping wins. An explicit `--project cdint`
@@ -197,3 +197,49 @@ are not yet restored by the Markdown path.
 
 New events use the Grid-CBOR codec while existing v1-v3 event bytes and CIDs
 remain valid. This is an event-format transition, not a database reset.
+
+## v0.4: Synchronize exact v5 events through Git
+
+The portable record is a dedicated Git checkout containing a versioned
+`ledger.toml` and canonical `events.jsonl`. The local `ledger.db` remains a
+machine-private query view and must not be copied through Git, Syncthing, or a
+cloud file synchronizer.
+
+### 1. Create or clone the sync repository
+
+Use a normal Git checkout with a branch checked out. Do not point `todo` at an
+empty `.git` directory whose remote has existing commits.
+
+```text
+git clone <private-ledger-remote> ~/dev/todo-ledger
+```
+
+On the first machine, configure the checkout and publish local events:
+
+```text
+todo sync init --repo ~/dev/todo-ledger
+todo sync
+```
+
+`todo sync init` creates `ledger.toml`, `.gitattributes`, and `events.jsonl` if
+they do not already exist. `todo sync` imports remote events, canonicalizes the
+complete local event set, commits a changed log, and pushes it. It is explicit:
+run it when you want to exchange work, rather than relying on a background
+process.
+
+### 2. Join the ledger from another machine
+
+Clone the same remote locally, initialize that machine's database, then connect
+the checkout and synchronize:
+
+```text
+git clone <private-ledger-remote> ~/dev/todo-ledger
+todo init
+todo sync init --repo ~/dev/todo-ledger
+todo sync
+```
+
+The second `todo sync` imports the exact event history and rebuilds its local
+views. New v5 events include a persistent local actor identifier. v1-v4 events
+remain preserved historical evidence but are not yet replayable by this first
+portable-sync implementation.

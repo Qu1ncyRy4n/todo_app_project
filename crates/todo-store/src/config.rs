@@ -5,6 +5,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
+use uuid::Uuid;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AppPaths {
@@ -51,12 +52,23 @@ impl AppPaths {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AppConfig {
+    #[serde(default)]
+    pub actor_id: Option<String>,
+    #[serde(default)]
+    pub sync_repo: Option<PathBuf>,
     pub default_project: Option<String>,
     #[serde(default)]
     pub project_paths: BTreeMap<PathBuf, String>,
 }
 
 impl AppConfig {
+    pub fn ensure_actor_id(&mut self) -> &str {
+        if self.actor_id.is_none() {
+            self.actor_id = Some(Uuid::now_v7().to_string());
+        }
+        self.actor_id.as_deref().expect("actor ID was initialized")
+    }
+
     pub fn load(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Ok(Self::default());

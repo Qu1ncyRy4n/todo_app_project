@@ -31,7 +31,7 @@ grid([42(pCID), parents, payload, proof])
 
 The proof slot remains `null`, and semantic validity is checked before an event
 is persisted. Historical v1-v3 events retain their exact bytes and raw-codec
-CIDs. New v4 events use the registered Grid-CBOR codec (`0x1027`) and generic
+CIDs. New v5 events use the registered Grid-CBOR codec (`0x1027`) and generic
 envelope validation from DI-0008. The payload protocols are frozen,
 content-addressed files under `docs/protocols/`.
 

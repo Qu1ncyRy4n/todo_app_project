@@ -5,6 +5,6 @@ mod ledger;
 
 pub use config::{AppConfig, AppPaths};
 pub use ledger::{
-    BatchItem, Citation, HistoryEntry, ItemScope, Ledger, NamespaceEntry, NextItem, Note,
-    StoredItem,
+    BatchItem, Citation, EventRecord, HistoryEntry, ItemScope, Ledger, NamespaceEntry, NextItem,
+    Note, StoredItem,
 };

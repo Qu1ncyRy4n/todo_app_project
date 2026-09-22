@@ -29,3 +29,10 @@ tokio = { version = "1.0", features = ["macros", "rt-multi-thread", "time"] }
 toml = "0.9"
 turso = "=0.8.0-pre.7"
 uuid = { version = "1.18", features = ["v7", "serde"] }
+
+[workspace.lints.clippy]
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+as_conversions = "deny"

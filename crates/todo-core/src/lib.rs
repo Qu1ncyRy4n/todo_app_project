@@ -8,9 +8,11 @@ mod namespace;
 
 pub use event::{
     Event, EventBuilder, EventDecodeError, EventKind, EventLink, EventPayload, decode_envelope,
+    event_protocol_v4_cid, event_protocol_v5_cid,
 };
 pub use grid::{
-    GRID_CBOR_CODEC, GRID_TAG, GridEnvelope, GridEnvelopeBuilder, GridError, grid_cbor_cid, raw_cid,
+    GRID_CBOR_CODEC, GRID_TAG, GridEnvelope, GridEnvelopeBuilder, GridError, RAW_CODEC,
+    grid_cbor_cid, raw_cid,
 };
 pub use item::{Item, ItemId, ItemState, Priority};
 pub use log::LogLine;

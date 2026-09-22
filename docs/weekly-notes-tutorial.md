@@ -8,9 +8,9 @@ dogfooded deliberately instead of receiving a bulk dump.
 ## Current Reality
 
 The application has one global event ledger with optional project scopes. It
-can attach multiple repository directories to projects, but it does not yet
-read repository TODO files, synchronize between machines, or pin remote GitHub
-task sources.
+can attach multiple repository directories to projects and explicitly
+synchronize exact v5 events through a dedicated Git checkout. It does not read
+repository TODO files or pin remote GitHub task sources.
 
 On macOS, the default paths selected by the `dirs` crate are:
 
@@ -23,16 +23,16 @@ On macOS, the default paths selected by the `dirs` crate are:
 machine the default directory does not currently exist and `todo` is not on
 `PATH`, so only isolated development/test ledgers have been exercised so far.
 
-`../todo-ledger` is an empty Git working tree with a configured GitHub remote.
-It has no commits and the application does not use it. It may eventually carry
-versioned event archives or readable projections, but it is not global state
-today.
+`../todo-ledger` can be configured as the dedicated Git checkout with `todo
+sync init --repo ../todo-ledger`. It holds the versioned exact event log, not
+the live database. Run `todo sync` explicitly on each machine to exchange and
+merge event sets.
 
 Do not place the live `ledger.db` or its WAL under Git, Obsidian Sync, Dropbox,
 or another file synchronizer. Copying a live SQLite-family database does not
 provide event merging and can corrupt or silently fork state. Current backups
-are safe local recovery artifacts; exact archive replay and synchronization
-are still future work.
+are safe local recovery artifacts. Exact archive replay is available through
+the event-log importer; synchronization remains an explicit user action.
 
 ## The Components
 
@@ -190,8 +190,8 @@ These are global-inbox items because no project won scope resolution.
 ### 3. Attach repository directories
 
 ```sh
-todo project attach agents --path ~/Documents/Code/cdint/Agents
-todo project attach todo --path ~/Documents/Code/omnicortex/todo_app_project
+todo project attach agents --path ~/dev/cdint/Agents
+todo project attach todo --path ~/dev/exocortex/todo_app_project
 todo project attach research --path ~/dev/research/example
 todo project ls
 ```
@@ -314,12 +314,15 @@ syntax.
 todo export markdown --global --all --output all-tasks.md
 todo export json --global --all --output all-tasks.json
 todo export cbor --output all-events.cbor
+todo export log --output events.jsonl
 todo backup /path/to/new/todo-backup-2026-09-04
 ```
 
 Markdown is readable and partially restorable. JSON is a rich current view.
-CBOR preserves exact event bytes. Exact CBOR replay is not implemented, so none
-of these currently provides automatic multi-device synchronization.
+CBOR and the event log preserve exact event bytes. To synchronize v5 events,
+configure a dedicated Git checkout once with `todo sync init --repo PATH`, then
+run `todo sync` explicitly on each machine. The command imports remote events,
+publishes local events, and uses Git's union merge for concurrent appends.
 
 ## Global Parent with Project Children
 

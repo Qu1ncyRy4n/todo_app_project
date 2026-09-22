@@ -293,6 +293,7 @@ fn markdown_import_is_dry_runnable_and_exports_all_fidelity_tiers() {
 
     let markdown = harness.work.join("export.md");
     let json = harness.work.join("export.json");
+    let graph = harness.work.join("todo-graph.json");
     let cbor = harness.work.join("events.cbor");
     harness.ok(&[
         "--project",
@@ -312,6 +313,14 @@ fn markdown_import_is_dry_runnable_and_exports_all_fidelity_tiers() {
         "--output",
         json.to_str().unwrap(),
     ]);
+    harness.ok(&[
+        "export",
+        "graph",
+        "--global",
+        "--all",
+        "--output",
+        graph.to_str().unwrap(),
+    ]);
     harness.ok(&["export", "cbor", "--output", cbor.to_str().unwrap()]);
 
     assert!(
@@ -322,6 +331,11 @@ fn markdown_import_is_dry_runnable_and_exports_all_fidelity_tiers() {
     let json: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(json).unwrap()).unwrap();
     assert_eq!(json.as_array().unwrap().len(), 3);
+    let graph: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(graph).unwrap()).unwrap();
+    assert_eq!(graph["format"], "todo-graph-v1");
+    assert_eq!(graph["items"].as_array().unwrap().len(), 3);
+    assert_eq!(graph["projects"][0]["path"], "project/import");
     let bytes = std::fs::read(cbor).unwrap();
     let mut decoder = minicbor::Decoder::new(&bytes);
     assert!(decoder.array().unwrap().unwrap() >= 7);
@@ -389,4 +403,133 @@ fn backup_is_new_and_markdown_restorable_by_scope() {
     assert!(project.contains("Project root"));
     assert!(project.contains("  [x]"));
     assert!(project.contains("Completed child"));
+}
+
+#[test]
+fn exact_event_log_round_trips_between_independent_ledgers() {
+    let source = Harness::new();
+    source.ok(&["init"]);
+    let parent = source.ok(&["--project", "sync", "add", "Transfer exact events"]);
+    let parent = id_from_add(&parent);
+    let child = source.ok(&[
+        "--project",
+        "sync",
+        "add",
+        "Preserve note and hierarchy",
+        "--parent",
+        parent,
+        "--tag",
+        "topic/sync",
+    ]);
+    let child = id_from_add(&child);
+    source.ok(&["note", child, "This must not become a Markdown import"]);
+    source.ok(&["priority", child, "high"]);
+
+    let log = source.work.join("events.jsonl");
+    source.ok(&["export", "log", "--output", log.to_str().unwrap()]);
+    let first_line = std::fs::read_to_string(&log).unwrap();
+    assert!(first_line.contains("\"cid\""));
+    assert!(first_line.ends_with('\n'));
+
+    let target = Harness::new();
+    target.ok(&["init"]);
+    target.ok(&["import", "log", log.to_str().unwrap()]);
+    assert!(
+        target
+            .ok(&["--project", "sync", "ls", "--tree", "--all"])
+            .contains("Preserve note and hierarchy")
+    );
+    let shown = target.ok(&["show", child, "--history"]);
+    assert!(shown.contains("This must not become a Markdown import"));
+    assert!(shown.contains("priority: high"));
+    assert_eq!(
+        target.ok(&["import", "log", log.to_str().unwrap()]),
+        "Imported 0 exact events.\n"
+    );
+}
+
+fn git(cwd: &Path, args: &[&str]) {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {}: {}",
+        args.join(" "),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn explicit_git_sync_converges_two_independent_ledgers() {
+    let remote_root = tempfile::tempdir().unwrap();
+    let remote = remote_root.path().join("todo-ledger.git");
+    git(
+        remote_root.path(),
+        &["init", "--bare", remote.to_str().unwrap()],
+    );
+
+    let source = Harness::new();
+    let source_repo = source.work.join("sync-repo");
+    git(
+        source.work.as_path(),
+        &[
+            "clone",
+            remote.to_str().unwrap(),
+            source_repo.to_str().unwrap(),
+        ],
+    );
+    git(&source_repo, &["config", "user.name", "Todo Test"]);
+    git(
+        &source_repo,
+        &["config", "user.email", "todo-test@example.invalid"],
+    );
+    source.ok(&["init"]);
+    source.ok(&["sync", "init", "--repo", source_repo.to_str().unwrap()]);
+    let first = source.ok(&["add", "Created on source"]);
+    let first = id_from_add(&first);
+    source.ok(&["sync"]);
+
+    let target = Harness::new();
+    let target_repo = target.work.join("sync-repo");
+    git(
+        target.work.as_path(),
+        &[
+            "clone",
+            remote.to_str().unwrap(),
+            target_repo.to_str().unwrap(),
+        ],
+    );
+    git(&target_repo, &["config", "user.name", "Todo Test"]);
+    git(
+        &target_repo,
+        &["config", "user.email", "todo-test@example.invalid"],
+    );
+    target.ok(&["init"]);
+    target.ok(&["sync", "init", "--repo", target_repo.to_str().unwrap()]);
+    target.ok(&["sync"]);
+    assert!(target.ok(&["show", first]).contains("Created on source"));
+
+    let second = target.ok(&["add", "Created on target"]);
+    let second = id_from_add(&second);
+    source.ok(&["add", "Created while target was offline"]);
+    source.ok(&["sync"]);
+    target.ok(&["sync"]);
+    source.ok(&["sync"]);
+
+    assert!(source.ok(&["show", second]).contains("Created on target"));
+    assert!(
+        target
+            .ok(&["ls", "--all"])
+            .contains("Created while target was offline")
+    );
+    assert!(target_repo.join("ledger.toml").is_file());
+    assert!(target_repo.join("events.jsonl").is_file());
+    assert!(
+        std::fs::read_to_string(target_repo.join(".gitattributes"))
+            .unwrap()
+            .contains("events.jsonl merge=union")
+    );
 }

@@ -48,6 +48,22 @@ Enter the development shell with `nix develop`. The eventual installation
 command is `cargo install --path crates/todo-cli`; `todo init` initializes the
 global ledger and configuration rather than installing the executable.
 
+## Development shortcuts
+
+`./dev` runs the matching Cargo command inside the pinned Nix shell, so it also
+works when Rust is not globally installed:
+
+```sh
+./dev build
+./dev test
+./dev check
+./dev run -- sync --help
+./dev install
+```
+
+The enforced checks, lint policy, and intentionally deferred testing and
+error-safety work are documented in [development tooling and quality policy](docs/development.md).
+
 ## Dogfooding quick start
 
 ```text
@@ -66,6 +82,8 @@ todo cite <id> docs/architecture.md --label design
 todo done <id>
 todo show <id> --history
 todo backup /path/to/new/backup-directory
+todo sync init --repo /path/to/todo-ledger
+todo sync
 ```
 
 `todo backup` writes exact event bytes, a full JSON view, and Markdown files
@@ -94,7 +112,9 @@ project-scoped work, see [the weekly-notes tutorial](docs/weekly-notes-tutorial.
 
 Development proceeds from one working local global ledger, to interaction with
 one-to-three repositories, and then to personal/shared spaces and multiple
-users. See [DI-0007](DI/DI-0007-staged-global-to-shared-rollout.md).
+users. Exact v5 events can now be synchronized through an explicit Git
+checkout; each device keeps its database as a rebuildable local view. See
+[DI-0007](DI/DI-0007-staged-global-to-shared-rollout.md).
 
 The current PromiseGrid and `todo-report` comparison is recorded in
 [the integration review](docs/integration-review-2026-09-04.md). Direct Grid

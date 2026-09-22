@@ -4,8 +4,8 @@ use cid::Cid;
 use serde::Serialize;
 use std::{cmp::Ordering, collections::HashSet, path::Path, str::FromStr};
 use todo_core::{
-    Event, EventBuilder, EventKind, Item, ItemId, ItemState, NamespaceId, NamespaceKind,
-    NamespacePath, Priority,
+    Event, EventBuilder, EventKind, GRID_CBOR_CODEC, GridEnvelope, Item, ItemId, ItemState,
+    NamespaceId, NamespaceKind, NamespacePath, Priority, decode_envelope, event_protocol_v5_cid,
 };
 use turso::{Builder, Connection, Value};
 
@@ -109,6 +109,14 @@ pub struct HistoryEntry {
     pub recorded_at: String,
 }
 
+/// An immutable event as it was accepted by this ledger. The stored CID is
+/// carried separately because historical protocols need not use v5's codec.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EventRecord {
+    pub cid: Cid,
+    pub bytes: Vec<u8>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NamespaceEntry {
     pub id: NamespaceId,
@@ -131,10 +139,15 @@ pub struct NextItem {
 
 pub struct Ledger {
     connection: Connection,
+    actor_id: String,
 }
 
 impl Ledger {
     pub async fn open(path: &Path) -> Result<Self> {
+        Self::open_with_actor(path, "local").await
+    }
+
+    pub async fn open_with_actor(path: &Path, actor_id: impl Into<String>) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create database directory {}", parent.display()))?;
@@ -157,7 +170,10 @@ impl Ledger {
             }
         };
         let connection = database.connect().context("connect Turso database")?;
-        let ledger = Self { connection };
+        let ledger = Self {
+            connection,
+            actor_id: actor_id.into(),
+        };
         ledger.migrate().await?;
         Ok(ledger)
     }
@@ -664,7 +680,7 @@ impl Ledger {
         let previous = match column {
             "due_on" => current.item.due_on,
             "defer_until" => current.item.defer_until,
-            _ => unreachable!("date columns are internal constants"),
+            _ => bail!("invalid internal date field {column}"),
         };
         if previous == next {
             return Ok(current);
@@ -1080,7 +1096,7 @@ impl Ledger {
                 "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until FROM items WHERE state NOT IN ('done', 'canceled') ORDER BY id",
                 Vec::<Value>::new(),
             ),
-            _ => unreachable!("project IDs exist exactly for project scopes"),
+            _ => bail!("invalid resolved item scope"),
         };
         let mut rows = self.connection.query(sql, params).await?;
         let mut items = Vec::new();
@@ -1214,22 +1230,88 @@ impl Ledger {
         Ok(result)
     }
 
-    pub async fn event_envelopes(&self) -> Result<Vec<Vec<u8>>> {
+    pub async fn event_records(&self) -> Result<Vec<EventRecord>> {
         let mut rows = self
             .connection
             .query(
-                "SELECT envelope FROM events ORDER BY recorded_at, event_id",
+                "SELECT cid, envelope FROM events ORDER BY recorded_at, event_id",
                 (),
             )
             .await?;
         let mut result = Vec::new();
         while let Some(row) = rows.next().await? {
-            match row.get_value(0)? {
-                Value::Blob(bytes) => result.push(bytes),
+            match row.get_value(1)? {
+                Value::Blob(bytes) => result.push(EventRecord {
+                    cid: Cid::from_str(&text(&row, 0)?)?,
+                    bytes,
+                }),
                 _ => bail!("event envelope column is not a blob"),
             }
         }
         Ok(result)
+    }
+
+    pub async fn event_envelopes(&self) -> Result<Vec<Vec<u8>>> {
+        Ok(self
+            .event_records()
+            .await?
+            .into_iter()
+            .map(|record| record.bytes)
+            .collect())
+    }
+
+    /// Admit v5 events exactly as received, then derive all views from the
+    /// canonical event order. This is the boundary used by local interchange
+    /// and later transport adapters.
+    pub async fn import_events(&self, records: &[EventRecord]) -> Result<usize> {
+        let mut events = Vec::new();
+        for record in records {
+            if record.cid.codec() != GRID_CBOR_CODEC {
+                bail!("event {} is not replayable by the v5 ledger", record.cid);
+            }
+            let envelope = GridEnvelope::parse(&record.bytes).context("validate Grid envelope")?;
+            if envelope.protocol_cid() != &event_protocol_v5_cid() {
+                bail!("event {} uses an unknown protocol", record.cid);
+            }
+            let event = decode_envelope(&record.bytes).context("decode v5 event")?;
+            if event.cid != record.cid {
+                bail!("event bytes do not match declared CID {}", record.cid);
+            }
+            events.push(event);
+        }
+        events.sort_by(|left, right| {
+            left.payload
+                .recorded_at
+                .cmp(&right.payload.recorded_at)
+                .then_with(|| left.payload.event_id.cmp(&right.payload.event_id))
+        });
+        self.transaction_begin().await?;
+        let mut inserted = 0;
+        let result = async {
+            for event in &events {
+                if !self.event_exists(&event.cid).await? {
+                    self.insert_event(event).await?;
+                    inserted += 1;
+                }
+            }
+            self.rebuild_views_in_transaction().await?;
+            self.connection
+                .execute(
+                    "INSERT INTO meta(key, value) VALUES ('schema_version', '2') ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (),
+                )
+                .await?;
+            Ok(())
+        }
+        .await;
+        self.transaction_finish(result).await?;
+        Ok(inserted)
+    }
+
+    pub async fn rebuild_views(&self) -> Result<()> {
+        self.transaction_begin().await?;
+        let result = self.rebuild_views_in_transaction().await;
+        self.transaction_finish(result).await
     }
 
     pub async fn namespaces(&self) -> Result<Vec<NamespaceEntry>> {
@@ -1374,7 +1456,11 @@ impl Ledger {
 
     async fn event(&self, builder: EventBuilder) -> Result<Event> {
         let parent = self.head().await?;
-        builder.parent(parent).build().context("build event")
+        builder
+            .parent(parent)
+            .actor(&self.actor_id)
+            .build()
+            .context("build event")
     }
 
     async fn head(&self) -> Result<Option<Cid>> {
@@ -1411,6 +1497,168 @@ impl Ledger {
                 Value::Blob(event.bytes.clone()),
             ],
         ).await?;
+        Ok(())
+    }
+
+    async fn event_exists(&self, cid: &Cid) -> Result<bool> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT 1 FROM events WHERE cid = ?1 LIMIT 1",
+                values([cid.to_string()]),
+            )
+            .await?;
+        Ok(rows.next().await?.is_some())
+    }
+
+    async fn rebuild_views_in_transaction(&self) -> Result<()> {
+        for table in [
+            "notes",
+            "citations",
+            "item_namespaces",
+            "item_dependencies",
+            "namespace_aliases",
+            "items",
+            "namespaces",
+        ] {
+            self.connection
+                .execute(&format!("DELETE FROM {table}"), ())
+                .await?;
+        }
+        self.connection
+            .execute("DELETE FROM meta WHERE key = 'head'", ())
+            .await?;
+        let records = self.event_records().await?;
+        for record in records {
+            if record.cid.codec() != GRID_CBOR_CODEC {
+                bail!(
+                    "cannot rebuild views containing legacy event {}",
+                    record.cid
+                );
+            }
+            let event = decode_envelope(&record.bytes)?;
+            if event.cid != record.cid {
+                bail!("stored event bytes do not match CID {}", record.cid);
+            }
+            self.apply_event(&event).await?;
+            self.set_head(&event.cid).await?;
+        }
+        Ok(())
+    }
+
+    async fn apply_event(&self, event: &Event) -> Result<()> {
+        let value = |name: &str| {
+            event
+                .payload
+                .data
+                .get(name)
+                .map(String::as_str)
+                .ok_or_else(|| anyhow!("event {} is missing data field {name}", event.cid))
+        };
+        let link = |relation: &str| {
+            event
+                .payload
+                .links
+                .iter()
+                .find(|link| link.relation == relation)
+                .map(|link| link.target.as_str())
+                .ok_or_else(|| anyhow!("event {} is missing {relation} link", event.cid))
+        };
+        match &event.payload.kind {
+            EventKind::NamespaceCreated => {
+                let id = NamespaceId::parse(&event.payload.subject_id)?;
+                let kind: NamespaceKind = value("kind")?.parse()?;
+                let path: NamespacePath = value("path")?.parse()?;
+                self.connection.execute(
+                    "INSERT INTO namespaces(id, kind, canonical_path) VALUES (?1, ?2, ?3)",
+                    values([id.to_string(), kind.to_string(), path.to_string()]),
+                ).await?
+            }
+            EventKind::NamespaceRenamed => {
+                let id = NamespaceId::parse(&event.payload.subject_id)?;
+                self.connection.execute(
+                    "INSERT INTO namespace_aliases(namespace_id, path) VALUES (?1, ?2)",
+                    values([id.to_string(), value("from")?.to_owned()]),
+                ).await?;
+                self.connection.execute(
+                    "UPDATE namespaces SET canonical_path = ?1 WHERE id = ?2",
+                    values([value("to")?.to_owned(), id.to_string()]),
+                ).await?
+            }
+            EventKind::ItemCreated => {
+                let id = ItemId::parse(&event.payload.subject_id)?;
+                let state: ItemState = value("state")?.parse()?;
+                self.connection.execute(
+                    "INSERT INTO items(id, title, state, project_id, parent_id) VALUES (?1, ?2, ?3, ?4, NULL)",
+                    vec![
+                        Value::Text(id.to_string()),
+                        Value::Text(value("title")?.to_owned()),
+                        Value::Text(state.to_string()),
+                        event.payload.project_id.map_or(Value::Null, |id| Value::Text(id.to_string())),
+                    ],
+                ).await?
+            }
+            EventKind::ItemStateChanged => self.connection.execute(
+                "UPDATE items SET state = ?1 WHERE id = ?2",
+                values([value("to")?.to_owned(), event.payload.subject_id.clone()]),
+            ).await?,
+            EventKind::ItemNoteAdded => self.connection.execute(
+                "INSERT INTO notes(event_cid, item_id, body, recorded_at) VALUES (?1, ?2, ?3, ?4)",
+                values([event.cid.to_string(), event.payload.subject_id.clone(), value("note")?.to_owned(), event.payload.recorded_at.to_rfc3339()]),
+            ).await?,
+            EventKind::ItemCitationAdded => self.connection.execute(
+                "INSERT INTO citations(event_cid, item_id, target, label, recorded_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                vec![
+                    Value::Text(event.cid.to_string()), Value::Text(event.payload.subject_id.clone()),
+                    Value::Text(value("target")?.to_owned()),
+                    event.payload.data.get("label").map_or(Value::Null, |label| Value::Text(label.clone())),
+                    Value::Text(event.payload.recorded_at.to_rfc3339()),
+                ],
+            ).await?,
+            EventKind::ItemParentSet => self.connection.execute(
+                "UPDATE items SET parent_id = ?1 WHERE id = ?2",
+                values([link("parent")?.to_owned(), event.payload.subject_id.clone()]),
+            ).await?,
+            EventKind::ItemTitleChanged => self.connection.execute(
+                "UPDATE items SET title = ?1 WHERE id = ?2",
+                values([value("to")?.to_owned(), event.payload.subject_id.clone()]),
+            ).await?,
+            EventKind::ItemParentCleared => self.connection.execute(
+                "UPDATE items SET parent_id = NULL WHERE id = ?1",
+                values([event.payload.subject_id.clone()]),
+            ).await?,
+            EventKind::ItemProjectChanged => self.connection.execute(
+                "UPDATE items SET project_id = ?1 WHERE id = ?2",
+                vec![event.payload.project_id.map_or(Value::Null, |id| Value::Text(id.to_string())), Value::Text(event.payload.subject_id.clone())],
+            ).await?,
+            EventKind::ItemPriorityChanged => self.connection.execute(
+                "UPDATE items SET priority = ?1 WHERE id = ?2",
+                values([value("to")?.to_owned(), event.payload.subject_id.clone()]),
+            ).await?,
+            EventKind::ItemDueDateChanged | EventKind::ItemDeferDateChanged => {
+                let column = if matches!(&event.payload.kind, EventKind::ItemDueDateChanged) { "due_on" } else { "defer_until" };
+                self.connection.execute(
+                    &format!("UPDATE items SET {column} = ?1 WHERE id = ?2"),
+                    vec![if value("to")?.is_empty() { Value::Null } else { Value::Text(value("to")?.to_owned()) }, Value::Text(event.payload.subject_id.clone())],
+                ).await?
+            }
+            EventKind::ItemDependencyAdded => self.connection.execute(
+                "INSERT INTO item_dependencies(item_id, blocker_id) VALUES (?1, ?2)",
+                values([event.payload.subject_id.clone(), link("blocked-by")?.to_owned()]),
+            ).await?,
+            EventKind::ItemDependencyRemoved => self.connection.execute(
+                "DELETE FROM item_dependencies WHERE item_id = ?1 AND blocker_id = ?2",
+                values([event.payload.subject_id.clone(), link("unblocked-by")?.to_owned()]),
+            ).await?,
+            EventKind::NamespaceAssigned => self.connection.execute(
+                "INSERT INTO item_namespaces(item_id, namespace_id) VALUES (?1, ?2)",
+                values([event.payload.subject_id.clone(), link("namespace")?.to_owned()]),
+            ).await?,
+            EventKind::NamespaceRemoved => self.connection.execute(
+                "DELETE FROM item_namespaces WHERE item_id = ?1 AND namespace_id = ?2",
+                values([event.payload.subject_id.clone(), link("namespace")?.to_owned()]),
+            ).await?,
+        };
         Ok(())
     }
 
@@ -1785,5 +2033,49 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    #[tokio::test]
+    async fn exact_v5_events_rebuild_an_independent_ledger() {
+        let source = ledger().await;
+        let project: NamespacePath = "project/sync".parse().unwrap();
+        let tag: NamespacePath = "topic/transport".parse().unwrap();
+        let parent = source
+            .add_item("Synchronize ledger", Some(&project))
+            .await
+            .unwrap();
+        let child = source
+            .add_item_with(
+                "Validate replay",
+                Some(&project),
+                std::slice::from_ref(&tag),
+                Some(&parent.item.id.to_string()),
+            )
+            .await
+            .unwrap();
+        source
+            .set_priority(&child.item.id.to_string(), Priority::High)
+            .await
+            .unwrap();
+        source
+            .add_note(&child.item.id.to_string(), "Exact bytes, local views")
+            .await
+            .unwrap();
+        source
+            .add_dependency(&child.item.id.to_string(), &parent.item.id.to_string())
+            .await
+            .unwrap();
+
+        let records = source.event_records().await.unwrap();
+        let target = ledger().await;
+        assert_eq!(target.import_events(&records).await.unwrap(), records.len());
+        assert_eq!(target.import_events(&records).await.unwrap(), 0);
+        target.rebuild_views().await.unwrap();
+
+        let source_items = source.list_items(ItemScope::All, true).await.unwrap();
+        let target_items = target.list_items(ItemScope::All, true).await.unwrap();
+        assert_eq!(target_items, source_items);
+        assert_eq!(target.notes(child.item.id).await.unwrap().len(), 1);
+        assert_eq!(target.event_records().await.unwrap(), records);
     }
 }

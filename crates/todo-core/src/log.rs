@@ -1,6 +1,6 @@
 //! Append-only JSONL event log (DI-0007, docs/protocols/todo-ledger-log-v1).
 
-use crate::grid_cbor_cid;
+use crate::{GRID_CBOR_CODEC, RAW_CODEC, grid_cbor_cid, raw_cid};
 use cid::Cid;
 use serde_json::Value;
 
@@ -15,9 +15,14 @@ pub struct LogLine {
 pub struct LogLineError(String);
 
 impl LogLine {
-    pub fn encode(bytes: &[u8]) -> String {
-        let cid = grid_cbor_cid(bytes);
-        format!("{{\"cid\":\"{cid}\",\"bytes\":\"{}\"}}", hex(bytes))
+    pub fn encode(cid: &Cid, bytes: &[u8]) -> Result<String, LogLineError> {
+        if event_cid(bytes, cid.codec()) != Some(*cid) {
+            return Err(LogLineError(format!("bytes do not hash to cid {cid}")));
+        }
+        Ok(format!(
+            "{{\"cid\":\"{cid}\",\"bytes\":\"{}\"}}",
+            hex(bytes)
+        ))
     }
 
     pub fn parse(line: &str) -> Result<Self, LogLineError> {
@@ -25,14 +30,22 @@ impl LogLine {
             serde_json::from_str(line).map_err(|error| LogLineError(error.to_string()))?;
         let cid_text = field(&value, "cid")?;
         let bytes_text = field(&value, "bytes")?;
-        let cid = cid_text
+        let cid: Cid = cid_text
             .parse()
             .map_err(|error| LogLineError(format!("invalid cid {cid_text:?}: {error}")))?;
         let bytes = unhex(bytes_text)?;
-        if grid_cbor_cid(&bytes) != cid {
+        if event_cid(&bytes, cid.codec()) != Some(cid) {
             return Err(LogLineError(format!("bytes do not hash to cid {cid_text}")));
         }
         Ok(Self { cid, bytes })
+    }
+}
+
+fn event_cid(bytes: &[u8], codec: u64) -> Option<Cid> {
+    match codec {
+        GRID_CBOR_CODEC => Some(grid_cbor_cid(bytes)),
+        RAW_CODEC => Some(raw_cid(bytes)),
+        _ => None,
     }
 }
 
@@ -77,7 +90,8 @@ mod tests {
             .build()
             .unwrap()
             .bytes;
-        let parsed = LogLine::parse(&LogLine::encode(&bytes)).unwrap();
+        let cid = crate::grid_cbor_cid(&bytes);
+        let parsed = LogLine::parse(&LogLine::encode(&cid, &bytes).unwrap()).unwrap();
         assert_eq!(parsed.bytes, bytes);
         assert_eq!(
             LogLine::parse(

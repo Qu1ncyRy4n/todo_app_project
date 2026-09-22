@@ -35,11 +35,12 @@ one universal target multicodec. Selected.
 
 ## Failure and concurrency
 
-Building validates generic framing before an event is accepted. Import and
-replay remain future work, so this change does not silently interpret unknown
-pCIDs or accept untrusted external bytes. The store continues to serialize one
-local writer through its existing transaction and head until a later timeline
-decision supersedes that model.
+Building and v4 replay validate generic framing before an event is accepted.
+The replay path recognizes only the v4 pCID and retains v1-v3 records without
+reinterpreting them, so it does not silently accept unknown pCIDs or relabel
+legacy evidence. The store continues to serialize one local writer through its
+existing transaction and head until a later timeline decision supersedes that
+model.
 
 ## Migration and scale
 
@@ -55,4 +56,3 @@ Select route C. Add a protocol-neutral Rust Grid envelope module, verify it
 against the private cross-language conformance vectors, and make all newly
 created todo events v4 Grid-CBOR objects. Do not claim public PromiseGrid
 conformance while public adoption remains open.
-

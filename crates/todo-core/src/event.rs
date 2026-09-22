@@ -17,6 +17,15 @@ const PROTOCOL_V2_BYTES: &[u8] = include_bytes!("../../../docs/protocols/todo-le
 #[cfg(test)]
 const PROTOCOL_V3_BYTES: &[u8] = include_bytes!("../../../docs/protocols/todo-ledger-event-v3.md");
 const PROTOCOL_V4_BYTES: &[u8] = include_bytes!("../../../docs/protocols/todo-ledger-event-v4.md");
+const PROTOCOL_V5_BYTES: &[u8] = include_bytes!("../../../docs/protocols/todo-ledger-event-v5.md");
+
+pub fn event_protocol_v4_cid() -> Cid {
+    raw_cid(PROTOCOL_V4_BYTES)
+}
+
+pub fn event_protocol_v5_cid() -> Cid {
+    raw_cid(PROTOCOL_V5_BYTES)
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum EventKind {
@@ -161,6 +170,11 @@ impl EventBuilder {
         self
     }
 
+    pub fn actor(mut self, actor_id: impl Into<String>) -> Self {
+        self.payload.actor_id = actor_id.into();
+        self
+    }
+
     pub fn data(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.payload.data.insert(key.into(), value.into());
         self
@@ -177,7 +191,7 @@ impl EventBuilder {
     pub fn build(self) -> Result<Event, EventEncodeError> {
         // All new writes use the v4 Grid-CBOR codec. Historical v1-v3 rows are
         // never rebuilt or relabeled. Source: DI-0008.
-        let protocol_cid = raw_cid(PROTOCOL_V4_BYTES);
+        let protocol_cid = event_protocol_v5_cid();
         let bytes = encode_envelope(&protocol_cid, self.parent.as_ref(), &self.payload)?;
         let cid = grid_cbor_cid(&bytes);
         Ok(Event {
@@ -195,6 +209,8 @@ pub enum EventEncodeError {
     Encode(#[from] minicbor::encode::Error<std::convert::Infallible>),
     #[error("build Grid envelope: {0}")]
     Grid(#[from] GridError),
+    #[error("event has too many map or array entries to encode")]
+    TooManyEntries,
 }
 
 #[derive(Debug, Error)]
@@ -368,11 +384,15 @@ fn encode_envelope(
     };
     body.str("recorded_at")?
         .str(&payload.recorded_at.to_rfc3339())?;
-    body.str("data")?.map(payload.data.len() as u64)?;
+    let data_len =
+        u64::try_from(payload.data.len()).map_err(|_| EventEncodeError::TooManyEntries)?;
+    body.str("data")?.map(data_len)?;
     for (key, value) in &payload.data {
         body.str(key)?.str(value)?;
     }
-    body.str("links")?.array(payload.links.len() as u64)?;
+    let link_len =
+        u64::try_from(payload.links.len()).map_err(|_| EventEncodeError::TooManyEntries)?;
+    body.str("links")?.array(link_len)?;
     for link in &payload.links {
         body.map(2)?
             .str("relation")?
@@ -392,7 +412,7 @@ fn encode_envelope(
 mod tests {
     use super::{
         EventBuilder, EventKind, PROTOCOL_V1_BYTES, PROTOCOL_V2_BYTES, PROTOCOL_V3_BYTES,
-        PROTOCOL_V4_BYTES,
+        PROTOCOL_V4_BYTES, PROTOCOL_V5_BYTES,
     };
     use crate::{GRID_CBOR_CODEC, GRID_TAG, GridEnvelope, ItemId, raw_cid};
     use chrono::DateTime;
@@ -426,7 +446,7 @@ mod tests {
 
         let parsed = GridEnvelope::parse(&first.bytes).unwrap();
         assert_eq!(parsed.slot_count(), 3);
-        assert_eq!(parsed.protocol_cid(), &raw_cid(PROTOCOL_V4_BYTES));
+        assert_eq!(parsed.protocol_cid(), &raw_cid(PROTOCOL_V5_BYTES));
         assert_eq!(parsed.cid(), first.cid);
     }
 
@@ -445,7 +465,7 @@ mod tests {
     }
 
     #[test]
-    fn v4_event_can_extend_a_legacy_raw_codec_head() {
+    fn v5_event_can_extend_a_legacy_raw_codec_head() {
         let legacy_head = raw_cid(b"legacy event bytes");
         let event = EventBuilder::new(EventKind::ItemNoteAdded, "one")
             .parent(Some(legacy_head.to_owned()))
@@ -470,6 +490,7 @@ mod tests {
         );
         assert_ne!(raw_cid(PROTOCOL_V2_BYTES), raw_cid(PROTOCOL_V3_BYTES));
         assert_ne!(raw_cid(PROTOCOL_V3_BYTES), raw_cid(PROTOCOL_V4_BYTES));
+        assert_ne!(raw_cid(PROTOCOL_V4_BYTES), raw_cid(PROTOCOL_V5_BYTES));
         assert_eq!(
             raw_cid(PROTOCOL_V4_BYTES).to_string(),
             "bafkreie4yxx5msmhvfcspqoh55v5mwt3htr7sc34yx54igg5usx2yiylie"
