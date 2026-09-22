@@ -1,4 +1,43 @@
 {
-  "output_path": "/home/qix/dev/omnicortex/todo_app_project/AGENTS.md",
-  "sha256": "b86f84f339c03cbf9a372ed00e4c1ed510e30adaaf96453ace9fff951f033023"
+  "output_path": "",
+  "sha256": "",
+  "outputs": {
+    "/home/qix/dev/exocortex/todo_app_project/.agents/skills": {
+      "kind": "directory",
+      "files": {
+        "README.md": "12a950ee3170bc10da023ba8c30f009fb0b64955a5d828fbc5cf9632c34499d4",
+        "cdint-grid/README.md": "4a0ee1fc03e435b2e6236850e766116c3bd1bcd5fb27f5944f2f4f0663a7516b",
+        "cdint-grid/commit/SKILL.md": "54f65ce7112bd011c1a4d85d4c1277163054ea70e7a1965912afd691b9795b22",
+        "cdint-grid/consensus/SKILL.md": "95a4059dbcbe6b08b174b9f6f056e89ccdfbdbc45db4ca41e6d1a71b0b037196",
+        "cdint-grid/decision-first-change/SKILL.md": "f0f750a7e460cb75447f4ed85163b4edbac90722f067ef8b3c9b7a3524823f44",
+        "cdint-grid/drain-inbox/SKILL.md": "aa7689073ce25d44b95f68c2f4573f18fb2b4ac5ea16775947ecfb47e993bd0e",
+        "cdint-grid/explain-architecture/SKILL.md": "15fc750f03716907fd014c62d2e32f02a7a3b4bccd9c19a5f4c6d6312d0af67d",
+        "cdint-grid/getq/SKILL.md": "65223b6df867448633fb291f3e1b97be6fddddfe1b1a9c8768706e8cea9cc827",
+        "cdint-grid/handback/SKILL.md": "ead675537c525fd46b5bb5156adc80cb7b47cce56ee19877277d83dcf3c4c280",
+        "cdint-grid/handoff/SKILL.md": "a7858ad2a6703cff7bf756f22b4ddac06d43a9836ce407d29de5fcc1494eef54",
+        "cdint-grid/load-project-context/SKILL.md": "362e1e9fff0e60262339af7c5f700e6be8c21402f79b18ab48807c4f383f0eaf",
+        "cdint-grid/newtree/SKILL.md": "b5e21c1e18e227a1329dfc400baaca3e2803af4a6abe451965ec8b4e32df58db",
+        "cdint-grid/next10/SKILL.md": "9e71b5edf4a12012df5331ef258cdb7510e400fb05c8ffa19ce0b6c2960c1509",
+        "cdint-grid/putq/SKILL.md": "cbac011f215a857c2d60e2708302e6ba630a9082c8cc8d63fe36915c015da962",
+        "cdint-grid/resume/SKILL.md": "18ccf4f54ab5e6e3aeee8b108b4871369a8e658d37442ee07da7a782c0149661",
+        "cdint-grid/retire/SKILL.md": "705bc557b19e267a6605ad73e8ea2a0785d15273a108fe13551f742d4b5d282f",
+        "cdint-grid/review-against-ninik/SKILL.md": "c1e1abe4084db21ce510ab7062a11a192f3e3ad329e367ea47230d86f1d1b8d5",
+        "cdint-grid/run-thought-experiment/SKILL.md": "25a67648605d30e0f98a814bdea90d8ebbc84688cd6085155680989ba7925367",
+        "cdint-grid/update-dobab/SKILL.md": "852f4cbc0c16261f04b3e979035f9ce03a9e8fcf77a842aa7a43a3d7fec87d07",
+        "cdint-grid/upgrade/SKILL.md": "7e73acebc56cefd70e73cdd722051e68b5b8a6f511aa62126d91f655220bd0dc",
+        "edit-thought-experiment/SKILL.md": "f29399920897d5532df1d225082143c0f3ecc02e6022ef8751fb81fb161d9c33",
+        "git-change-finalization/SKILL.md": "cef0d454b798883b724be259be1e8aee9362f2edf90af50bcc491c63d7b38b77",
+        "maintain-documentation/SKILL.md": "860fd2d4f423e8ea7c056458c1190422f350898f004c4d6d9373b187fbf0f562",
+        "nix-development/SKILL.md": "5c301b0dd7538c5a20e3fb1d0fec250f55cd925538dee2fe377b37df479b59ab",
+        "preserve-comment-intent/SKILL.md": "72f0d5fbc5e25a1e75cf246a9a21612956797f2d3c8eee70a729d16a144fc356",
+        "provenance.md": "4a23562ec5e832cffad45d4c7b96c8ae4e6fbff24010334a3db7904b09d5dad2",
+        "rust-development/SKILL.md": "97a84de09c7881bc11475e61e805f0dd69585597f424700cd055d28d1135c2ce",
+        "shell-command-failures/SKILL.md": "99cb7609c5afae5be0dbadd746622f50dc3758bbc016ffc13bbc995c236e686a"
+      }
+    },
+    "/home/qix/dev/exocortex/todo_app_project/AGENTS.md": {
+      "kind": "file",
+      "sha256": "b3286db59308e8a6a9f0a2693ebb5978560dfefcc5e659f8147958d34d99bd75"
+    }
+  }
 }
