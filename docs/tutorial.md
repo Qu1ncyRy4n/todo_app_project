@@ -6,15 +6,24 @@ ledger records them.
 
 ## v0.1: Capture, organize, and preserve context
 
-### 1. Install and initialize
+### 1. Install and initialize an isolated dogfooding ledger
 
-```text
-cargo install --path crates/todo-cli
+For a restart, choose new, empty directories instead of removing or reusing an
+existing ledger. These environment variables apply only to the current shell:
+
+```sh
+./dev install
+export PATH="$HOME/.cargo/bin:$PATH"
+export TODO_CONFIG_HOME="$HOME/todo-dogfood/config"
+export TODO_DATA_HOME="$HOME/todo-dogfood/data"
 todo init
 ```
 
-Installation creates the executable. `todo init` separately creates one global
-ledger and its configuration. Items are not stored in each source repository.
+`./dev install` creates the executable. `todo init` separately creates one
+global ledger and its configuration in the selected directories. Items are not
+stored in each source repository. Keep these exports in your dogfooding shell or
+shell profile; omit them only when you intentionally want the normal default
+ledger locations.
 
 ### 2. Attach working directories to project scopes
 
@@ -36,12 +45,11 @@ todo ls --global    # open items across every scope
 
 ```text
 todo add "Trace protocol SID encoding" --tag topic/promisegrid/protocol-sid
-todo ongoing <id>
+todo start <id>
 todo done <id>
 ```
 
-New items start in `inbox`. `ongoing` is an alias for `start`; both store the
-single state `active`.
+New items start in `inbox`. `start` records the state `active`.
 
 ### 4. Build structure without losing source context
 
@@ -195,8 +203,8 @@ commands to recover titles, lifecycle states, project scopes, and hierarchy in
 a clean ledger. IDs and richer facts are retained as evidence in JSON/CBOR but
 are not yet restored by the Markdown path.
 
-New events use the Grid-CBOR codec while existing v1-v3 event bytes and CIDs
-remain valid. This is an event-format transition, not a database reset.
+New events use the v5 Grid-CBOR protocol while existing v1-v4 event bytes and
+CIDs remain valid. This is an event-format transition, not a database reset.
 
 ## v0.4: Synchronize exact v5 events through Git
 

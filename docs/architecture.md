@@ -30,7 +30,7 @@ grid([42(pCID), parents, payload, proof])
 ```
 
 The proof slot remains `null`, and semantic validity is checked before an event
-is persisted. Historical v1-v3 events retain their exact bytes and raw-codec
+is persisted. Historical v1-v4 events retain their exact bytes and original
 CIDs. New v5 events use the registered Grid-CBOR codec (`0x1027`) and generic
 envelope validation from DI-0008. The payload protocols are frozen,
 content-addressed files under `docs/protocols/`.
@@ -48,7 +48,7 @@ inbox -> active -> done
 done/canceled -> active (reopen)
 ```
 
-`ongoing` is a CLI alias for `active`. Capturing an item is not making a
+`start` moves an item to `active`. Capturing an item is not making a
 Promise-Theory promise. Promise, observation, evidence-policy, delegation, and
 multi-observer assessment commands remain future protocol families.
 

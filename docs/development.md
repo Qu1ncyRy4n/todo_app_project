@@ -18,7 +18,8 @@ Use focused crate tests while iterating, then run both commands before completin
 cross-crate, CLI, protocol, or persistence work.
 
 The enforced Clippy restrictions prevent compiled placeholder and panic paths,
-unreachable macros, and unchecked `as` conversions:
+unchecked `unwrap`/`expect`, unreachable macros, unchecked indexing or slicing,
+and unchecked `as` conversions:
 
 ```toml
 [workspace.lints.clippy]
@@ -27,6 +28,9 @@ todo = "deny"
 unimplemented = "deny"
 unreachable = "deny"
 as_conversions = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
+indexing_slicing = "deny"
 ```
 
 Each crate inherits the workspace lint profile. Checked `TryFrom` conversions
@@ -42,11 +46,10 @@ requirements:
 - Test confidence: add property tests and failure-injection tests when a
   concrete invariant is at risk, especially for event encoding, replay,
   transactional imports, and Git synchronization convergence.
-- Error safety: audit production uses of `unwrap`, `expect`, and direct
-  indexing before enabling `clippy::unwrap_used`, `clippy::expect_used`, or
-  `clippy::indexing_slicing`. Replace fallible paths with typed errors; retain a
-  narrow, documented exception only where an invariant is established locally.
-  Test fixtures may need separately scoped exceptions for readable assertions.
+- Error safety: retain narrow, documented exceptions only where an invariant is
+  established locally. Test fixtures have separately scoped exceptions for
+  readable setup and assertions. Revisit those exceptions when test helpers or
+  assertion APIs make the intent clearer.
 - Supply-chain and dependency checks: evaluate `cargo-deny`, `cargo-audit`, and
   unused-dependency tooling when CI or release policy introduces that need.
 - Developer workflow tools: add `direnv`, Devenv, watch tools, benchmarks, or

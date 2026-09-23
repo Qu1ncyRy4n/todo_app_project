@@ -168,7 +168,8 @@ context, lifecycle, focus, repair, and interchange.
 ### 1. Install and initialize the one global ledger
 
 ```sh
-cargo install --path crates/todo-cli
+./dev install
+export PATH="$HOME/.cargo/bin:$PATH"
 todo init
 ```
 

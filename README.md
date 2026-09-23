@@ -44,9 +44,9 @@ TE / DR / DI -> domain API -> tests -> Turso store -> tests -> CLI -> tests
              -> dogfood handoff -> feedback -> repeat
 ```
 
-Enter the development shell with `nix develop`. The eventual installation
-command is `cargo install --path crates/todo-cli`; `todo init` initializes the
-global ledger and configuration rather than installing the executable.
+Enter the development shell with `nix develop`. Install the CLI through
+`./dev install`; `todo init` initializes the global ledger and configuration
+rather than installing the executable.
 
 ## Development shortcuts
 
@@ -66,14 +66,15 @@ error-safety work are documented in [development tooling and quality policy](doc
 
 ## Dogfooding quick start
 
-```text
-cargo install --path crates/todo-cli
+```sh
+./dev install
+export PATH="$HOME/.cargo/bin:$PATH"
 todo init
 todo project attach todo --path /path/to/this/project
 
 todo add "Dogfood the first workflow" --tag goal/todo/v0_1
 todo ls --tree
-todo ongoing <id>
+todo start <id>
 todo priority <id> high
 todo due <id> 2026-09-04
 todo next --explain
@@ -103,7 +104,7 @@ Hierarchical namespace examples include `project/todo`, `goal/todo/v0_1`,
 an alias.
 
 See [the versioned tutorial](docs/tutorial.md) for complete capture, focus, and
-backup workflows.
+backup workflows, including a safe isolated ledger for a fresh dogfooding run.
 
 For a practical mapping from weekly Obsidian task notes into global and
 project-scoped work, see [the weekly-notes tutorial](docs/weekly-notes-tutorial.md).
