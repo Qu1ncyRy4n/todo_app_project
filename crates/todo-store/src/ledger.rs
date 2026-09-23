@@ -226,10 +226,11 @@ impl Ledger {
             return Ok(existing);
         }
         let id = NamespaceId::new();
+        let kind = path.kind()?;
         let event = self
             .event(
                 EventBuilder::new(EventKind::NamespaceCreated, id.to_string())
-                    .data("kind", path.kind().to_string())
+                    .data("kind", kind.to_string())
                     .data("path", path.to_string()),
             )
             .await?;
@@ -239,7 +240,7 @@ impl Ledger {
             self.connection
                 .execute(
                     "INSERT INTO namespaces(id, kind, canonical_path) VALUES (?1, ?2, ?3)",
-                    values([id.to_string(), path.kind().to_string(), path.to_string()]),
+                    values([id.to_string(), kind.to_string(), path.to_string()]),
                 )
                 .await?;
             self.set_head(&event.cid).await
@@ -248,7 +249,7 @@ impl Ledger {
         self.transaction_finish(result).await?;
         Ok(NamespaceEntry {
             id,
-            kind: path.kind(),
+            kind,
             path: path.clone(),
         })
     }
@@ -262,11 +263,12 @@ impl Ledger {
             .namespace_by_path(current)
             .await?
             .ok_or_else(|| anyhow!("unknown namespace {current}"))?;
-        if namespace.kind != next.kind() {
+        let next_kind = next.kind()?;
+        if namespace.kind != next_kind {
             bail!(
                 "cannot change namespace kind from {} to {}",
                 namespace.kind,
-                next.kind()
+                next_kind
             );
         }
         if self.namespace_by_path(next).await?.is_some() {
@@ -357,6 +359,7 @@ impl Ledger {
             .data("state", ItemState::Inbox.to_string())
             .build()?;
         previous = Some(created.cid);
+        let mut head = created.cid;
         events.push(created);
         for namespace in &namespace_entries {
             let event = EventBuilder::for_item(EventKind::NamespaceAssigned, id)
@@ -365,6 +368,7 @@ impl Ledger {
                 .link("namespace", namespace.id.to_string())
                 .build()?;
             previous = Some(event.cid);
+            head = event.cid;
             events.push(event);
         }
         if let Some(parent) = &parent {
@@ -373,10 +377,9 @@ impl Ledger {
                 .parent(previous)
                 .link("parent", parent.item.id.to_string())
                 .build()?;
-            previous = Some(event.cid);
+            head = event.cid;
             events.push(event);
         }
-        let head = previous.expect("item creation always emits an event");
 
         self.transaction_begin().await?;
         let result = async {
@@ -456,8 +459,11 @@ impl Ledger {
         let mut built = Vec::new();
 
         for (index, item) in items.iter().enumerate() {
+            let id = *ids
+                .get(index)
+                .ok_or_else(|| anyhow!("import item ID is missing"))?;
             let mut events = Vec::new();
-            let created = EventBuilder::for_item(EventKind::ItemCreated, ids[index])
+            let created = EventBuilder::for_item(EventKind::ItemCreated, id)
                 .project(project_id)
                 .parent(previous)
                 .data("title", item.title.trim())
@@ -467,16 +473,19 @@ impl Ledger {
             previous = Some(created.cid);
             events.push(created);
             if let Some(parent_index) = item.parent_index {
-                let parent = EventBuilder::for_item(EventKind::ItemParentSet, ids[index])
+                let parent_id = ids
+                    .get(parent_index)
+                    .ok_or_else(|| anyhow!("import item parent ID is missing"))?;
+                let parent = EventBuilder::for_item(EventKind::ItemParentSet, id)
                     .project(project_id)
                     .parent(previous)
-                    .link("parent", ids[parent_index].to_string())
+                    .link("parent", parent_id.to_string())
                     .build()?;
                 previous = Some(parent.cid);
                 events.push(parent);
             }
             if let Some(source) = source_citation {
-                let citation = EventBuilder::for_item(EventKind::ItemCitationAdded, ids[index])
+                let citation = EventBuilder::for_item(EventKind::ItemCitationAdded, id)
                     .project(project_id)
                     .parent(previous)
                     .data("target", source)
@@ -487,22 +496,28 @@ impl Ledger {
             }
             built.push((item, events));
         }
-        let head = previous.expect("non-empty import emits events");
+        let head = previous.ok_or_else(|| anyhow!("non-empty import did not emit events"))?;
 
         self.transaction_begin().await?;
         let result = async {
-            for (index, (item, events)) in built.iter().enumerate() {
+            for ((item, events), id) in built.iter().zip(&ids) {
                 for event in events {
                     self.insert_event(event).await?;
                 }
                 let parent = item
                     .parent_index
-                    .map_or(Value::Null, |parent| Value::Text(ids[parent].to_string()));
+                    .map(|parent| {
+                        ids.get(parent)
+                            .map(|id| Value::Text(id.to_string()))
+                            .ok_or_else(|| anyhow!("import item parent ID is missing"))
+                    })
+                    .transpose()?
+                    .unwrap_or(Value::Null);
                 self.connection
                     .execute(
                         "INSERT INTO items(id, title, state, project_id, parent_id) VALUES (?1, ?2, ?3, ?4, ?5)",
                         vec![
-                            Value::Text(ids[index].to_string()),
+                            Value::Text(id.to_string()),
                             Value::Text(item.title.trim().to_owned()),
                             Value::Text(item.state.to_string()),
                             project_id.map_or(Value::Null, |id| Value::Text(id.to_string())),
@@ -514,13 +529,13 @@ impl Ledger {
                     let citation = events
                         .iter()
                         .find(|event| event.payload.kind == EventKind::ItemCitationAdded)
-                        .expect("source citation created for each item");
+                        .ok_or_else(|| anyhow!("import item did not create its source citation"))?;
                     self.connection
                         .execute(
                             "INSERT INTO citations(event_cid, item_id, target, label, recorded_at) VALUES (?1, ?2, ?3, 'import source', ?4)",
                             values([
                                 citation.cid.to_string(),
-                                ids[index].to_string(),
+                                id.to_string(),
                                 source.to_owned(),
                                 citation.payload.recorded_at.to_rfc3339(),
                             ]),
@@ -543,15 +558,10 @@ impl Ledger {
     pub async fn set_state(&self, reference: &str, next: ItemState) -> Result<StoredItem> {
         let current = self.get_item(reference).await?;
         if next == ItemState::Active
-            && current
-                .item
-                .defer_until
-                .is_some_and(|date| date > Local::now().date_naive())
+            && let Some(defer_until) = current.item.defer_until
+            && defer_until > Local::now().date_naive()
         {
-            bail!(
-                "item is deferred until {}; clear the defer date before starting it",
-                current.item.defer_until.expect("checked as present")
-            );
+            bail!("item is deferred until {defer_until}; clear the defer date before starting it");
         }
         if !current.item.state.can_transition_to(next) {
             bail!("cannot move item from {} to {next}", current.item.state);
@@ -1749,6 +1759,11 @@ fn item_from_row(row: &turso::Row) -> Result<Item> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    reason = "test fixtures use direct setup and assertion values"
+)]
 mod tests {
     use super::{BatchItem, ItemScope, Ledger};
     use chrono::NaiveDate;

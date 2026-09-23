@@ -63,10 +63,9 @@ pub struct AppConfig {
 
 impl AppConfig {
     pub fn ensure_actor_id(&mut self) -> &str {
-        if self.actor_id.is_none() {
-            self.actor_id = Some(Uuid::now_v7().to_string());
-        }
-        self.actor_id.as_deref().expect("actor ID was initialized")
+        self.actor_id
+            .get_or_insert_with(|| Uuid::now_v7().to_string())
+            .as_str()
     }
 
     pub fn load(path: &Path) -> Result<Self> {
@@ -117,6 +116,11 @@ impl AppConfig {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    reason = "test fixtures use direct setup and assertion values"
+)]
 mod tests {
     use super::AppConfig;
     use tempfile::tempdir;

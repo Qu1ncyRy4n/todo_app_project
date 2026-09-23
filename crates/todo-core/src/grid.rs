@@ -50,7 +50,9 @@ impl GridEnvelope {
             .slots
             .get(number - 1)
             .ok_or(GridError::InvalidSlot(number))?;
-        Ok(&self.bytes[range.clone()])
+        self.bytes.get(range.clone()).ok_or_else(|| {
+            GridError::InvalidEnvelope("slot range is outside envelope bytes".to_owned())
+        })
     }
 
     pub fn bytes(&self) -> &[u8] {
@@ -88,7 +90,11 @@ impl GridEnvelopeBuilder {
         if self.slots.len() < number {
             self.slots.resize_with(number, || None);
         }
-        self.slots[number - 1] = Some(encoded_item.to_vec());
+        let slot = self
+            .slots
+            .get_mut(number - 1)
+            .ok_or(GridError::InvalidSlot(number))?;
+        *slot = Some(encoded_item.to_vec());
         Ok(())
     }
 
@@ -119,10 +125,9 @@ impl GridEnvelopeBuilder {
             .map_err(|error| GridError::InvalidCbor(error.to_string()))?;
         encode_cid(&mut encoder, &self.protocol_cid)
             .map_err(|error| GridError::InvalidCbor(error.to_string()))?;
-        for slot in &self.slots {
-            encoder
-                .writer_mut()
-                .extend_from_slice(slot.as_deref().expect("slot gaps checked"));
+        for (index, slot) in self.slots.iter().enumerate() {
+            let slot = slot.as_deref().ok_or(GridError::MissingSlot(index + 1))?;
+            encoder.writer_mut().extend_from_slice(slot);
         }
         let envelope = GridEnvelope::parse(&encoder.into_writer())?;
         self.closed = true;
@@ -178,6 +183,10 @@ pub(crate) fn encode_cid(
 
 fn cid_for(codec: u64, bytes: &[u8]) -> Cid {
     let digest = Sha256::digest(bytes);
+    #[allow(
+        clippy::expect_used,
+        reason = "SHA-256 always produces a 32-byte digest, below the fixed 64-byte multihash capacity"
+    )]
     let hash = Multihash::<64>::wrap(0x12, &digest).expect("SHA-256 fits the CID digest");
     Cid::new_v1(codec, hash)
 }
@@ -284,7 +293,11 @@ impl<'a> Scanner<'a> {
                     ));
                 }
                 let end = self.read_payload(next, argument)?;
-                if major == 3 && std::str::from_utf8(&self.bytes[next..end]).is_err() {
+                let payload = self
+                    .bytes
+                    .get(next..end)
+                    .ok_or_else(|| format!("missing string payload at offset {next}"))?;
+                if major == 3 && std::str::from_utf8(payload).is_err() {
                     return Err(format!("text string at offset {position} is not UTF-8"));
                 }
                 position = end;
@@ -313,7 +326,10 @@ impl<'a> Scanner<'a> {
                         });
                     } else {
                         let end = self.read_payload(position, argument)?;
-                        if major == 3 && std::str::from_utf8(&self.bytes[position..end]).is_err() {
+                        let payload = self.bytes.get(position..end).ok_or_else(|| {
+                            format!("missing string payload at offset {position}")
+                        })?;
+                        if major == 3 && std::str::from_utf8(payload).is_err() {
                             return Err(format!("text string at offset {item_start} is not UTF-8"));
                         }
                         position = end;
@@ -437,19 +453,21 @@ impl<'a> Scanner<'a> {
         let end = self
             .read_payload(start, length)
             .map_err(GridError::InvalidCid)?;
-        let content = &self.bytes[start..end];
-        if content.len() < 2 || content[0] != 0 {
+        let content = self.bytes.get(start..end).ok_or_else(|| {
+            GridError::InvalidCid("tag 42 content is outside envelope bytes".to_owned())
+        })?;
+        let Some((&0, cid_bytes)) = content.split_first() else {
             return Err(GridError::InvalidCid(
                 "tag 42 content lacks the leading zero sentinel".to_owned(),
             ));
-        }
-        let mut cursor = Cursor::new(&content[1..]);
+        };
+        let mut cursor = Cursor::new(cid_bytes);
         let cid = Cid::read_bytes(&mut cursor)
             .map_err(|error| GridError::InvalidCid(error.to_string()))?;
         let position = usize::try_from(cursor.position()).map_err(|_| {
             GridError::InvalidCid("CID cursor position exceeds platform size".to_owned())
         })?;
-        if position != content.len() - 1 {
+        if position != cid_bytes.len() {
             return Err(GridError::InvalidCid(
                 "tag 42 content contains trailing bytes".to_owned(),
             ));
@@ -500,12 +518,28 @@ impl<'a> Scanner<'a> {
             .get(offset..end)
             .ok_or_else(|| format!("CBOR argument at offset {offset} needs {length} bytes"))?;
         let value = match length {
-            1 => u64::from(source[0]),
-            2 => u64::from(u16::from_be_bytes([source[0], source[1]])),
-            4 => u64::from(u32::from_be_bytes(
-                source.try_into().expect("four-byte slice"),
-            )),
-            8 => u64::from_be_bytes(source.try_into().expect("eight-byte slice")),
+            1 => match source {
+                [value] => u64::from(*value),
+                _ => return Err("CBOR argument length does not match its slice".to_owned()),
+            },
+            2 => match source {
+                [first, second] => u64::from(u16::from_be_bytes([*first, *second])),
+                _ => return Err("CBOR argument length does not match its slice".to_owned()),
+            },
+            4 => match source {
+                [first, second, third, fourth] => {
+                    u64::from(u32::from_be_bytes([*first, *second, *third, *fourth]))
+                }
+                _ => return Err("CBOR argument length does not match its slice".to_owned()),
+            },
+            8 => match source {
+                [first, second, third, fourth, fifth, sixth, seventh, eighth] => {
+                    u64::from_be_bytes([
+                        *first, *second, *third, *fourth, *fifth, *sixth, *seventh, *eighth,
+                    ])
+                }
+                _ => return Err("CBOR argument length does not match its slice".to_owned()),
+            },
             _ => return Err(format!("unsupported CBOR argument length {length}")),
         };
         Ok((value, end))
@@ -528,6 +562,11 @@ impl<'a> Scanner<'a> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    reason = "test fixtures use direct setup and assertion values"
+)]
 mod tests {
     use super::{GridEnvelope, GridEnvelopeBuilder, GridError, grid_cbor_cid};
 

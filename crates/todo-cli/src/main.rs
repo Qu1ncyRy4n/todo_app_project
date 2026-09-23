@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use chrono::{Local, NaiveDate};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::Serialize;
@@ -527,7 +527,7 @@ async fn run() -> Result<()> {
                     .with_context(|| format!("read {}", args.file.display()))?;
                 let items = parse_markdown_tasks(&contents)?;
                 if args.dry_run {
-                    print!("{}", markdown_for_batch(&items));
+                    print!("{}", markdown_for_batch(&items)?);
                 } else {
                     let project = resolve_project(cli.project.as_deref(), &config, &cwd)?;
                     let source = if args.cite_source {
@@ -1037,7 +1037,9 @@ fn print_namespace_tree<'a>(paths: impl IntoIterator<Item = &'a str>) {
     }
     for prefix in prefixes {
         let depth = prefix.matches('/').count();
-        let segment = prefix.rsplit('/').next().expect("prefix has a segment");
+        let Some(segment) = prefix.rsplit('/').next() else {
+            continue;
+        };
         println!("{}{}", "  ".repeat(depth), segment);
     }
 }
@@ -1058,10 +1060,10 @@ fn parse_markdown_tasks(contents: &str) -> Result<Vec<BatchItem>> {
             );
         }
         let bytes = trimmed.as_bytes();
-        if bytes.len() < 6 || bytes[4] != b']' {
+        let Some((&marker, &b']')) = bytes.get(3).zip(bytes.get(4)) else {
             bail!("line {} has an invalid task marker", line_index + 1);
-        }
-        let state = match bytes[3].to_ascii_lowercase() {
+        };
+        let state = match marker.to_ascii_lowercase() {
             b' ' => ItemState::Inbox,
             b'>' => ItemState::Active,
             b'x' => ItemState::Done,
@@ -1072,7 +1074,10 @@ fn parse_markdown_tasks(contents: &str) -> Result<Vec<BatchItem>> {
                 char::from(marker)
             ),
         };
-        let title = trimmed[5..].trim();
+        let title = trimmed
+            .get(5..)
+            .ok_or_else(|| anyhow!("line {} has an invalid task marker", line_index + 1))?
+            .trim();
         if title.is_empty() {
             bail!("line {} has an empty task title", line_index + 1);
         }
@@ -1098,19 +1103,22 @@ fn parse_markdown_tasks(contents: &str) -> Result<Vec<BatchItem>> {
     Ok(items)
 }
 
-fn markdown_for_batch(items: &[BatchItem]) -> String {
+fn markdown_for_batch(items: &[BatchItem]) -> Result<String> {
     let mut output = String::new();
     for (index, item) in items.iter().enumerate() {
         let mut depth = 0;
         let mut parent = item.parent_index;
         while let Some(parent_index) = parent {
             depth += 1;
-            parent = items[parent_index].parent_index;
+            parent = items
+                .get(parent_index)
+                .ok_or_else(|| anyhow!("Markdown task parent index is invalid"))?
+                .parent_index;
         }
         markdown_line(&mut output, depth, item.state, &item.title);
         debug_assert!(item.parent_index.is_none_or(|parent| parent < index));
     }
-    output
+    Ok(output)
 }
 
 fn markdown_for_stored(items: &[StoredItem]) -> String {

@@ -409,6 +409,11 @@ fn encode_envelope(
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    reason = "test fixtures use direct setup and assertion values"
+)]
 mod tests {
     use super::{
         EventBuilder, EventKind, PROTOCOL_V1_BYTES, PROTOCOL_V2_BYTES, PROTOCOL_V3_BYTES,

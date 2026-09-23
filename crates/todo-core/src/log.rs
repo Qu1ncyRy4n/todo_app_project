@@ -78,6 +78,11 @@ fn unhex(text: &str) -> Result<Vec<u8>, LogLineError> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    reason = "test fixtures use direct setup and assertion values"
+)]
 mod tests {
     use super::LogLine;
     use crate::{EventBuilder, EventKind, ItemId};

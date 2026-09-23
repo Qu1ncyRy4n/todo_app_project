@@ -1,3 +1,9 @@
+#![allow(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    reason = "integration-test fixtures use direct setup and assertion values"
+)]
+
 use std::{
     path::Path,
     process::{Command, Output, Stdio},

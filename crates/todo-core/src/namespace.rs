@@ -87,13 +87,12 @@ impl NamespacePath {
                 .is_some_and(|suffix| suffix.starts_with('/'))
     }
 
-    pub fn kind(&self) -> NamespaceKind {
+    pub fn kind(&self) -> Result<NamespaceKind, NamespacePathError> {
         self.0
             .split('/')
             .next()
-            .expect("validated namespace paths have a first segment")
+            .ok_or(NamespacePathError::MissingName)?
             .parse()
-            .expect("validated namespace segment remains valid")
     }
 }
 
@@ -138,6 +137,11 @@ fn validate_segment(segment: &str) -> Result<(), NamespacePathError> {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    reason = "test fixtures use direct setup and assertion values"
+)]
 mod tests {
     use super::NamespacePath;
 

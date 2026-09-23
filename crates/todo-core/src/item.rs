@@ -149,6 +149,11 @@ impl FromStr for Priority {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    reason = "test fixtures use direct setup and assertion values"
+)]
 mod tests {
     use super::{ItemState, Priority};
 
