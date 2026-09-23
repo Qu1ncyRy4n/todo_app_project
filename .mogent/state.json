@@ -1,8 +1,7 @@
 {
-  "output_path": "",
-  "sha256": "",
+  "version": 3,
   "outputs": {
-    "/home/qix/dev/exocortex/todo_app_project/.agents/skills": {
+    ".agents/skills": {
       "kind": "directory",
       "files": {
         "README.md": "12a950ee3170bc10da023ba8c30f009fb0b64955a5d828fbc5cf9632c34499d4",
@@ -35,9 +34,9 @@
         "shell-command-failures/SKILL.md": "99cb7609c5afae5be0dbadd746622f50dc3758bbc016ffc13bbc995c236e686a"
       }
     },
-    "/home/qix/dev/exocortex/todo_app_project/AGENTS.md": {
+    "AGENTS.md": {
       "kind": "file",
-      "sha256": "b3286db59308e8a6a9f0a2693ebb5978560dfefcc5e659f8147958d34d99bd75"
+      "sha256": "c798bb54a9ce7996a3a4cbe750b617eff42e32f3f99cc7efcffecdbdd30ed384"
     }
   }
 }
