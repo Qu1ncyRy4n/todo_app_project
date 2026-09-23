@@ -1,17 +1,15 @@
 roots:
-  qmr: /home/qix/dev/cdint/qmr-agents-library
+  qmr_repo: /home/qix/dev/cdint/qmr-agents-library
 
 sources:
-  qmr_agents:
-    path: {root: qmr, subdir: agents}
-  qmr_skills:
-    path: {root: qmr, subdir: skills}
+  qmr:
+    path:
+      root: qmr_repo
 
 outputs:
   - path: AGENTS.md
     include:
-      - all: qmr_agents
+      - all: qmr
 
   - path: .agents/skills/
-    include:
-      - all: qmr_skills
+    from: qmr:skills
