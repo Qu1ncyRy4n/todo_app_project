@@ -37,6 +37,20 @@ Projects do not own separate databases. A global configuration maps working
 directories to project scopes, and an explicit `--project` flag overrides the
 mapping.
 
+## Control surfaces
+
+Two clients read the same ledger, and neither owns data the other cannot see:
+
+- `todo`, the CLI, which is the complete surface for capture, focus, import,
+  export, backup, and synchronization;
+- `todo-gui`, a native graph editor for arranging, grouping, searching, and
+  inspecting the same items. Run it with `./dev gui`.
+
+The editor is presentation over the same events. Its appearance is configured in
+`theme.toml` and its node placement in `gui-layout.json`, both beside
+`config.toml`; deleting either loses arrangement, never work. See
+[the graph editor handoff](docs/gui-graph-pickup.md).
+
 ## Development flow
 
 ```text
@@ -64,6 +78,9 @@ works when Rust is not globally installed:
 The enforced checks, lint policy, and intentionally deferred testing and
 error-safety work are documented in [development tooling and quality policy](docs/development.md).
 
+To pick the project up cold, including what is built, what is deliberately
+absent, and what is unverified, start from [the project handoff](docs/handoff.md).
+
 ## Dogfooding quick start
 
 ```sh
@@ -86,6 +103,20 @@ todo backup /path/to/new/backup-directory
 todo sync init --repo /path/to/todo-ledger
 todo sync
 ```
+
+On a second machine, clone the sync remote first, because `todo sync init`
+creates an empty repository with no remote when pointed at an empty directory:
+
+```sh
+git clone <sync-remote-url> /path/to/todo-ledger
+todo sync init --repo /path/to/todo-ledger
+todo sync
+```
+
+`todo sync` pulls, imports every envelope this machine does not have, rewrites
+the canonical log, commits, and pushes. Concurrent appends from two machines are
+merged by the `merge=union` driver and deduplicated by CID, so the log never
+conflicts and replay converges. The database itself never syncs.
 
 `todo backup` writes exact event bytes, a full JSON view, and Markdown files
 that can be imported through the CLI into a clean ledger. The destination must
@@ -113,9 +144,16 @@ project-scoped work, see [the weekly-notes tutorial](docs/weekly-notes-tutorial.
 
 Development proceeds from one working local global ledger, to interaction with
 one-to-three repositories, and then to personal/shared spaces and multiple
-users. Exact v5 and v6 events can now be synchronized through an explicit Git
-checkout; each device keeps its database as a rebuildable local view. See
-[DI-0007](DI/DI-0007-staged-global-to-shared-rollout.md).
+users. Exact events can be synchronized through an explicit Git checkout; each
+device keeps its database as a rebuildable local view. New writes use the v13
+payload protocol and import accepts v5 through v13. See
+[DI-0007](DI/DI-0007-staged-global-to-shared-rollout.md) for the staged rollout
+and [DI-0007-git-jsonl-sync](DI/DI-0007-git-jsonl-sync.md) for the transport.
+
+Multi-user access and hosting, whether a sync server, a browser build, or a
+signed native distribution, are deferred until PromiseGrid reaches 1.0. The
+routes and the two questions that must be settled first are recorded in
+[TE-0014](docs/thought-experiments/TE-0014-multi-user-access-and-hosting.md).
 
 The current PromiseGrid and `todo-report` comparison is recorded in
 [the integration review](docs/integration-review-2026-09-04.md). Direct Grid

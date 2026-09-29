@@ -1,8 +1,9 @@
 # Architecture
 
 Status: implemented through v0.3.0 by DI-0001 through DI-0009. DI-0007 sets the
-staged local-to-shared product direction; its later stages are not implemented.
-DI-0008 and DI-0009 add PromiseGrid framing compatibility and dogfood recovery.
+staged local-to-shared product direction; its later stages are not implemented
+and are deferred pending PromiseGrid 1.0 under TE-0014. DI-0008 and DI-0009 add
+PromiseGrid framing compatibility and dogfood recovery.
 
 ## Global space and project scopes
 
@@ -30,10 +31,12 @@ grid([42(pCID), parents, payload, proof])
 ```
 
 The proof slot remains `null`, and semantic validity is checked before an event
-is persisted. Historical v1-v4 events retain their exact bytes and original
-CIDs. New v5 events use the registered Grid-CBOR codec (`0x1027`) and generic
-envelope validation from DI-0008. The payload protocols are frozen,
-content-addressed files under `docs/protocols/`.
+is persisted. Historical events retain their exact bytes and original CIDs. New
+writes use the v13 payload protocol over the registered Grid-CBOR codec
+(`0x1027`) with the generic envelope validation from DI-0008, and import accepts
+v5 through v13. The payload protocols are frozen, content-addressed files under
+`docs/protocols/`; a protocol is never edited in place, because its bytes are
+hashed into every event that references it. Adding a field means adding a file.
 
 Turso stores the exact envelope bytes and extracted fields used to build local
 views. Exact CBOR archives are the durable exchange format. JSON and Markdown
@@ -75,6 +78,57 @@ and aliases. Assignments refer to the stable ID. Paths support segment-aware
 ancestor checks. The initial kinds are
 `tag`, `project`, `role`, `goal`, `topic`, and `context`; other validated kinds
 are representable in the domain model. v0.2 does not load executable plugins.
+
+## Synchronization
+
+The interchange artifact is `events.jsonl` in a Git checkout the operator names
+explicitly: one line per envelope, carrying the CID and the exact bytes, sorted
+by CID and deduplicated. Any union of the same event set therefore produces
+identical file content.
+
+```text
+todo sync
+  -> git pull --no-rebase   (when an upstream is set)
+  -> import unknown CIDs into the local ledger
+  -> rewrite events.jsonl canonically
+  -> commit, push; on rejection pull, re-import, re-canonicalize, push once
+```
+
+`.gitattributes` marks `events.jsonl merge=union`, so concurrent appends from
+two machines concatenate instead of conflicting, and CID deduplication makes the
+concatenation harmless. SQLite never syncs; it is rebuilt from events per
+DI-0002.
+
+Convergence is guaranteed; agreement is not. Two machines editing the same field
+both keep their events, and the projection resolves by `(recorded_at, event_id)`,
+which is last-writer-wins per field with the fork preserved in `parent_cid`.
+Nothing reports that this happened. See TE-0014.
+
+## Graph editor
+
+`todo-gui` is a second client over the same ledger, not a second authority. It
+holds no state the ledger cannot rebuild, and every mutation goes through the
+same `Ledger` methods the CLI calls.
+
+```text
+todo-core   domain types, events, CIDs, proquints   (no platform dependencies)
+todo-store  Turso projection, configuration         (turso, dirs, tokio)
+todo-gui    eframe window over todo-store           (37 Ledger call sites)
+  geometry.rs   pure layout math, unit tested without a window
+  theme.rs      every appearance knob, loaded from theme.toml
+  palette.rs    tag colors, rainbow and hue colormaps
+  tags.rs       filter tri-state and tag inheritance
+```
+
+Layout math lives in `geometry.rs` as pure functions over positions and
+rectangles, so arrangement is testable without rendering. Appearance lives in
+`theme.toml` with `deny_unknown_fields`, so a typo is reported rather than
+silently ignored. Node placement lives in `gui-layout.json`. Neither file holds
+work; deleting them loses arrangement only.
+
+`todo-core` is the only crate that builds for `wasm32` today. That is a
+deliberate property, not an accident, and it is what a browser build would
+depend on. See TE-0014.
 
 ## Extension boundary
 

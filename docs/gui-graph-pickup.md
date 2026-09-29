@@ -1,6 +1,6 @@
 # GUI Graph Implementation Pickup
 
-Updated: 2026-09-28
+Updated: 2026-09-29
 
 ## What is implemented in the current worktree
 
@@ -14,9 +14,15 @@ Updated: 2026-09-28
   arrowheads. Tags render as nested organic hull regions.
 - Layout commands: Normalize, Focus layout, Timeline, and Separate tags, each
   undoable through Undo layout.
-- Reversible deletion with confirmation, plus a Deleted list with Restore.
-- Tag/search/filter controls, Today date shortcuts, calendar pickers, citations
-  with explicit Open controls, notes, and a Focus Window around active work.
+- Tag filter tri-states, Today date shortcuts, calendar pickers, citations with
+  explicit Open controls, notes, and a Focus Window around active work.
+- Search across titles, both identifier renderings, and effective tags. `/`
+  reaches the box from the canvas, Escape clears it, Enter selects the first
+  match, and non-matching cards dim rather than vanish so edges survive a query.
+- Both sidebars collapse from the toolbar.
+
+Deletion is deliberately absent from the editor. `todo rm --force` and
+`todo restore` remain in the CLI, and protocol v10 still carries the events.
 - Event-backed focus sequences: `todo focus create|add|ls` and inspector
   controls append existing tasks in cognitive order without changing readiness.
 - Event-backed sessions: `todo session start|stop|ls` and inspector Start/Stop
@@ -85,6 +91,12 @@ dogfooding notes. Every slice below landed as its own commit with tests.
 43. View and force settings sit above the filters, with the forces as live
     sliders that can be written back to `theme.toml`. A hierarchy grows down or
     right, and dragging empty canvas moves the view.
+44. Group by three ordered keys, with the sort order governing placement in
+    every arrangement.
+45. Search across titles, both identifier renderings, and effective tags. `/`
+    reaches the box from the canvas, Escape clears it, Enter selects the first
+    match, and non-matching cards dim rather than disappear so edges survive the
+    query. Both sidebars toggle off from the toolbar.
 
 ## Configuration
 
@@ -105,13 +117,19 @@ Values that carry data or protocol meaning are deliberately not configurable.
 ## Current verification state
 
 ```sh
-./dev fmt
-./dev test
-git diff --check
+./dev check   # cargo fmt --check, then clippy --workspace --all-targets -D warnings
+./dev test    # 194 tests: 124 todo-gui, 35 todo-core, 22 todo-store, 13 todo-cli
 ```
 
 All workspace tests pass, including protocol round trips, view rebuilds from the
 log, and the CLI integration suite.
+
+The editor's own coverage is the pure layers only: `geometry.rs`, `theme.rs`,
+`palette.rs`, `tags.rs`, and free functions lifted out of `main.rs` for the
+purpose, such as `matches_query`. Nothing drives an actual window, so any change
+to panel wiring, hotkeys, or focus handling has to be confirmed by running
+`./dev gui`. The `/` hotkey and its focus handoff have not yet been
+exercised in a running window and are the first thing to check there.
 
 ## Deferred by decision
 
@@ -131,6 +149,12 @@ These were considered and put off deliberately, not overlooked.
 4. Timeline snapping: dragging a task onto a day to set its scheduled date.
 5. Grouping and sorting in the CLI listings, which so far exist only in the
    graph editor.
+6. Multi-user access and hosting: a sync server, a browser build, or a signed
+   native distribution. Deferred until PromiseGrid reaches 1.0, because routes B
+   and C would build the synchronization and ownership machinery the Grid is
+   expected to supply. TE-0014 records the routes, and the two questions that
+   must be settled first: whether a shared ledger is one list or many, and
+   whether concurrent divergence is reported or resolved silently.
 
 ## Remaining work
 
