@@ -3,7 +3,7 @@
 //! Everything here is a function of its inputs so it can be tested without a
 //! window, a ledger, or a frame of rendering.
 
-use eframe::egui::{Pos2, Vec2};
+use eframe::egui::{Pos2, Rect, Vec2};
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 /// Returns the three corners of an arrowhead that ends at `end`.
@@ -563,15 +563,33 @@ pub fn relax_overlaps(
     current
 }
 
+/// Returns the zoom and pan that frame `bounds` inside `viewport`.
+///
+/// The zoom is whatever fits the bounds with `margin` to spare, clamped to the
+/// range the graph allows, and the pan centers the bounds at that zoom. Positions
+/// are transformed as `viewport.center() + (point - viewport.center()) * zoom + pan`,
+/// so the pan is derived against that same transform rather than guessed.
+pub fn fit_view(bounds: Rect, viewport: Rect, zoom_range: (f32, f32), margin: f32) -> (f32, Vec2) {
+    let (min_zoom, max_zoom) = zoom_range;
+    let width = (bounds.width() + margin * 2.0).max(1.0);
+    let height = (bounds.height() + margin * 2.0).max(1.0);
+    let zoom = (viewport.width() / width)
+        .min(viewport.height() / height)
+        .clamp(min_zoom.min(max_zoom), max_zoom.max(min_zoom));
+    let center = viewport.center();
+    let pan = (center - bounds.center()) * zoom;
+    (zoom, pan)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         BandSpacing, FlowDirection, FlowSpacing, OverlapSpacing, SeparationSpacing,
         TimelineSpacing, arrowhead_points, banded_positions, centroid, cluster_points, convex_hull,
-        expand_path, layered_positions, relax_overlaps, separate_groups, shaft_end,
+        expand_path, fit_view, layered_positions, relax_overlaps, separate_groups, shaft_end,
         smooth_closed_path, timeline_positions,
     };
-    use eframe::egui::{Vec2, pos2};
+    use eframe::egui::{Rect, Vec2, pos2};
 
     fn spacing(direction: FlowDirection) -> FlowSpacing {
         FlowSpacing {
@@ -687,6 +705,37 @@ mod tests {
 
     fn node_size() -> Vec2 {
         Vec2::new(150.0, 58.0)
+    }
+
+    #[test]
+    fn a_wider_spread_fits_at_a_smaller_zoom() {
+        let viewport = Rect::from_min_max(pos2(0.0, 0.0), pos2(1000.0, 800.0));
+        let tight = Rect::from_min_max(pos2(0.0, 0.0), pos2(200.0, 150.0));
+        let wide = Rect::from_min_max(pos2(0.0, 0.0), pos2(2000.0, 1500.0));
+        let (tight_zoom, _) = fit_view(tight, viewport, (0.4, 2.5), 40.0);
+        let (wide_zoom, _) = fit_view(wide, viewport, (0.4, 2.5), 40.0);
+        assert!(wide_zoom < tight_zoom);
+    }
+
+    #[test]
+    fn the_zoom_stays_inside_its_range() {
+        let viewport = Rect::from_min_max(pos2(0.0, 0.0), pos2(1000.0, 800.0));
+        let speck = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+        let sprawl = Rect::from_min_max(pos2(0.0, 0.0), pos2(90000.0, 90000.0));
+        let (close, _) = fit_view(speck, viewport, (0.4, 2.5), 40.0);
+        let (far, _) = fit_view(sprawl, viewport, (0.4, 2.5), 40.0);
+        assert!(close <= 2.5);
+        assert!(far >= 0.4);
+    }
+
+    #[test]
+    fn framing_centers_the_bounds_in_the_viewport() {
+        let viewport = Rect::from_min_max(pos2(0.0, 0.0), pos2(1000.0, 800.0));
+        let offset = Rect::from_min_max(pos2(1200.0, 900.0), pos2(1400.0, 1000.0));
+        let (zoom, pan) = fit_view(offset, viewport, (0.4, 2.5), 40.0);
+        let center = viewport.center();
+        let drawn = center + (offset.center() - center) * zoom + pan;
+        assert!((drawn - center).length() < 0.001);
     }
 
     #[test]

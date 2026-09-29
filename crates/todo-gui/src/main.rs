@@ -107,6 +107,8 @@ struct TodoGui {
     separate_requested: bool,
     relax_requested: bool,
     relax_overlaps: bool,
+    focus_mode: bool,
+    focus_only: bool,
     timeline_requested: bool,
     show_timeline_ruler: bool,
     timeline_origin: Option<Pos2>,
@@ -186,6 +188,8 @@ impl TodoGui {
             separate_requested: false,
             relax_requested: false,
             relax_overlaps: relax_after_layout,
+            focus_mode: false,
+            focus_only: false,
             timeline_requested: false,
             show_timeline_ruler: true,
             timeline_origin: None,
@@ -294,6 +298,8 @@ impl TodoGui {
                 .default_open(true)
                 .show(ui, |ui| {
                     ui.checkbox(&mut self.show_completed, "Completed and canceled");
+                    ui.checkbox(&mut self.focus_only, "Active work only");
+                    ui.weak("Active work only hides everything that is not active.");
                 });
             egui::CollapsingHeader::new("Relationships drawn")
                 .default_open(true)
@@ -909,6 +915,7 @@ impl TodoGui {
                 .insert(id, (origin + *target) - grid_slot(index, rect));
         }
         self.relax_if_enabled(rect);
+        self.focus_mode = false;
         self.timeline_origin = Some(origin);
         self.save_layout();
         self.message = Some("Timeline arranged by scheduled date.".to_owned());
@@ -1035,7 +1042,9 @@ impl TodoGui {
             }
         }
         let spacing = BandSpacing {
-            band_gap: self.theme.focus.band_gap,
+            // Exiled work sits a multiple of the band gap away, which puts it
+            // outside the frame the active band is zoomed to.
+            band_gap: self.theme.focus.band_gap * self.theme.focus.exile_multiplier,
             node_gap: self.theme.focus.node_gap,
             row_gap: self.theme.focus.row_gap,
             band_width: self.theme.focus.band_width,
@@ -1057,6 +1066,10 @@ impl TodoGui {
         }
         self.relax_if_enabled(rect);
         self.timeline_origin = None;
+        self.focus_mode = true;
+        if self.theme.focus.zoom_to_active {
+            self.frame_active(rect, &active);
+        }
         self.message =
             Some("Focus Window arranged: done above, active centered, future below.".to_owned());
     }
@@ -1114,7 +1127,33 @@ impl TodoGui {
         // taking over retires it rather than leaving a scale nothing follows.
         self.relax_if_enabled(rect);
         self.timeline_origin = None;
+        self.focus_mode = false;
         self.message = Some("Layout normalized. Undo layout restores the previous one.".to_owned());
+    }
+
+    /// Frames the active band in the viewport, so focus fills the canvas.
+    ///
+    /// Framing uses the same transform the graph draws with, so the band lands
+    /// centered rather than approximately centered.
+    fn frame_active(&mut self, rect: Rect, active: &[String]) {
+        let items = self.visible_items();
+        let mut points = Vec::new();
+        for (index, item) in items.iter().enumerate() {
+            let id = item.item.id.to_string();
+            if !active.contains(&id) {
+                continue;
+            }
+            let offset = self.node_offsets.get(&id).copied().unwrap_or(Vec2::ZERO);
+            points.push(grid_slot(index, rect) + offset);
+        }
+        let (width, height) = self.theme.node.size();
+        let Some(bounds) = bounds_for_points(&points, Vec2::new(width / 2.0, height / 2.0)) else {
+            return;
+        };
+        let (zoom, pan) =
+            geometry::fit_view(bounds, rect, (0.4, 2.5), self.theme.focus.zoom_margin);
+        self.graph_zoom = zoom;
+        self.graph_pan = pan;
     }
 
     /// Runs the overlap pass when it is switched on, as a layout's last step.
@@ -1145,6 +1184,7 @@ impl TodoGui {
                 (self.show_completed
                     || (item.item.state != ItemState::Done
                         && item.item.state != ItemState::Canceled))
+                    && (!self.focus_only || item.item.state == ItemState::Active)
                     && self
                         .tag_states
                         .accepts(item.namespaces.iter().map(NamespacePath::as_str))
@@ -2241,13 +2281,29 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
                 ItemState::Inbox => Color32::from_rgb(59, 79, 94),
             }
         };
-        let accent = node_tag_color(item, &app.theme, &palette);
+        // While focus mode is on, work that is not active stays drawn but quiet, so
+        // it reads as context rather than as part of what is being worked on.
+        let exiled = app.focus_mode && item.item.state != ItemState::Active;
+        let dim = |color: Color32| {
+            if exiled {
+                Color32::from_rgba_unmultiplied(
+                    color.r(),
+                    color.g(),
+                    color.b(),
+                    app.theme.focus.exiled_alpha,
+                )
+            } else {
+                color
+            }
+        };
+        let fill = dim(fill);
+        let accent = node_tag_color(item, &app.theme, &palette).map(dim);
         let outline = Stroke::new(
             if selected { 3.0 } else { 1.0 },
             if selected {
                 Color32::GOLD
             } else {
-                Color32::LIGHT_GRAY
+                dim(Color32::LIGHT_GRAY)
             },
         );
         draw_node_body(
@@ -2266,14 +2322,14 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
                 Align2::CENTER_TOP,
                 short_title(&item.item.title),
                 title_font,
-                Color32::WHITE,
+                dim(Color32::WHITE),
             );
             painter.text(
                 node.center_bottom() - Vec2::new(0.0, 10.0 * app.graph_zoom),
                 Align2::CENTER_BOTTOM,
                 format!("{} · {}", item.item.state, item.item.priority),
                 FontId::proportional(app.theme.node.meta_font_size * app.graph_zoom),
-                Color32::LIGHT_GRAY,
+                dim(Color32::LIGHT_GRAY),
             );
         } else {
             painter.text(

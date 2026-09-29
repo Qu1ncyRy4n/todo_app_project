@@ -134,6 +134,18 @@ pub struct FocusTheme {
     pub show_frame: bool,
     /// Whether tasks deferred or scheduled ahead of today join the future band.
     pub future_includes_deferred: bool,
+    /// How far outside the active band non-active work is pushed, as a multiplier
+    /// of the band gap.
+    ///
+    /// Large by default: focus is only focus if what is not active is out of the
+    /// way rather than merely below.
+    pub exile_multiplier: f32,
+    /// Opacity of exiled work, out of 255, so context stays readable but quiet.
+    pub exiled_alpha: u8,
+    /// Whether arranging the Focus Window also frames it in the viewport.
+    pub zoom_to_active: bool,
+    /// Space left around the active band when framing it.
+    pub zoom_margin: f32,
 }
 
 impl Default for FocusTheme {
@@ -145,6 +157,10 @@ impl Default for FocusTheme {
             band_width: 4,
             show_frame: true,
             future_includes_deferred: true,
+            exile_multiplier: 3.2,
+            exiled_alpha: 70,
+            zoom_to_active: true,
+            zoom_margin: 90.0,
         }
     }
 }
