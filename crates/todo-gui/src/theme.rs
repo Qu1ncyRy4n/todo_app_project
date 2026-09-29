@@ -203,6 +203,15 @@ pub struct NodeTheme {
     pub meta_font_size: f32,
     /// Whether the state and priority line is drawn at all.
     pub show_meta_line: bool,
+    /// Whether a long title wraps onto more lines instead of being cut short.
+    pub wrap_titles: bool,
+    /// Space between a node's edge and its text.
+    pub text_padding: f32,
+    /// Tallest a node may grow to fit its title, in points.
+    ///
+    /// A very long title stops growing the node and is cut short instead, so one
+    /// runaway task cannot take over the canvas.
+    pub max_height: f32,
 }
 
 impl Default for NodeTheme {
@@ -216,6 +225,9 @@ impl Default for NodeTheme {
             title_font_size: 14.0,
             meta_font_size: 11.0,
             show_meta_line: true,
+            wrap_titles: true,
+            text_padding: 9.0,
+            max_height: 190.0,
         }
     }
 }

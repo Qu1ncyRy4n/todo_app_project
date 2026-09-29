@@ -2373,10 +2373,29 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
             .theme
             .weight
             .scale(item_weight(item, &child_index, &app.theme));
-        let node = Rect::from_center_size(
-            *center,
-            Vec2::new(node_width, node_height) * app.graph_zoom * scale,
+        let zoom = app.graph_zoom * scale;
+        let title_font = FontId::proportional(app.theme.node.title_font_size * zoom);
+        let meta_font = FontId::proportional(app.theme.node.meta_font_size * zoom);
+        // The title is laid out before the node is sized, so the card can grow to
+        // hold what it says instead of cutting the title off mid-word.
+        let padding = app.theme.node.text_padding * zoom;
+        let wrap_width = (node_width * zoom - padding * 2.0).max(1.0);
+        let title_galley = painter.layout(
+            node_title(&item.item.title, &app.theme),
+            title_font,
+            Color32::WHITE,
+            wrap_width,
         );
+        let meta_height = if app.theme.node.show_meta_line {
+            app.theme.node.meta_font_size * zoom + padding / 2.0
+        } else {
+            0.0
+        };
+        let needed = title_galley.size().y + meta_height + padding * 2.0;
+        let height = needed
+            .max(node_height * zoom)
+            .min(app.theme.node.max_height * zoom);
+        let node = Rect::from_center_size(*center, Vec2::new(node_width * zoom, height));
         let response = ui.interact(node, ui.make_persistent_id(&id), Sense::click_and_drag());
         let selected = app.selected.as_deref() == Some(id.as_str());
         let fill = if !item.blocked_by.is_empty() {
@@ -2423,30 +2442,23 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
             &app.theme,
             app.graph_zoom,
         );
-        let title_font = FontId::proportional(app.theme.node.title_font_size * app.graph_zoom);
         if app.theme.node.show_meta_line {
-            painter.text(
-                node.center_top() + Vec2::new(0.0, 12.0 * app.graph_zoom),
-                Align2::CENTER_TOP,
-                short_title(&item.item.title),
-                title_font,
+            let title_top = node.top() + padding;
+            painter.galley(
+                egui::pos2(node.center().x - title_galley.size().x / 2.0, title_top),
+                title_galley,
                 dim(Color32::WHITE),
             );
             painter.text(
-                node.center_bottom() - Vec2::new(0.0, 10.0 * app.graph_zoom),
+                node.center_bottom() - Vec2::new(0.0, padding / 2.0),
                 Align2::CENTER_BOTTOM,
                 format!("{} · {}", item.item.state, item.item.priority),
-                FontId::proportional(app.theme.node.meta_font_size * app.graph_zoom),
+                meta_font,
                 dim(Color32::LIGHT_GRAY),
             );
         } else {
-            painter.text(
-                node.center(),
-                Align2::CENTER_CENTER,
-                short_title(&item.item.title),
-                title_font,
-                Color32::WHITE,
-            );
+            let anchor = node.center() - title_galley.size() / 2.0;
+            painter.galley(anchor, title_galley, dim(Color32::WHITE));
         }
         if response.drag_started()
             && let Some(pointer) = response.interact_pointer_pos()
@@ -3088,6 +3100,18 @@ fn load_layout(path: &std::path::Path) -> HashMap<String, Vec2> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Returns the title to draw on a node, wrapped in full or cut short.
+///
+/// Wrapping is the default because a task named only by its first twenty
+/// characters is a task you have to click to identify.
+fn node_title(title: &str, theme: &Theme) -> String {
+    if theme.node.wrap_titles {
+        title.to_owned()
+    } else {
+        short_title(title)
+    }
 }
 
 fn short_title(title: &str) -> String {
