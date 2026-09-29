@@ -12,6 +12,47 @@ use serde::{Deserialize, Serialize};
 #[serde(default, deny_unknown_fields)]
 pub struct Theme {
     pub tag: TagTheme,
+    pub edge: EdgeTheme,
+}
+
+/// Controls how relationship edges and their arrowheads are drawn.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct EdgeTheme {
+    /// Line thickness of a relationship edge.
+    pub width: f32,
+    /// Length of an arrowhead, in points.
+    pub arrowhead_length: f32,
+    /// Width of an arrowhead across its base, in points.
+    pub arrowhead_width: f32,
+    /// Whether arrowheads grow and shrink with the graph zoom.
+    ///
+    /// Off by default: a head that keeps one size stays readable when the graph
+    /// is zoomed out, which is when the arrows matter most.
+    pub scale_arrowheads_with_zoom: bool,
+}
+
+impl Default for EdgeTheme {
+    fn default() -> Self {
+        Self {
+            width: 2.0,
+            arrowhead_length: 11.0,
+            arrowhead_width: 9.0,
+            scale_arrowheads_with_zoom: false,
+        }
+    }
+}
+
+impl EdgeTheme {
+    /// Returns the arrowhead length and width to draw at the given zoom.
+    pub fn arrowhead_size(&self, zoom: f32) -> (f32, f32) {
+        let scale = if self.scale_arrowheads_with_zoom {
+            zoom
+        } else {
+            1.0
+        };
+        (self.arrowhead_length * scale, self.arrowhead_width * scale)
+    }
 }
 
 /// Controls how tag paths turn into colors and how tag regions are drawn.
@@ -83,7 +124,24 @@ impl TagTheme {
 
 #[cfg(test)]
 mod tests {
-    use super::TagTheme;
+    use super::{EdgeTheme, TagTheme};
+
+    #[test]
+    fn arrowheads_ignore_zoom_by_default() {
+        let theme = EdgeTheme::default();
+        assert_eq!(theme.arrowhead_size(0.4), theme.arrowhead_size(2.5));
+    }
+
+    #[test]
+    fn arrowheads_follow_zoom_when_configured() {
+        let theme = EdgeTheme {
+            scale_arrowheads_with_zoom: true,
+            ..EdgeTheme::default()
+        };
+        let (small, _) = theme.arrowhead_size(1.0);
+        let (large, _) = theme.arrowhead_size(2.0);
+        assert!(large > small);
+    }
 
     #[test]
     fn a_child_tag_is_a_deeper_shade_of_its_parent() {

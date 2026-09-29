@@ -1,5 +1,6 @@
 //! Native graph editor for the local Todo Ledger.
 
+mod geometry;
 mod theme;
 
 use anyhow::{Context, Result, bail};
@@ -1197,20 +1198,26 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
                 .and_then(|id| positions.get(&id.to_string()))
         {
             let (start, end) = edge_points(*parent, *to, app.graph_zoom);
-            painter.arrow(
+            draw_edge(
+                &painter,
                 start,
-                end - start,
-                Stroke::new(2.0, Color32::from_rgb(82, 156, 112)),
+                end,
+                Color32::from_rgb(82, 156, 112),
+                &app.theme,
+                app.graph_zoom,
             );
         }
         if show_dependencies {
             for dependency in &item.dependencies {
                 if let Some(from) = positions.get(&dependency.to_string()) {
                     let (start, end) = edge_points(*from, *to, app.graph_zoom);
-                    painter.arrow(
+                    draw_edge(
+                        &painter,
                         start,
-                        end - start,
-                        Stroke::new(2.0, Color32::from_rgb(75, 142, 210)),
+                        end,
+                        Color32::from_rgb(75, 142, 210),
+                        &app.theme,
+                        app.graph_zoom,
                     );
                 }
             }
@@ -1219,10 +1226,13 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
             for blocker in &item.blocked_by {
                 if let Some(from) = positions.get(&blocker.to_string()) {
                     let (start, end) = edge_points(*from, *to, app.graph_zoom);
-                    painter.arrow(
+                    draw_edge(
+                        &painter,
                         start,
-                        end - start,
-                        Stroke::new(2.0, Color32::from_rgb(218, 83, 73)),
+                        end,
+                        Color32::from_rgb(218, 83, 73),
+                        &app.theme,
+                        app.graph_zoom,
                     );
                 }
             }
@@ -1360,6 +1370,33 @@ fn edge_points(from: Pos2, to: Pos2, zoom: f32) -> (Pos2, Pos2) {
     let start = from + direction * from_scale;
     let end = to - direction * (to_scale + 5.0);
     (start, end)
+}
+
+/// Draws one relationship edge with an arrowhead of theme-controlled size.
+///
+/// The head size does not follow the edge length, unlike the built-in arrow
+/// painter, so long and short edges are tipped identically.
+fn draw_edge(
+    painter: &egui::Painter,
+    start: Pos2,
+    end: Pos2,
+    color: Color32,
+    theme: &Theme,
+    zoom: f32,
+) {
+    let (head_length, head_width) = theme.edge.arrowhead_size(zoom);
+    let stroke = Stroke::new(theme.edge.width, color);
+    painter.line_segment(
+        [start, geometry::shaft_end(start, end, head_length)],
+        stroke,
+    );
+    if let Some(head) = geometry::arrowhead_points(start, end, head_length, head_width) {
+        painter.add(egui::Shape::convex_polygon(
+            head.to_vec(),
+            color,
+            Stroke::NONE,
+        ));
+    }
 }
 
 fn draw_tag_constellation(
