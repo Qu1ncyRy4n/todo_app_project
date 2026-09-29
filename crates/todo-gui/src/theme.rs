@@ -19,6 +19,7 @@ use std::{
 #[serde(default, deny_unknown_fields)]
 pub struct Theme {
     pub focus: FocusTheme,
+    pub timeline: TimelineTheme,
     pub parent: ParentTheme,
     pub layout: LayoutTheme,
     pub node: NodeTheme,
@@ -342,6 +343,37 @@ fn assign_sector(
             theme,
             colors,
         );
+    }
+}
+
+/// Controls the scheduled-date timeline.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TimelineTheme {
+    /// Horizontal distance between one day and the next.
+    pub day_width: f32,
+    /// Vertical distance between tasks stacked on the same day.
+    pub lane_height: f32,
+    /// Whether the day ruler and today marker are drawn.
+    pub show_ruler: bool,
+    /// How many days of ruler to draw either side of the scheduled range.
+    pub ruler_margin_days: u16,
+    /// Whether unscheduled tasks are parked in a lane of their own.
+    ///
+    /// Scheduled dates alone drive the timeline: due is a commitment and defer
+    /// controls readiness, so neither is read here.
+    pub park_unscheduled: bool,
+}
+
+impl Default for TimelineTheme {
+    fn default() -> Self {
+        Self {
+            day_width: 120.0,
+            lane_height: 82.0,
+            show_ruler: true,
+            ruler_margin_days: 2,
+            park_unscheduled: true,
+        }
     }
 }
 

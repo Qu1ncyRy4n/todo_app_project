@@ -4920,6 +4920,7 @@ dependencies = [
  "todo-core",
  "todo-store",
  "tokio",
+ "toml",
 ]
 
 [[package]]

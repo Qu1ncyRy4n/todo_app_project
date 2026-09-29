@@ -4,9 +4,9 @@ mod geometry;
 mod theme;
 
 use anyhow::{Context, Result, bail};
-use chrono::{Local, NaiveDate};
+use chrono::{Datelike, Local, NaiveDate};
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
-use geometry::{BandSpacing, FlowSpacing, SeparationSpacing};
+use geometry::{BandSpacing, FlowSpacing, SeparationSpacing, TimelineSpacing};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fs, path::PathBuf};
 use theme::{NodeShape, RegionShape, TagColoring, TagPalette, Theme};
@@ -94,6 +94,9 @@ struct TodoGui {
     normalize_requested: bool,
     focus_layout_requested: bool,
     separate_requested: bool,
+    timeline_requested: bool,
+    show_timeline_ruler: bool,
+    timeline_origin: Option<Pos2>,
     new_task_open: bool,
     new_task_title: String,
     note_draft: String,
@@ -160,6 +163,9 @@ impl TodoGui {
             normalize_requested: false,
             focus_layout_requested: false,
             separate_requested: false,
+            timeline_requested: false,
+            show_timeline_ruler: true,
+            timeline_origin: None,
             new_task_open: false,
             new_task_title: String::new(),
             note_draft: String::new(),
@@ -168,6 +174,46 @@ impl TodoGui {
         };
         app.refresh();
         app
+    }
+
+    /// Lays the graph out along a day axis driven by scheduled dates.
+    ///
+    /// Only `scheduled_on` places a task: due is a commitment and defer controls
+    /// readiness, so neither is read here. Tasks with no scheduled day are parked
+    /// to the left of the axis when configured, rather than piled on today.
+    fn timeline_layout(&mut self, rect: Rect) {
+        let today = Local::now().date_naive();
+        let items = self.visible_items();
+        let mut scheduled = Vec::new();
+        for item in &items {
+            let day = item.item.scheduled_on.map(|date| (date - today).num_days());
+            if day.is_none() && !self.theme.timeline.park_unscheduled {
+                continue;
+            }
+            scheduled.push((item.item.id.to_string(), day));
+        }
+        if scheduled.is_empty() {
+            self.message = Some("No scheduled tasks to lay out.".to_owned());
+            return;
+        }
+        let spacing = TimelineSpacing {
+            day_width: self.theme.timeline.day_width,
+            lane_height: self.theme.timeline.lane_height,
+        };
+        let arranged = geometry::timeline_positions(&scheduled, spacing);
+        let origin = Pos2::new(rect.center().x, rect.top() + 140.0);
+        self.layout_undo = Some(self.node_offsets.clone());
+        for (index, item) in items.iter().enumerate() {
+            let id = item.item.id.to_string();
+            let Some(target) = arranged.get(&id) else {
+                continue;
+            };
+            self.node_offsets
+                .insert(id, (origin + *target) - grid_slot(index, rect));
+        }
+        self.timeline_origin = Some(origin);
+        self.save_layout();
+        self.message = Some("Timeline arranged by scheduled date.".to_owned());
     }
 
     /// Pushes nodes out of tag regions they do not belong to.
@@ -972,6 +1018,149 @@ impl TodoGui {
     }
 }
 
+/// Returns the weeks of a month as rows of seven days, Monday first.
+///
+/// Days outside the month are `None`, so a caller can lay out a grid without
+/// recomputing where the month starts and ends.
+fn month_grid(year: i32, month: u32) -> Vec<[Option<NaiveDate>; 7]> {
+    let Some(first) = NaiveDate::from_ymd_opt(year, month, 1) else {
+        return Vec::new();
+    };
+    let lead = first.weekday().num_days_from_monday();
+    let mut weeks = Vec::new();
+    let mut week = [None; 7];
+    let mut column = usize::try_from(lead).unwrap_or(0);
+    let mut day = first;
+    while day.month() == month {
+        if let Some(slot) = week.get_mut(column) {
+            *slot = Some(day);
+        }
+        column += 1;
+        if column == 7 {
+            weeks.push(week);
+            week = [None; 7];
+            column = 0;
+        }
+        let Some(next) = day.succ_opt() else {
+            break;
+        };
+        day = next;
+    }
+    if week.iter().any(Option::is_some) {
+        weeks.push(week);
+    }
+    weeks
+}
+
+/// Draws a calendar button that writes the picked day back into a text draft.
+///
+/// The text field stays the source of truth, so a date can still be typed or
+/// cleared; the calendar only fills it in. An unreadable draft opens the calendar
+/// on today rather than refusing to open.
+fn calendar_picker(ui: &mut egui::Ui, id: &str, draft: &mut String) {
+    let today = Local::now().date_naive();
+    let selected = parse_date(draft).ok().flatten();
+    let anchor = selected.unwrap_or(today);
+    let popup_id = ui.make_persistent_id(("calendar", id));
+    let open_id = ui.make_persistent_id(("calendar-open", id));
+    let response = ui.small_button("Pick");
+    // The open flag is kept in the ui's own data rather than egui's popup memory,
+    // which is private, so the calendar owns its lifetime explicitly.
+    let mut open = ui
+        .data(|data| data.get_temp::<bool>(open_id))
+        .unwrap_or(false);
+    if response.clicked() {
+        open = !open;
+        ui.data_mut(|data| {
+            data.insert_temp(open_id, open);
+            data.insert_temp(popup_id, (anchor.year(), anchor.month()));
+        });
+    }
+    if !open {
+        return;
+    }
+    let (mut year, mut month) = ui
+        .data(|data| data.get_temp::<(i32, u32)>(popup_id))
+        .unwrap_or((anchor.year(), anchor.month()));
+    let mut picked = None;
+    let mut closed = false;
+    egui::Area::new(popup_id)
+        .order(egui::Order::Foreground)
+        .fixed_pos(response.rect.left_bottom())
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    if ui.small_button("<").clicked() {
+                        (year, month) = previous_month(year, month);
+                    }
+                    ui.label(format!("{year:04}-{month:02}"));
+                    if ui.small_button(">").clicked() {
+                        (year, month) = next_month(year, month);
+                    }
+                    if ui.small_button("Today").clicked() {
+                        picked = Some(today);
+                    }
+                    if ui.small_button("Clear").clicked() {
+                        picked = Some(today);
+                        closed = true;
+                        draft.clear();
+                    }
+                });
+                for week in month_grid(year, month) {
+                    ui.horizontal(|ui| {
+                        for day in week {
+                            match day {
+                                Some(day) => {
+                                    let label = format!("{:>2}", day.day());
+                                    let button =
+                                        egui::Button::new(label).min_size(Vec2::new(24.0, 18.0));
+                                    let button = if Some(day) == selected {
+                                        button.fill(Color32::from_rgb(82, 110, 156))
+                                    } else if day == today {
+                                        button.fill(Color32::from_gray(70))
+                                    } else {
+                                        button
+                                    };
+                                    if ui.add(button).clicked() {
+                                        picked = Some(day);
+                                    }
+                                }
+                                None => {
+                                    ui.add_space(28.0);
+                                }
+                            }
+                        }
+                    });
+                }
+            });
+        });
+    ui.data_mut(|data| data.insert_temp(popup_id, (year, month)));
+    if let Some(day) = picked {
+        if !closed {
+            *draft = day.to_string();
+        }
+        ui.data_mut(|data| data.insert_temp(open_id, false));
+    }
+}
+
+/// Returns the month before the given one, rolling the year over.
+fn previous_month(year: i32, month: u32) -> (i32, u32) {
+    if month <= 1 {
+        (year.saturating_sub(1), 12)
+    } else {
+        (year, month - 1)
+    }
+}
+
+/// Returns the month after the given one, rolling the year over.
+fn next_month(year: i32, month: u32) -> (i32, u32) {
+    if month >= 12 {
+        (year.saturating_add(1), 1)
+    } else {
+        (year, month + 1)
+    }
+}
+
 fn parse_date(value: &str) -> std::result::Result<Option<NaiveDate>, String> {
     let value = value.trim();
     if value.is_empty() {
@@ -1016,6 +1205,7 @@ impl eframe::App for TodoGui {
                 ui.checkbox(&mut self.show_tag_constellation, "Tag constellation");
                 ui.checkbox(&mut self.show_parent_regions, "Parent regions");
                 ui.checkbox(&mut self.show_focus_window, "Focus Window");
+                ui.checkbox(&mut self.show_timeline_ruler, "Timeline ruler");
                 if ui.button("−").clicked() {
                     self.graph_zoom = (self.graph_zoom / 1.2).max(0.4);
                 }
@@ -1029,6 +1219,9 @@ impl eframe::App for TodoGui {
                 }
                 if ui.button("Focus layout").clicked() {
                     self.focus_layout_requested = true;
+                }
+                if ui.button("Timeline").clicked() {
+                    self.timeline_requested = true;
                 }
                 if ui.button("Separate tags").clicked() {
                     self.separate_requested = true;
@@ -1323,18 +1516,21 @@ impl eframe::App for TodoGui {
                         ui.label("Due");
                         ui.text_edit_singleline(&mut self.due_draft);
                         if ui.small_button("Today").clicked() { self.due_draft = Local::now().date_naive().to_string(); }
+                        calendar_picker(ui, "due", &mut self.due_draft);
                         if ui.button("Save due").clicked() { self.save_date(true); }
                     });
                     ui.horizontal(|ui| {
                         ui.label("Defer");
                         ui.text_edit_singleline(&mut self.defer_draft);
                         if ui.small_button("Today").clicked() { self.defer_draft = Local::now().date_naive().to_string(); }
+                        calendar_picker(ui, "defer", &mut self.defer_draft);
                         if ui.button("Save defer").clicked() { self.save_date(false); }
                     });
                     ui.horizontal(|ui| {
                         ui.label("Scheduled");
                         ui.text_edit_singleline(&mut self.scheduled_draft);
                         if ui.small_button("Today").clicked() { self.scheduled_draft = Local::now().date_naive().to_string(); }
+                        calendar_picker(ui, "scheduled", &mut self.scheduled_draft);
                         if ui.button("Save scheduled").clicked() { self.save_scheduled(); }
                     });
                     ui.separator();
@@ -1416,6 +1612,10 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
         app.separate_requested = false;
         app.separate_tag_groups(rect, true);
     }
+    if app.timeline_requested {
+        app.timeline_requested = false;
+        app.timeline_layout(rect);
+    }
     let items = app.visible_items();
     // The wheel divides hues between the tags actually on screen, so the palette is
     // rebuilt whenever the visible set changes.
@@ -1438,6 +1638,12 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
     let show_hierarchy = app.show_parent_graph;
     let show_dependencies = app.show_dependency_graph;
     let show_blockers = app.show_blocker_graph;
+    if let Some(origin) = app.timeline_origin
+        && app.show_timeline_ruler
+        && app.theme.timeline.show_ruler
+    {
+        draw_timeline_ruler(&painter, rect, origin, app);
+    }
     if app.show_parent_regions && app.theme.parent.show_regions {
         draw_parent_regions(
             &painter,
@@ -1750,6 +1956,69 @@ fn draw_edge(
             color,
             Stroke::NONE,
         ));
+    }
+}
+
+/// Draws the day ruler a timeline layout was built against.
+///
+/// The ruler is drawn from the last timeline arrangement, so it lines up with the
+/// nodes rather than claiming a scale the graph does not use. Today is marked, so
+/// past and upcoming scheduled work read apart at a glance.
+fn draw_timeline_ruler(painter: &egui::Painter, rect: Rect, origin: Pos2, app: &TodoGui) {
+    let today = Local::now().date_naive();
+    let day_width = app.theme.timeline.day_width * app.graph_zoom;
+    if day_width <= f32::EPSILON {
+        return;
+    }
+    let center = rect.center();
+    let axis_origin = center + (origin - center) * app.graph_zoom + app.graph_pan;
+    let margin = f32::from(app.theme.timeline.ruler_margin_days) * day_width;
+    let axis_y = axis_origin.y - 70.0 * app.graph_zoom;
+    painter.line_segment(
+        [
+            Pos2::new(rect.left(), axis_y),
+            Pos2::new(rect.right(), axis_y),
+        ],
+        Stroke::new(1.0, Color32::from_gray(90)),
+    );
+    // Stepping in whole days keeps every tick on a real date instead of a rounded
+    // pixel column.
+    let mut index: i16 = 0;
+    while index > i16::MIN + 1
+        && axis_origin.x + f32::from(index) * day_width > rect.left() - margin
+    {
+        index -= 1;
+    }
+    while index < i16::MAX {
+        let x = axis_origin.x + f32::from(index) * day_width;
+        if x > rect.right() + margin {
+            break;
+        }
+        let Some(day) = today.checked_add_signed(chrono::Duration::days(i64::from(index))) else {
+            break;
+        };
+        let is_today = day == today;
+        let tick_color = if is_today {
+            Color32::from_rgb(224, 188, 73)
+        } else {
+            Color32::from_gray(90)
+        };
+        painter.line_segment(
+            [Pos2::new(x, axis_y - 6.0), Pos2::new(x, axis_y + 6.0)],
+            Stroke::new(if is_today { 2.0 } else { 1.0 }, tick_color),
+        );
+        painter.text(
+            Pos2::new(x, axis_y - 10.0),
+            Align2::CENTER_BOTTOM,
+            day.format("%m-%d").to_string(),
+            FontId::proportional(10.0),
+            if is_today {
+                tick_color
+            } else {
+                Color32::from_gray(140)
+            },
+        );
+        index += 1;
     }
 }
 

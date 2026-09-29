@@ -393,12 +393,57 @@ fn group_centroids(
         .collect()
 }
 
+/// Spacing for a scheduled-date timeline.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TimelineSpacing {
+    /// Horizontal distance between one day and the next.
+    pub day_width: f32,
+    /// Vertical distance between tasks sharing a day.
+    pub lane_height: f32,
+}
+
+/// Places tasks along a horizontal day axis, stacking those that share a day.
+///
+/// The input pairs each task with its day offset from the timeline's origin day;
+/// `None` means the task has no scheduled day and is parked in a lane below the
+/// axis, to the left of the first scheduled column. Tasks sharing a day stack
+/// downward in the order given, so the caller controls the reading order.
+pub fn timeline_positions(
+    scheduled: &[(String, Option<i64>)],
+    spacing: TimelineSpacing,
+) -> HashMap<String, Vec2> {
+    let mut lanes: BTreeMap<i64, usize> = BTreeMap::new();
+    let mut parked = 0_usize;
+    let mut positions = HashMap::new();
+    for (id, day) in scheduled {
+        match day {
+            Some(day) => {
+                let lane = lanes.entry(*day).or_insert(0);
+                let row = f32::from(u16::try_from(*lane).unwrap_or(u16::MAX));
+                *lane += 1;
+                let column = i32::try_from(*day).unwrap_or(i32::MAX);
+                let x = f32::from(i16::try_from(column).unwrap_or(i16::MAX)) * spacing.day_width;
+                positions.insert(id.clone(), Vec2::new(x, row * spacing.lane_height));
+            }
+            None => {
+                let row = f32::from(u16::try_from(parked).unwrap_or(u16::MAX));
+                parked += 1;
+                positions.insert(
+                    id.clone(),
+                    Vec2::new(-spacing.day_width * 1.6, row * spacing.lane_height),
+                );
+            }
+        }
+    }
+    positions
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        BandSpacing, FlowDirection, FlowSpacing, SeparationSpacing, arrowhead_points,
-        banded_positions, centroid, convex_hull, expand_path, layered_positions, separate_groups,
-        shaft_end, smooth_closed_path,
+        BandSpacing, FlowDirection, FlowSpacing, SeparationSpacing, TimelineSpacing,
+        arrowhead_points, banded_positions, centroid, convex_hull, expand_path, layered_positions,
+        separate_groups, shaft_end, smooth_closed_path, timeline_positions,
     };
     use eframe::egui::{Vec2, pos2};
 
@@ -451,6 +496,59 @@ mod tests {
             .iter()
             .map(|(id, x, y)| ((*id).to_owned(), Vec2::new(*x, *y)))
             .collect()
+    }
+
+    fn timeline() -> TimelineSpacing {
+        TimelineSpacing {
+            day_width: 100.0,
+            lane_height: 50.0,
+        }
+    }
+
+    #[test]
+    fn later_days_sit_further_right() {
+        let positions = timeline_positions(
+            &[("soon".to_owned(), Some(0)), ("later".to_owned(), Some(3))],
+            timeline(),
+        );
+        assert!(matches!(
+            (positions.get("soon"), positions.get("later")),
+            (Some(soon), Some(later)) if later.x > soon.x
+        ));
+    }
+
+    #[test]
+    fn tasks_sharing_a_day_stack_downward() {
+        let positions = timeline_positions(
+            &[
+                ("first".to_owned(), Some(1)),
+                ("second".to_owned(), Some(1)),
+            ],
+            timeline(),
+        );
+        assert!(matches!(
+            (positions.get("first"), positions.get("second")),
+            (Some(first), Some(second))
+                if (first.x - second.x).abs() < 0.001 && second.y > first.y
+        ));
+    }
+
+    #[test]
+    fn unscheduled_tasks_park_left_of_the_axis() {
+        let positions = timeline_positions(
+            &[("parked".to_owned(), None), ("dated".to_owned(), Some(0))],
+            timeline(),
+        );
+        assert!(matches!(
+            (positions.get("parked"), positions.get("dated")),
+            (Some(parked), Some(dated)) if parked.x < dated.x
+        ));
+    }
+
+    #[test]
+    fn a_day_in_the_past_sits_left_of_the_origin() {
+        let positions = timeline_positions(&[("overdue".to_owned(), Some(-2))], timeline());
+        assert!(matches!(positions.get("overdue"), Some(position) if position.x < 0.0));
     }
 
     #[test]
