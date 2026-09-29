@@ -219,6 +219,17 @@ impl EdgeTheme {
     }
 }
 
+/// The outline a tag region is drawn with.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RegionShape {
+    /// A rounded rectangle around every member node.
+    Rect,
+    /// A smoothed hull that follows the members, for a more organic reading.
+    #[default]
+    Hull,
+}
+
 /// Controls how tag paths turn into colors and how tag regions are drawn.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -241,6 +252,12 @@ pub struct TagTheme {
     pub region_stroke_alpha: u8,
     /// Width of the tag accent stripe drawn on a node's leading edge.
     pub node_stripe_width: f32,
+    /// Whether a region is drawn as a rectangle or a smoothed hull.
+    pub region_shape: RegionShape,
+    /// Space left between a region's edge and its member nodes.
+    pub region_padding: f32,
+    /// Chaikin rounding passes applied to a hull region.
+    pub region_smoothing: u8,
 }
 
 impl Default for TagTheme {
@@ -255,6 +272,9 @@ impl Default for TagTheme {
             region_fill_alpha: 26,
             region_stroke_alpha: 110,
             node_stripe_width: 7.0,
+            region_shape: RegionShape::Hull,
+            region_padding: 24.0,
+            region_smoothing: 2,
         }
     }
 }

@@ -9,7 +9,7 @@ use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec
 use geometry::{BandSpacing, FlowSpacing};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fs, path::PathBuf};
-use theme::{NodeShape, Theme};
+use theme::{NodeShape, RegionShape, Theme};
 use todo_core::{ItemState, NamespacePath, Priority};
 use todo_store::{
     AppConfig, AppPaths, Citation, FocusSequence, ItemPatch, ItemScope, Ledger, NamespaceEntry,
@@ -1679,34 +1679,45 @@ fn draw_tag_constellation(
         let Some(points) = groups.get(&path) else {
             continue;
         };
-        let Some(bounds) = bounds_for_points(points, Vec2::new(92.0, 38.0) * zoom) else {
+        let half_size = Vec2::new(92.0, 38.0) * zoom;
+        let Some(bounds) = bounds_for_points(points, half_size) else {
             continue;
         };
         let color = theme.tag.color(&path);
-        painter.rect_filled(
-            bounds.expand(16.0),
-            18.0,
+        let fill = Color32::from_rgba_unmultiplied(
+            color.r(),
+            color.g(),
+            color.b(),
+            theme.tag.region_fill_alpha,
+        );
+        let stroke = Stroke::new(
+            1.0,
             Color32::from_rgba_unmultiplied(
                 color.r(),
                 color.g(),
                 color.b(),
-                theme.tag.region_fill_alpha,
+                theme.tag.region_stroke_alpha,
             ),
         );
-        painter.rect_stroke(
-            bounds.expand(16.0),
-            18.0,
-            Stroke::new(
-                1.0,
-                Color32::from_rgba_unmultiplied(
-                    color.r(),
-                    color.g(),
-                    color.b(),
-                    theme.tag.region_stroke_alpha,
-                ),
-            ),
-            egui::StrokeKind::Outside,
-        );
+        if theme.tag.region_shape == RegionShape::Hull {
+            let corners = node_corners(points, half_size);
+            let hull = geometry::convex_hull(&corners);
+            let padded = geometry::expand_path(&hull, theme.tag.region_padding);
+            let outline = geometry::smooth_closed_path(&padded, theme.tag.region_smoothing);
+            if outline.len() >= 3 {
+                painter.add(egui::Shape::convex_polygon(outline, fill, stroke));
+                painter.text(
+                    bounds.left_top() + Vec2::new(5.0, 4.0),
+                    Align2::LEFT_TOP,
+                    path,
+                    FontId::proportional(11.0),
+                    color,
+                );
+                continue;
+            }
+        }
+        painter.rect_filled(bounds.expand(16.0), 18.0, fill);
+        painter.rect_stroke(bounds.expand(16.0), 18.0, stroke, egui::StrokeKind::Outside);
         painter.text(
             bounds.left_top() + Vec2::new(5.0, 4.0),
             Align2::LEFT_TOP,
@@ -1715,6 +1726,21 @@ fn draw_tag_constellation(
             color,
         );
     }
+}
+
+/// Returns the corner points of every node box, for hulls that wrap whole nodes.
+///
+/// Hulling node centers alone would clip the nodes themselves, so the hull is
+/// built from the boxes the nodes occupy.
+fn node_corners(points: &[Pos2], half_size: Vec2) -> Vec<Pos2> {
+    let mut corners = Vec::with_capacity(points.len() * 4);
+    for point in points {
+        corners.push(*point + Vec2::new(-half_size.x, -half_size.y));
+        corners.push(*point + Vec2::new(half_size.x, -half_size.y));
+        corners.push(*point + Vec2::new(half_size.x, half_size.y));
+        corners.push(*point + Vec2::new(-half_size.x, half_size.y));
+    }
+    corners
 }
 
 fn bounds_for_points(points: &[Pos2], half_size: Vec2) -> Option<Rect> {

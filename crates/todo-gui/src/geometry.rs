@@ -199,11 +199,122 @@ fn place_band(
     }
 }
 
+/// Returns the convex hull of `points`, counter-clockwise, without repeating the first.
+///
+/// Uses Andrew's monotone chain. Fewer than three points cannot bound an area, so
+/// they are returned as given and the caller can fall back to a simpler shape.
+pub fn convex_hull(points: &[Pos2]) -> Vec<Pos2> {
+    if points.len() < 3 {
+        return points.to_vec();
+    }
+    let mut sorted = points.to_vec();
+    sorted.sort_by(|left, right| {
+        left.x
+            .total_cmp(&right.x)
+            .then_with(|| left.y.total_cmp(&right.y))
+    });
+    sorted.dedup_by(|left, right| {
+        (left.x - right.x).abs() < f32::EPSILON && (left.y - right.y).abs() < f32::EPSILON
+    });
+    if sorted.len() < 3 {
+        return sorted;
+    }
+    let mut hull: Vec<Pos2> = Vec::with_capacity(sorted.len() * 2);
+    for pass in 0..2 {
+        let lower_mark = hull.len();
+        let ordered: Vec<Pos2> = if pass == 0 {
+            sorted.clone()
+        } else {
+            sorted.iter().rev().copied().collect()
+        };
+        for point in ordered {
+            while hull.len() > lower_mark + 1 {
+                let last = hull.last().copied();
+                let previous = hull.len().checked_sub(2).and_then(|index| hull.get(index));
+                let turns_right = match (previous, last) {
+                    (Some(previous), Some(last)) => cross(*previous, last, point) <= 0.0,
+                    _ => false,
+                };
+                if turns_right {
+                    hull.pop();
+                } else {
+                    break;
+                }
+            }
+            hull.push(point);
+        }
+        hull.pop();
+    }
+    hull
+}
+
+/// Returns the z component of the cross product of `a->b` and `a->c`.
+fn cross(a: Pos2, b: Pos2, c: Pos2) -> f32 {
+    let first = b - a;
+    let second = c - a;
+    first.x * second.y - first.y * second.x
+}
+
+/// Pushes every point of a closed path outward from the path's centroid.
+pub fn expand_path(points: &[Pos2], padding: f32) -> Vec<Pos2> {
+    let Some(centroid) = centroid(points) else {
+        return points.to_vec();
+    };
+    points
+        .iter()
+        .map(|point| {
+            let direction = *point - centroid;
+            let length = direction.length();
+            if length <= f32::EPSILON {
+                *point
+            } else {
+                *point + direction / length * padding
+            }
+        })
+        .collect()
+}
+
+/// Rounds a closed path by Chaikin subdivision, once per iteration.
+///
+/// Two iterations turn a hull into a shape that reads as organic while staying
+/// cheap enough to recompute every frame.
+pub fn smooth_closed_path(points: &[Pos2], iterations: u8) -> Vec<Pos2> {
+    let mut path = points.to_vec();
+    if path.len() < 3 {
+        return path;
+    }
+    for _ in 0..iterations {
+        let mut next = Vec::with_capacity(path.len() * 2);
+        for (index, point) in path.iter().enumerate() {
+            let following = path
+                .get((index + 1) % path.len())
+                .copied()
+                .unwrap_or(*point);
+            next.push(*point + (following - *point) * 0.25);
+            next.push(*point + (following - *point) * 0.75);
+        }
+        path = next;
+    }
+    path
+}
+
+/// Returns the average of `points`, or `None` when there are none.
+pub fn centroid(points: &[Pos2]) -> Option<Pos2> {
+    if points.is_empty() {
+        return None;
+    }
+    let count = f32::from(u16::try_from(points.len()).unwrap_or(u16::MAX));
+    let sum = points
+        .iter()
+        .fold(Vec2::ZERO, |sum, point| sum + point.to_vec2());
+    Some((sum / count).to_pos2())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        BandSpacing, FlowDirection, FlowSpacing, arrowhead_points, banded_positions,
-        layered_positions, shaft_end,
+        BandSpacing, FlowDirection, FlowSpacing, arrowhead_points, banded_positions, centroid,
+        convex_hull, expand_path, layered_positions, shaft_end, smooth_closed_path,
     };
     use eframe::egui::pos2;
 
@@ -233,6 +344,62 @@ mod tests {
             row_gap: 90.0,
             band_width: 4,
         }
+    }
+
+    #[test]
+    fn a_hull_drops_points_inside_it() {
+        let square = vec![
+            pos2(0.0, 0.0),
+            pos2(10.0, 0.0),
+            pos2(10.0, 10.0),
+            pos2(0.0, 10.0),
+            pos2(5.0, 5.0),
+        ];
+        let hull = convex_hull(&square);
+        assert_eq!(hull.len(), 4);
+        assert!(!hull.contains(&pos2(5.0, 5.0)));
+    }
+
+    #[test]
+    fn a_hull_of_two_points_is_returned_unchanged() {
+        let line = vec![pos2(0.0, 0.0), pos2(4.0, 0.0)];
+        assert_eq!(convex_hull(&line).len(), 2);
+    }
+
+    #[test]
+    fn expanding_a_path_moves_points_away_from_the_center() {
+        let square = vec![
+            pos2(-5.0, -5.0),
+            pos2(5.0, -5.0),
+            pos2(5.0, 5.0),
+            pos2(-5.0, 5.0),
+        ];
+        let expanded = expand_path(&square, 10.0);
+        let before = centroid(&square).map(|center| (square.first().copied(), center));
+        let after = centroid(&expanded).map(|center| (expanded.first().copied(), center));
+        assert!(matches!(
+            (before, after),
+            (Some((Some(before), first_center)), Some((Some(after), second_center)))
+                if (after - second_center).length() > (before - first_center).length()
+        ));
+    }
+
+    #[test]
+    fn smoothing_rounds_a_path_into_more_points() {
+        let triangle = vec![pos2(0.0, 0.0), pos2(10.0, 0.0), pos2(5.0, 9.0)];
+        assert_eq!(smooth_closed_path(&triangle, 1).len(), 6);
+        assert_eq!(smooth_closed_path(&triangle, 2).len(), 12);
+    }
+
+    #[test]
+    fn smoothing_keeps_a_degenerate_path_as_is() {
+        let line = vec![pos2(0.0, 0.0), pos2(1.0, 0.0)];
+        assert_eq!(smooth_closed_path(&line, 3).len(), 2);
+    }
+
+    #[test]
+    fn a_centroid_of_nothing_is_none() {
+        assert!(centroid(&[]).is_none());
     }
 
     #[test]
