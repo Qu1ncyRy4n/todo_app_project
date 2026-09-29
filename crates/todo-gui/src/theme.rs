@@ -15,6 +15,7 @@ use std::{fs, path::Path};
 #[serde(default, deny_unknown_fields)]
 pub struct Theme {
     pub focus: FocusTheme,
+    pub parent: ParentTheme,
     pub layout: LayoutTheme,
     pub node: NodeTheme,
     pub tag: TagTheme,
@@ -216,6 +217,40 @@ impl EdgeTheme {
             1.0
         };
         (self.arrowhead_length * scale, self.arrowhead_width * scale)
+    }
+}
+
+/// Controls the region drawn around a parent task and its descendants.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ParentTheme {
+    /// Whether parent containment regions are drawn at all.
+    pub show_regions: bool,
+    /// How many visible descendants a parent needs before it gets a region.
+    pub min_descendants: usize,
+    /// Space left between a region's edge and its member nodes.
+    pub padding: f32,
+    /// Chaikin rounding passes applied to the region.
+    pub smoothing: u8,
+    /// Fill opacity of a parent region, out of 255.
+    pub fill_alpha: u8,
+    /// Outline opacity of a parent region, out of 255.
+    pub stroke_alpha: u8,
+    /// Outline thickness of a parent region.
+    pub stroke_width: f32,
+}
+
+impl Default for ParentTheme {
+    fn default() -> Self {
+        Self {
+            show_regions: true,
+            min_descendants: 1,
+            padding: 12.0,
+            smoothing: 2,
+            fill_alpha: 14,
+            stroke_alpha: 90,
+            stroke_width: 1.5,
+        }
     }
 }
 

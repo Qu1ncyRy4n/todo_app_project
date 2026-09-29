@@ -69,6 +69,7 @@ struct TodoGui {
     show_dependency_graph: bool,
     show_blocker_graph: bool,
     show_tag_constellation: bool,
+    show_parent_regions: bool,
     show_focus_window: bool,
     show_completed: bool,
     tag_filter: String,
@@ -133,6 +134,7 @@ impl TodoGui {
             show_dependency_graph: true,
             show_blocker_graph: true,
             show_tag_constellation: true,
+            show_parent_regions: true,
             show_focus_window: true,
             show_completed: false,
             tag_filter: String::new(),
@@ -949,6 +951,7 @@ impl eframe::App for TodoGui {
                 ui.checkbox(&mut self.show_dependency_graph, "Depends on");
                 ui.checkbox(&mut self.show_blocker_graph, "Blocked by");
                 ui.checkbox(&mut self.show_tag_constellation, "Tag constellation");
+                ui.checkbox(&mut self.show_parent_regions, "Parent regions");
                 ui.checkbox(&mut self.show_focus_window, "Focus Window");
                 if ui.button("−").clicked() {
                     self.graph_zoom = (self.graph_zoom / 1.2).max(0.4);
@@ -1354,6 +1357,9 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
     let show_hierarchy = app.show_parent_graph;
     let show_dependencies = app.show_dependency_graph;
     let show_blockers = app.show_blocker_graph;
+    if app.show_parent_regions && app.theme.parent.show_regions {
+        draw_parent_regions(&painter, &items, &positions, app.graph_zoom, &app.theme);
+    }
     if app.show_tag_constellation {
         draw_tag_constellation(&painter, &items, &positions, app.graph_zoom, &app.theme);
     }
@@ -1652,6 +1658,110 @@ fn draw_edge(
     }
 }
 
+/// Draws a containment region around each parent task and its descendants.
+///
+/// A parent's region wraps the whole subtree, not just its direct children, so a
+/// deep branch reads as one body of work. Regions are drawn largest first so a
+/// nested subtree stays visible inside its ancestor. The color comes from the
+/// parent's own tag, falling back to a neutral outline when it has no tag, so the
+/// region never implies a tag the parent does not carry.
+fn draw_parent_regions(
+    painter: &egui::Painter,
+    items: &[StoredItem],
+    positions: &HashMap<String, Pos2>,
+    zoom: f32,
+    theme: &Theme,
+) {
+    let mut children: HashMap<String, Vec<String>> = HashMap::new();
+    for item in items {
+        if let Some(parent) = item.item.parent_id {
+            children
+                .entry(parent.to_string())
+                .or_default()
+                .push(item.item.id.to_string());
+        }
+    }
+    let half_size = {
+        let (width, height) = theme.node.size();
+        Vec2::new(width / 2.0, height / 2.0) * zoom
+    };
+    let mut regions = Vec::new();
+    for item in items {
+        let id = item.item.id.to_string();
+        let subtree = collect_subtree(&id, &children);
+        if subtree.len() <= theme.parent.min_descendants {
+            continue;
+        }
+        let points = subtree
+            .iter()
+            .filter_map(|member| positions.get(member).copied())
+            .collect::<Vec<_>>();
+        if points.len() < 2 {
+            continue;
+        }
+        let color = node_tag_color(item, theme).unwrap_or(Color32::from_gray(150));
+        regions.push((subtree.len(), points, color, item.item.title.clone()));
+    }
+    regions.sort_by_key(|(size, ..)| std::cmp::Reverse(*size));
+    for (_, points, color, title) in regions {
+        let corners = node_corners(&points, half_size);
+        let hull = geometry::convex_hull(&corners);
+        let padded = geometry::expand_path(&hull, theme.parent.padding);
+        let outline = geometry::smooth_closed_path(&padded, theme.parent.smoothing);
+        if outline.len() < 3 {
+            continue;
+        }
+        let fill = Color32::from_rgba_unmultiplied(
+            color.r(),
+            color.g(),
+            color.b(),
+            theme.parent.fill_alpha,
+        );
+        let stroke = Stroke::new(
+            theme.parent.stroke_width,
+            Color32::from_rgba_unmultiplied(
+                color.r(),
+                color.g(),
+                color.b(),
+                theme.parent.stroke_alpha,
+            ),
+        );
+        painter.add(egui::Shape::convex_polygon(outline.clone(), fill, stroke));
+        if let Some(label_anchor) = outline.iter().min_by(|left, right| {
+            (left.y, left.x)
+                .partial_cmp(&(right.y, right.x))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        }) {
+            painter.text(
+                *label_anchor - Vec2::new(0.0, 4.0),
+                Align2::CENTER_BOTTOM,
+                short_title(&title),
+                FontId::proportional(11.0),
+                color,
+            );
+        }
+    }
+}
+
+/// Returns a task's id together with every visible descendant beneath it.
+fn collect_subtree(root: &str, children: &HashMap<String, Vec<String>>) -> Vec<String> {
+    let mut found = vec![root.to_owned()];
+    let mut pending = vec![root.to_owned()];
+    while let Some(current) = pending.pop() {
+        let Some(next) = children.get(&current) else {
+            continue;
+        };
+        for child in next {
+            if found.contains(child) {
+                continue;
+            }
+            found.push(child.clone());
+            pending.push(child.clone());
+        }
+    }
+    found
+}
+
 fn draw_tag_constellation(
     painter: &egui::Painter,
     items: &[StoredItem],
@@ -1785,4 +1895,44 @@ fn load_layout(path: &std::path::Path) -> HashMap<String, Vec2> {
 
 fn short_title(title: &str) -> String {
     title.chars().take(22).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::collect_subtree;
+    use std::collections::HashMap;
+
+    fn tree(pairs: &[(&str, &[&str])]) -> HashMap<String, Vec<String>> {
+        pairs
+            .iter()
+            .map(|(parent, children)| {
+                (
+                    (*parent).to_owned(),
+                    children.iter().map(|child| (*child).to_owned()).collect(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_subtree_includes_every_descendant() {
+        let children = tree(&[("root", &["a", "b"]), ("a", &["deep"])]);
+        let mut found = collect_subtree("root", &children);
+        found.sort();
+        assert_eq!(found, vec!["a", "b", "deep", "root"]);
+    }
+
+    #[test]
+    fn a_leaf_is_its_own_subtree() {
+        let children = tree(&[("root", &["leaf"])]);
+        assert_eq!(collect_subtree("leaf", &children), vec!["leaf"]);
+    }
+
+    #[test]
+    fn a_parent_cycle_does_not_loop_forever() {
+        let children = tree(&[("a", &["b"]), ("b", &["a"])]);
+        let mut found = collect_subtree("a", &children);
+        found.sort();
+        assert_eq!(found, vec!["a", "b"]);
+    }
 }
