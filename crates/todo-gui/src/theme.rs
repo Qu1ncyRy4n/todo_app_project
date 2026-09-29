@@ -82,6 +82,14 @@ pub struct LayoutTheme {
     pub done_band_gap: f32,
     /// Whether finished prerequisites are lifted into a band above.
     pub done_above: bool,
+    /// Whether active work is pulled together after arranging.
+    ///
+    /// A wide subtree otherwise pushes the next active task far along the row, so
+    /// what is being worked on ends up spread across the canvas. Compacting takes
+    /// each head's subtree with it, leaving the heads close and the branches loose.
+    pub compact_active: bool,
+    /// Distance between active heads once they are pulled together.
+    pub active_head_gap: f32,
     /// Whether a normalized graph flows downward or rightward.
     pub direction: FlowDirection,
     /// Distance between one layer and the next.
@@ -129,6 +137,8 @@ impl Default for LayoutTheme {
             row_gap: 130.0,
             done_band_gap: 190.0,
             done_above: true,
+            compact_active: true,
+            active_head_gap: 240.0,
             direction: FlowDirection::default(),
             layer_gap: 120.0,
             node_gap: 185.0,

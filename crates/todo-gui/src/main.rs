@@ -1276,10 +1276,76 @@ impl TodoGui {
             Pos2::new(rect.center().x, rect.top() + 200.0),
         );
         self.relax_if_enabled(rect);
+        if self.theme.layout.compact_active {
+            let heads = roots
+                .iter()
+                .filter(|id| {
+                    items
+                        .iter()
+                        .find(|candidate| candidate.item.id.to_string() == **id)
+                        .is_some_and(|item| {
+                            item.item.state == ItemState::Active || holding.contains(*id)
+                        })
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            self.compact_active_heads(rect, &heads);
+        }
         self.timeline_origin = None;
         self.focus_mode = false;
         self.message =
             Some("Hierarchy arranged. Undo layout restores the previous one.".to_owned());
+    }
+
+    /// Pulls active heads together, each carrying its own subtree.
+    ///
+    /// Runs after the overlap pass so the branches keep the spacing that pass gave
+    /// them, while the heads themselves end up adjacent: the Focus Window reads as
+    /// one row of work rather than as work scattered across the canvas.
+    fn compact_active_heads(&mut self, rect: Rect, heads: &[String]) {
+        if heads.len() < 2 {
+            return;
+        }
+        let items = self.visible_items();
+        let children = child_index(&items);
+        let slot_of = |id: &str| {
+            items
+                .iter()
+                .position(|item| item.item.id.to_string() == id)
+                .map(|index| grid_slot(index, rect).to_vec2())
+        };
+        let mut placed = heads
+            .iter()
+            .filter_map(|id| {
+                let slot = slot_of(id)?;
+                let offset = self.node_offsets.get(id).copied().unwrap_or(Vec2::ZERO);
+                Some((id.clone(), slot + offset))
+            })
+            .collect::<Vec<_>>();
+        placed.sort_by(|left, right| left.1.x.total_cmp(&right.1.x));
+        let center = placed.iter().map(|(_, at)| at.x).sum::<f32>()
+            / f32::from(u16::try_from(placed.len()).unwrap_or(1).max(1));
+        let gap = self.theme.layout.active_head_gap;
+        let span = f32::from(u16::try_from(placed.len().saturating_sub(1)).unwrap_or(0)) * gap;
+        let start = center - span / 2.0;
+        for (index, (id, at)) in placed.iter().enumerate() {
+            let target = start + f32::from(u16::try_from(index).unwrap_or(0)) * gap;
+            let shift = Vec2::new(target - at.x, 0.0);
+            if shift.x.abs() < 0.5 {
+                continue;
+            }
+            // The head takes its subtree with it, so compacting never separates a
+            // parent from the work hanging beneath it.
+            for member in collect_subtree(id, &children) {
+                let current = self
+                    .node_offsets
+                    .get(&member)
+                    .copied()
+                    .unwrap_or(Vec2::ZERO);
+                self.node_offsets.insert(member, current + shift);
+            }
+        }
+        self.save_layout();
     }
 
     /// Returns finished tasks that something visible still depends on.
