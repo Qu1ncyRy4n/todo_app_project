@@ -52,6 +52,18 @@ dogfooding notes. Every slice below landed as its own commit with tests.
 15. Reversible deletion behind a confirmation, with restore.
 16. Task weight from priority, urgency, difficulty, estimate, and subtree size.
 17. Individually hideable inspector sections.
+18. Inspector grouped into Status, Relationships, Details, Schedule, and Advanced,
+    each collapsible. The editor no longer deletes tasks.
+19. One filter sidebar; the toolbar carries actions only.
+20. Hierarchical tri-state tag filter: neutral, only, hidden, with inheritance.
+21. The timeline ruler retires with its layout.
+22. Tag regions drawn per cluster of nearby members, with labels above the region
+    and clipped to its width.
+23. Parent tasks draw as titled boxes holding their subtree.
+24. Overlapping tasks are pushed apart after every layout, and on demand.
+25. Focus layout exiles and dims non-active work, then frames the active band.
+    An Active work only filter hides it entirely instead.
+26. Nodes glide to new positions instead of jumping.
 
 ## Configuration
 
@@ -61,7 +73,9 @@ rather than ignored. Reload theme re-reads it in place, and writes the current
 defaults the first time as an editable starting point.
 
 Sections: `[node]`, `[edge]`, `[tag]`, `[layout]`, `[focus]`, `[timeline]`,
-`[parent]`, `[weight]`, `[safety]`, `[inspector]`.
+`[parent]`, `[weight]`, `[inspector]`. A `[safety]` section from an earlier
+version is still accepted so existing files keep loading, but it no longer does
+anything: deleting left the editor.
 
 Values that carry data or protocol meaning are deliberately not configurable.
 
@@ -76,16 +90,28 @@ git diff --check
 All workspace tests pass, including protocol round trips, view rebuilds from the
 log, and the CLI integration suite.
 
+## Deferred by decision
+
+These were considered and put off deliberately, not overlooked.
+
+1. Live physics: continuous gravity and repulsion, so the graph self-organizes and
+   reacts while dragging. The eased transitions and the overlap pass are the
+   settling half of it; the always-running simulation is the part left.
+2. Timeline snapping: dragging a task onto a day to set its scheduled date.
+3. Sort and group options for the task views.
+
 ## Remaining work
 
 1. Order nodes within a normalized layer by predecessor barycenter to cut edge
    crossings. Today the order is alphabetical and deterministic.
 2. Approximate tag regions by their drawn hull during separation, rather than by
-   their centroid.
+   their centroid. Clustering has narrowed the regions, so this matters less.
 3. Break cycles deliberately in the layered layout instead of parking cyclic nodes
    in a trailing layer.
 4. Decide whether the spore-galaxy reading wants more than the `circle` node shape
    already available, such as size-by-weight tuned against real data.
+5. Measure region label widths with a text galley rather than estimating from the
+   font size, if a clipped label ever lands visibly short or long.
 
 ## Protocol sequence
 
