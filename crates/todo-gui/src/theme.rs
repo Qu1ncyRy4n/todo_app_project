@@ -4,7 +4,7 @@
 //! opinionated default and can be overridden without touching code. Values that
 //! encode protocol or data meaning never belong here.
 
-use crate::geometry::FlowDirection;
+use crate::{geometry::FlowDirection, palette::Colormap};
 use anyhow::{Context, Result};
 use eframe::egui::{Color32, ecolor::Hsva};
 use serde::{Deserialize, Serialize};
@@ -210,6 +210,13 @@ pub struct NodeTheme {
     pub meta_font_size: f32,
     /// Whether the state and priority line is drawn at all.
     pub show_meta_line: bool,
+    /// Whether a node's outline takes its tag color rather than a neutral gray.
+    ///
+    /// On by default: tasks sharing a tag then read as one family from their
+    /// borders alone, without having to trace which region encloses them.
+    pub outline_from_tag: bool,
+    /// Outline thickness of an unselected node.
+    pub outline_width: f32,
     /// Whether a long title wraps onto more lines instead of being cut short.
     pub wrap_titles: bool,
     /// Space between a node's edge and its text.
@@ -232,6 +239,8 @@ impl Default for NodeTheme {
             title_font_size: 14.0,
             meta_font_size: 11.0,
             show_meta_line: true,
+            outline_from_tag: true,
+            outline_width: 1.6,
             wrap_titles: true,
             text_padding: 9.0,
             max_height: 190.0,
@@ -677,6 +686,13 @@ pub struct TagTheme {
     pub coloring: TagColoring,
     /// Whether a task carries the tags of the tasks above it.
     pub inherit: TagInheritance,
+    /// Which color ramp tag hues are drawn from.
+    pub colormap: Colormap,
+    /// Overall brightness of tag colors, as a multiplier.
+    ///
+    /// Above one pushes the ramp toward its most saturated reading, which is what
+    /// makes tags carry across a dark canvas.
+    pub brightness: f32,
     /// How far apart two tagged tasks can sit and still share one region.
     ///
     /// Without a limit, one tag draws a single region spanning everything it
@@ -709,6 +725,8 @@ impl Default for TagTheme {
             region_smoothing: 2,
             coloring: TagColoring::default(),
             inherit: TagInheritance::default(),
+            colormap: Colormap::default(),
+            brightness: 1.15,
             cluster_distance: 420.0,
             min_region_members: 2,
             label_full_path: false,
@@ -734,15 +752,22 @@ impl TagTheme {
         self.shade(hue, path.matches('/').count())
     }
 
-    /// Returns the color for a hue at a given tag depth.
+    /// Returns the color for a position on the wheel at a given tag depth.
     ///
-    /// Depth darkens and saturates, so nesting reads as depth in any hue scheme.
-    pub fn shade(&self, hue: f32, depth: usize) -> Color32 {
+    /// The ramp supplies the hue; depth then darkens and saturates it, so nesting
+    /// reads as depth whichever ramp is in use.
+    pub fn shade(&self, position: f32, depth: usize) -> Color32 {
         let depth = f32::from(u8::try_from(depth).unwrap_or(u8::MAX));
-        let saturation =
-            (self.base_saturation + self.depth_saturation_step * depth).min(self.max_saturation);
-        let value = (self.base_value - self.depth_value_step * depth).max(self.min_value);
-        Color32::from(Hsva::new(hue.rem_euclid(1.0), saturation, value, 1.0))
+        let wrapped = position.rem_euclid(1.0);
+        let base = match self.colormap {
+            Colormap::Rainbow => Hsva::from(crate::palette::rainbow(wrapped)),
+            Colormap::Hue => Hsva::new(wrapped, self.base_saturation, self.base_value, 1.0),
+        };
+        let saturation = (base.s.max(self.base_saturation) + self.depth_saturation_step * depth)
+            .min(self.max_saturation);
+        let value = ((base.v * self.brightness).min(1.0) - self.depth_value_step * depth)
+            .max(self.min_value);
+        Color32::from(Hsva::new(base.h, saturation, value, 1.0))
     }
 }
 

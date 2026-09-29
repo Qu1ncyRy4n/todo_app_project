@@ -1,6 +1,7 @@
 //! Native graph editor for the local Todo Ledger.
 
 mod geometry;
+mod palette;
 mod tags;
 mod theme;
 
@@ -2522,13 +2523,20 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
         };
         let fill = dim(fill);
         let accent = node_tag_color(item, &app.theme, &palette, &effective).map(dim);
+        // Borders carry the tag color so tasks in one family read as related from
+        // their outlines alone. Selection still overrides it, since which task is
+        // selected must never be ambiguous.
+        let border = match accent {
+            Some(color) if app.theme.node.outline_from_tag => color,
+            _ => dim(Color32::LIGHT_GRAY),
+        };
         let outline = Stroke::new(
-            if selected { 3.0 } else { 1.0 },
             if selected {
-                Color32::GOLD
+                3.0
             } else {
-                dim(Color32::LIGHT_GRAY)
+                app.theme.node.outline_width
             },
+            if selected { Color32::GOLD } else { border },
         );
         draw_node_body(
             &painter,
