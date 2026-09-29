@@ -811,15 +811,59 @@ pub fn grouped_positions(
     positions
 }
 
+/// Returns the point on a rectangle's edge facing `toward`.
+///
+/// Used to start and end relationship arrows at the cards themselves. Taking the
+/// real rectangle rather than one assumed size is what keeps an arrow touching a
+/// node that grew to fit its title, or a container drawn as a wide header.
+pub fn boundary_point(rect: Rect, toward: Pos2) -> Pos2 {
+    let center = rect.center();
+    let direction = toward - center;
+    let length = direction.length();
+    if length <= f32::EPSILON {
+        return center;
+    }
+    let half = rect.size() / 2.0;
+    let unit = direction / length;
+    // The smaller of the two edge crossings is the one actually hit.
+    let horizontal = if unit.x.abs() <= f32::EPSILON {
+        f32::MAX
+    } else {
+        half.x / unit.x.abs()
+    };
+    let vertical = if unit.y.abs() <= f32::EPSILON {
+        f32::MAX
+    } else {
+        half.y / unit.y.abs()
+    };
+    center + unit * horizontal.min(vertical)
+}
+
+/// Returns where an arrow between two cards should start and end.
+///
+/// The gap keeps an arrowhead clear of the card it points at, so the head reads as
+/// arriving rather than as overlapping the title.
+pub fn edge_between(from: Rect, to: Rect, gap: f32) -> (Pos2, Pos2) {
+    let start = boundary_point(from, to.center());
+    let landing = boundary_point(to, from.center());
+    let direction = landing - start;
+    let length = direction.length();
+    if length <= f32::EPSILON {
+        return (start, landing);
+    }
+    let trimmed = gap.min(length / 2.0);
+    (start, landing - direction / length * trimmed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         BandSpacing, FlowDirection, FlowSpacing, GroupSpacing, OverlapSpacing, SeparationSpacing,
         TimelineAxis, TimelineScale, TimelineSpacing, TreeSpacing, arrowhead_points,
-        banded_positions, centroid, cluster_points, convex_hull, duration_length, ease_toward,
-        expand_path, fit_view, grouped_positions, is_settled, layered_positions, relax_overlaps,
-        ruler_ticks, separate_groups, shaft_end, smooth_closed_path, timeline_positions,
-        tree_positions,
+        banded_positions, boundary_point, centroid, cluster_points, convex_hull, duration_length,
+        ease_toward, edge_between, expand_path, fit_view, grouped_positions, is_settled,
+        layered_positions, relax_overlaps, ruler_ticks, separate_groups, shaft_end,
+        smooth_closed_path, timeline_positions, tree_positions,
     };
     use eframe::egui::{Rect, Vec2, pos2};
 
@@ -1573,6 +1617,52 @@ mod tests {
     fn head_length(from: (f32, f32), to: (f32, f32)) -> Option<f32> {
         arrowhead_points(pos2(from.0, from.1), pos2(to.0, to.1), 10.0, 8.0)
             .map(|[tip, wing, _]| (tip - wing).length())
+    }
+
+    #[test]
+    fn a_boundary_point_sits_on_the_edge_facing_the_target() {
+        let rect = Rect::from_min_max(pos2(-50.0, -20.0), pos2(50.0, 20.0));
+        let right = boundary_point(rect, pos2(500.0, 0.0));
+        assert!((right.x - 50.0).abs() < 0.001);
+        let below = boundary_point(rect, pos2(0.0, 500.0));
+        assert!((below.y - 20.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn a_taller_card_is_met_further_down() {
+        let short = Rect::from_min_max(pos2(-50.0, -20.0), pos2(50.0, 20.0));
+        let tall = Rect::from_min_max(pos2(-50.0, -90.0), pos2(50.0, 90.0));
+        let from_short = boundary_point(short, pos2(0.0, 500.0));
+        let from_tall = boundary_point(tall, pos2(0.0, 500.0));
+        assert!(from_tall.y > from_short.y);
+    }
+
+    #[test]
+    fn an_edge_starts_and_ends_on_the_two_cards() {
+        let from = Rect::from_min_max(pos2(-50.0, -20.0), pos2(50.0, 20.0));
+        let to = Rect::from_min_max(pos2(250.0, -20.0), pos2(350.0, 20.0));
+        let (start, end) = edge_between(from, to, 6.0);
+        assert!((start.x - 50.0).abs() < 0.001);
+        assert!(end.x < 250.0 && end.x > 50.0);
+    }
+
+    #[test]
+    fn an_edge_between_touching_cards_keeps_pointing_at_the_target() {
+        // Overlapping cards leave almost no room; the gap must not flip the arrow
+        // so it points away from the card it is meant to reach.
+        let from = Rect::from_min_max(pos2(0.0, 0.0), pos2(100.0, 40.0));
+        let to = Rect::from_min_max(pos2(96.0, 0.0), pos2(196.0, 40.0));
+        let (start, end) = edge_between(from, to, 40.0);
+        let landing = boundary_point(to, from.center());
+        let intended = landing - start;
+        let drawn = end - start;
+        assert!(drawn.x * intended.x + drawn.y * intended.y >= -0.001);
+    }
+
+    #[test]
+    fn a_card_pointing_at_itself_yields_its_center() {
+        let rect = Rect::from_min_max(pos2(0.0, 0.0), pos2(100.0, 40.0));
+        assert_eq!(boundary_point(rect, rect.center()), rect.center());
     }
 
     #[test]

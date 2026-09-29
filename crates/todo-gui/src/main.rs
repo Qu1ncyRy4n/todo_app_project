@@ -128,6 +128,18 @@ impl SortBy {
     }
 }
 
+/// What a drag started from.
+///
+/// The starting offsets of everything the drag moves are captured once, so each
+/// frame places them at their start plus the total pointer travel. Applying the
+/// travel to wherever a node currently sits would add it again every frame, which
+/// accelerates the node away from the pointer instead of following it.
+struct DragAnchor {
+    id: String,
+    pointer_start: Pos2,
+    offsets_start: HashMap<String, Vec2>,
+}
+
 struct TodoGui {
     runtime: Runtime,
     ledger: Ledger,
@@ -161,7 +173,7 @@ struct TodoGui {
     parent_draft: Option<String>,
     node_offsets: HashMap<String, Vec2>,
     layout_path: PathBuf,
-    drag_anchor: Option<(String, Pos2, Vec2)>,
+    drag_anchor: Option<DragAnchor>,
     parent_search: String,
     dependency_search: String,
     blocker_search: String,
@@ -2735,6 +2747,8 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
     let show_dependencies = app.show_dependency_graph;
     let show_blockers = app.show_blocker_graph;
     let show_relations = app.show_relations;
+    // The head needs clear air in front of the card it points at.
+    let edge_gap = app.theme.edge.arrowhead_length * 0.5 + 2.0;
     if let Some(origin) = app.timeline_origin
         && app.show_timeline_ruler
         && app.theme.timeline.show_ruler
@@ -2848,18 +2862,20 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
             );
         }
     }
+    let child_index = child_index(&items);
+    // Cards are sized before any edge is drawn, so an arrow can be aimed at the
+    // rectangle a card actually occupies rather than at an assumed size.
+    let layouts = node_layouts(&painter, app, &items, &positions, &boxes, &child_index);
+    let rect_of = |id: &str| layouts.get(id).map(|layout| layout.rect);
     let mut clicked = None;
     for item in &items {
-        let Some(to) = positions.get(&item.item.id.to_string()) else {
+        let Some(to_rect) = rect_of(&item.item.id.to_string()) else {
             continue;
         };
         if show_hierarchy
-            && let Some(parent) = item
-                .item
-                .parent_id
-                .and_then(|id| positions.get(&id.to_string()))
+            && let Some(parent) = item.item.parent_id.and_then(|id| rect_of(&id.to_string()))
         {
-            let (start, end) = edge_points(*parent, *to, app.graph_zoom);
+            let (start, end) = geometry::edge_between(parent, to_rect, edge_gap);
             draw_edge(
                 &painter,
                 start,
@@ -2871,8 +2887,8 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
         }
         if show_dependencies {
             for dependency in &item.dependencies {
-                if let Some(from) = positions.get(&dependency.to_string()) {
-                    let (start, end) = edge_points(*from, *to, app.graph_zoom);
+                if let Some(from) = rect_of(&dependency.to_string()) {
+                    let (start, end) = geometry::edge_between(from, to_rect, edge_gap);
                     draw_edge(
                         &painter,
                         start,
@@ -2886,13 +2902,14 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
         }
         if show_relations {
             for relation in &item.relations {
-                if let Some(to_target) = positions.get(&relation.target.to_string()) {
+                if let Some(to_target) = rect_of(&relation.target.to_string()) {
                     // A relation points from the item to what it contributes to or
                     // implements, and is drawn apart from structure and dependencies.
+                    let (start, end) = geometry::edge_between(to_rect, to_target, edge_gap);
                     draw_relation_edge(
                         &painter,
-                        *to,
-                        *to_target,
+                        start,
+                        end,
                         relation_color(relation.relation),
                         &app.theme,
                         app.graph_zoom,
@@ -2902,8 +2919,8 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
         }
         if show_blockers {
             for blocker in &item.blocked_by {
-                if let Some(from) = positions.get(&blocker.to_string()) {
-                    let (start, end) = edge_points(*from, *to, app.graph_zoom);
+                if let Some(from) = rect_of(&blocker.to_string()) {
+                    let (start, end) = geometry::edge_between(from, to_rect, edge_gap);
                     draw_edge(
                         &painter,
                         start,
@@ -2916,45 +2933,18 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
             }
         }
     }
-    let child_index = child_index(&items);
     for item in &items {
         let id = item.item.id.to_string();
-        let Some(center) = positions.get(&id) else {
+        let Some(layout) = layouts.get(&id).cloned() else {
             continue;
         };
-        let (node_width, node_height) = app.theme.node.size();
-        let scale = app
-            .theme
-            .weight
-            .scale(item_weight(item, &child_index, &app.theme));
-        let zoom = app.graph_zoom * scale;
-        let title_font = FontId::proportional(app.theme.node.title_font_size * zoom);
-        let meta_font = FontId::proportional(app.theme.node.meta_font_size * zoom);
-        // The title is laid out before the node is sized, so the card can grow to
-        // hold what it says instead of cutting the title off mid-word.
-        let padding = app.theme.node.text_padding * zoom;
-        let wrap_width = (node_width * zoom - padding * 2.0).max(1.0);
-        let title_galley = painter.layout(
-            node_title(&item.item.title, &app.theme),
-            title_font,
-            Color32::WHITE,
-            wrap_width,
-        );
-        let meta_height = if app.theme.node.show_meta_line {
-            app.theme.node.meta_font_size * zoom + padding / 2.0
-        } else {
-            0.0
-        };
-        let needed = title_galley.size().y + meta_height + padding * 2.0;
-        let height = needed
-            .max(node_height * zoom)
-            .min(app.theme.node.max_height * zoom);
-        // A container's card is its box header: the parent is the box, rather than
-        // a separate card floating inside a labeled region.
-        let node = match boxes.get(&id) {
-            Some(box_rect) => container_header(*box_rect, &app.theme, app.graph_zoom),
-            None => Rect::from_center_size(*center, Vec2::new(node_width * zoom, height)),
-        };
+        let NodeLayout {
+            rect: node,
+            title_galley,
+            meta_font,
+            padding,
+            ..
+        } = layout;
         let response = ui.interact(node, ui.make_persistent_id(&id), Sense::click_and_drag());
         let selected = app.selected.as_deref() == Some(id.as_str());
         let holds_active = holding_active.contains(&id);
@@ -3085,32 +3075,41 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
         if response.drag_started()
             && let Some(pointer) = response.interact_pointer_pos()
         {
-            let offset = app.node_offsets.get(&id).copied().unwrap_or(Vec2::ZERO);
-            app.drag_anchor = Some((id.clone(), pointer, offset));
+            // A container carries its subtree, so every member's starting offset is
+            // captured here and each frame places them relative to it.
+            let moving = if boxes.contains_key(&id) {
+                collect_subtree(&id, &child_index)
+            } else {
+                vec![id.clone()]
+            };
+            let offsets_start = moving
+                .into_iter()
+                .map(|member| {
+                    let at = app.node_offsets.get(&member).copied().unwrap_or(Vec2::ZERO);
+                    (member, at)
+                })
+                .collect();
+            app.drag_anchor = Some(DragAnchor {
+                id: id.clone(),
+                pointer_start: pointer,
+                offsets_start,
+            });
         }
-        if let Some((dragged, pointer_start, offset_start)) = app.drag_anchor.clone()
-            && dragged == id
+        if let Some(anchor) = &app.drag_anchor
+            && anchor.id == id
             && let Some(pointer) = response.interact_pointer_pos()
         {
-            let dragged_distance = (pointer - pointer_start) / app.graph_zoom.max(f32::EPSILON);
-            let dragged_to = offset_start + dragged_distance;
-            let moved = dragged_to - offset_start;
-            app.node_offsets.insert(id.clone(), dragged_to);
-            // A dragged node follows the pointer exactly; easing it would feel like
-            // lag rather than like motion.
-            app.drawn_offsets.insert(id.clone(), dragged_to);
-            if boxes.contains_key(&id) {
-                // Dragging a container takes its contents along, since the box is
-                // drawn from where its descendants are.
-                for member in collect_subtree(&id, &child_index) {
-                    if member == id {
-                        continue;
-                    }
-                    let previous = app.node_offsets.get(&member).copied().unwrap_or(Vec2::ZERO);
-                    let next = previous + moved;
-                    app.node_offsets.insert(member.clone(), next);
-                    app.drawn_offsets.insert(member, next);
-                }
+            let travel = (pointer - anchor.pointer_start) / app.graph_zoom.max(f32::EPSILON);
+            let moved = anchor
+                .offsets_start
+                .iter()
+                .map(|(member, start)| (member.clone(), *start + travel))
+                .collect::<Vec<_>>();
+            for (member, at) in moved {
+                app.node_offsets.insert(member.clone(), at);
+                // A dragged node follows the pointer exactly; easing it would feel
+                // like lag rather than like motion.
+                app.drawn_offsets.insert(member, at);
             }
         }
         if response.drag_stopped() {
@@ -3168,21 +3167,6 @@ fn graph_positions(
         positions.insert(id, position);
     }
     positions
-}
-
-fn edge_points(from: Pos2, to: Pos2, zoom: f32) -> (Pos2, Pos2) {
-    let delta = to - from;
-    let length = delta.length();
-    if length <= f32::EPSILON {
-        return (from, to);
-    }
-    let direction = delta / length;
-    let half = Vec2::new(75.0, 29.0) * zoom;
-    let from_scale = (half.x / direction.x.abs()).min(half.y / direction.y.abs());
-    let to_scale = (half.x / direction.x.abs()).min(half.y / direction.y.abs());
-    let start = from + direction * from_scale;
-    let end = to - direction * (to_scale + 5.0);
-    (start, end)
 }
 
 /// Draws a node's body in the configured shape, with its tag accent.
@@ -3746,6 +3730,79 @@ fn bounds_for_points(points: &[Pos2], half_size: Vec2) -> Option<Rect> {
         Rect::from_center_size(first, half_size * 2.0),
         |bounds, point| bounds.union(Rect::from_center_size(*point, half_size * 2.0)),
     ))
+}
+
+/// A card's measured rectangle and the text laid out to fit it.
+#[derive(Clone)]
+struct NodeLayout {
+    rect: Rect,
+    title_galley: std::sync::Arc<egui::Galley>,
+    meta_font: FontId,
+    padding: f32,
+}
+
+/// Measures every visible card once, before anything is drawn.
+///
+/// Sizing has to happen before edges so an arrow can aim at the rectangle a card
+/// occupies; doing it twice would lay out every title twice a frame.
+fn node_layouts(
+    painter: &egui::Painter,
+    app: &TodoGui,
+    items: &[StoredItem],
+    positions: &HashMap<String, Pos2>,
+    boxes: &HashMap<String, Rect>,
+    child_index: &HashMap<String, Vec<String>>,
+) -> HashMap<String, NodeLayout> {
+    let mut layouts = HashMap::new();
+    for item in items {
+        let id = item.item.id.to_string();
+        let Some(center) = positions.get(&id) else {
+            continue;
+        };
+        let (node_width, node_height) = app.theme.node.size();
+        let scale = app
+            .theme
+            .weight
+            .scale(item_weight(item, child_index, &app.theme));
+        let zoom = app.graph_zoom * scale;
+        let title_font = FontId::proportional(app.theme.node.title_font_size * zoom);
+        let meta_font = FontId::proportional(app.theme.node.meta_font_size * zoom);
+        // The title is laid out before the card is sized, so the card can grow to
+        // hold what it says instead of cutting the title off mid-word.
+        let padding = app.theme.node.text_padding * zoom;
+        let wrap_width = (node_width * zoom - padding * 2.0).max(1.0);
+        let title_galley = painter.layout(
+            node_title(&item.item.title, &app.theme),
+            title_font,
+            Color32::WHITE,
+            wrap_width,
+        );
+        let meta_height = if app.theme.node.show_meta_line {
+            app.theme.node.meta_font_size * zoom + padding / 2.0
+        } else {
+            0.0
+        };
+        let needed = title_galley.size().y + meta_height + padding * 2.0;
+        let height = needed
+            .max(node_height * zoom)
+            .min(app.theme.node.max_height * zoom);
+        // A container's card is its box header: the parent is the box, rather than
+        // a separate card floating inside a labeled region.
+        let rect = match boxes.get(&id) {
+            Some(box_rect) => container_header(*box_rect, &app.theme, app.graph_zoom),
+            None => Rect::from_center_size(*center, Vec2::new(node_width * zoom, height)),
+        };
+        layouts.insert(
+            id,
+            NodeLayout {
+                rect,
+                title_galley,
+                meta_font,
+                padding,
+            },
+        );
+    }
+    layouts
 }
 
 /// Returns the box each parent task encloses its subtree in, keyed by parent id.
