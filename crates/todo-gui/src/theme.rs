@@ -81,6 +81,14 @@ pub struct LayoutTheme {
     pub separation_radius: f32,
     /// Whether normalize and focus layouts run the separation pass afterwards.
     pub separate_after_layout: bool,
+    /// Whether layouts finish by pushing overlapping nodes apart.
+    pub relax_overlaps_after_layout: bool,
+    /// Clear space left between two node boxes when overlaps are relaxed.
+    pub overlap_gap: f32,
+    /// How many relaxation passes to run.
+    pub overlap_iterations: u8,
+    /// How much of an overlap is resolved per pass, from 0.0 to 1.0.
+    pub overlap_strength: f32,
     /// Whether active `blocked_by` relationships order the layers.
     ///
     /// Off by default, because an active blocker is a subset of the planned
@@ -99,6 +107,10 @@ impl Default for LayoutTheme {
             separation_repulsion: 14.0,
             separation_radius: 420.0,
             separate_after_layout: true,
+            relax_overlaps_after_layout: true,
+            overlap_gap: 26.0,
+            overlap_iterations: 60,
+            overlap_strength: 0.65,
             follow_parents: true,
             follow_dependencies: true,
             follow_blockers: false,

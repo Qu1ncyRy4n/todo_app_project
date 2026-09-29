@@ -7,7 +7,7 @@ mod theme;
 use anyhow::{Context, Result, bail};
 use chrono::{Datelike, Local, NaiveDate};
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
-use geometry::{BandSpacing, FlowSpacing, SeparationSpacing, TimelineSpacing};
+use geometry::{BandSpacing, FlowSpacing, OverlapSpacing, SeparationSpacing, TimelineSpacing};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fs, path::PathBuf};
 use tags::{TagFilter, TagFilterState};
@@ -105,6 +105,8 @@ struct TodoGui {
     normalize_requested: bool,
     focus_layout_requested: bool,
     separate_requested: bool,
+    relax_requested: bool,
+    relax_overlaps: bool,
     timeline_requested: bool,
     show_timeline_ruler: bool,
     timeline_origin: Option<Pos2>,
@@ -130,6 +132,7 @@ impl TodoGui {
                 Some(format!("Theme not loaded: {error:#}")),
             ),
         };
+        let relax_after_layout = theme.layout.relax_overlaps_after_layout;
         let mut app = Self {
             runtime,
             ledger,
@@ -181,6 +184,8 @@ impl TodoGui {
             normalize_requested: false,
             focus_layout_requested: false,
             separate_requested: false,
+            relax_requested: false,
+            relax_overlaps: relax_after_layout,
             timeline_requested: false,
             show_timeline_ruler: true,
             timeline_origin: None,
@@ -305,6 +310,12 @@ impl TodoGui {
                     ui.checkbox(&mut self.show_parent_regions, "Parent regions");
                     ui.checkbox(&mut self.show_focus_window, "Focus Window");
                     ui.checkbox(&mut self.show_timeline_ruler, "Timeline ruler");
+                });
+            egui::CollapsingHeader::new("Layout")
+                .default_open(true)
+                .show(ui, |ui| {
+                    ui.checkbox(&mut self.relax_overlaps, "Push overlaps apart");
+                    ui.weak("Runs after every layout command. Unstack runs it now.");
                 });
             egui::CollapsingHeader::new("Tags")
                 .default_open(true)
@@ -897,9 +908,50 @@ impl TodoGui {
             self.node_offsets
                 .insert(id, (origin + *target) - grid_slot(index, rect));
         }
+        self.relax_if_enabled(rect);
         self.timeline_origin = Some(origin);
         self.save_layout();
         self.message = Some("Timeline arranged by scheduled date.".to_owned());
+    }
+
+    /// Pushes overlapping nodes apart until each has clear space around it.
+    ///
+    /// Nodes that already have room stay exactly where they are, so relaxing a
+    /// hand-made arrangement only unstacks what was hidden, rather than rearranging
+    /// work that was placed deliberately.
+    fn relax_overlaps(&mut self, rect: Rect, record_undo: bool) {
+        let items = self.visible_items();
+        if items.len() < 2 {
+            return;
+        }
+        let mut placed = HashMap::new();
+        for (index, item) in items.iter().enumerate() {
+            let id = item.item.id.to_string();
+            let offset = self.node_offsets.get(&id).copied().unwrap_or(Vec2::ZERO);
+            placed.insert(id, grid_slot(index, rect).to_vec2() + offset);
+        }
+        let (width, height) = self.theme.node.size();
+        let spacing = OverlapSpacing {
+            iterations: self.theme.layout.overlap_iterations,
+            gap: self.theme.layout.overlap_gap,
+            strength: self.theme.layout.overlap_strength,
+        };
+        let relaxed = geometry::relax_overlaps(&placed, Vec2::new(width, height), spacing);
+        if record_undo {
+            self.layout_undo = Some(self.node_offsets.clone());
+        }
+        for (index, item) in items.iter().enumerate() {
+            let id = item.item.id.to_string();
+            let Some(target) = relaxed.get(&id) else {
+                continue;
+            };
+            self.node_offsets
+                .insert(id, *target - grid_slot(index, rect).to_vec2());
+        }
+        self.save_layout();
+        if record_undo {
+            self.message = Some("Overlapping tasks pushed apart.".to_owned());
+        }
     }
 
     /// Pushes nodes out of tag regions they do not belong to.
@@ -1003,6 +1055,7 @@ impl TodoGui {
         if self.theme.layout.separate_after_layout {
             self.separate_tag_groups(rect, false);
         }
+        self.relax_if_enabled(rect);
         self.timeline_origin = None;
         self.message =
             Some("Focus Window arranged: done above, active centered, future below.".to_owned());
@@ -1059,8 +1112,16 @@ impl TodoGui {
         }
         // The ruler belongs to the timeline arrangement alone, so another layout
         // taking over retires it rather than leaving a scale nothing follows.
+        self.relax_if_enabled(rect);
         self.timeline_origin = None;
         self.message = Some("Layout normalized. Undo layout restores the previous one.".to_owned());
+    }
+
+    /// Runs the overlap pass when it is switched on, as a layout's last step.
+    fn relax_if_enabled(&mut self, rect: Rect) {
+        if self.relax_overlaps {
+            self.relax_overlaps(rect, false);
+        }
     }
 
     /// Restores the arrangement captured before the last normalize.
@@ -1939,6 +2000,9 @@ impl eframe::App for TodoGui {
                 if ui.button("Timeline").clicked() {
                     self.timeline_requested = true;
                 }
+                if ui.button("Unstack").clicked() {
+                    self.relax_requested = true;
+                }
                 if ui.button("Separate tags").clicked() {
                     self.separate_requested = true;
                 }
@@ -1998,6 +2062,10 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
     if app.focus_layout_requested {
         app.focus_layout_requested = false;
         app.focus_layout(rect);
+    }
+    if app.relax_requested {
+        app.relax_requested = false;
+        app.relax_overlaps(rect, true);
     }
     if app.separate_requested {
         app.separate_requested = false;

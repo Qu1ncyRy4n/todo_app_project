@@ -495,12 +495,81 @@ pub fn cluster_points(points: &[Pos2], max_distance: f32) -> Vec<Vec<Pos2>> {
         .collect()
 }
 
+/// Strength and reach of the overlap relaxation pass.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OverlapSpacing {
+    /// How many relaxation passes to run.
+    pub iterations: u8,
+    /// Clear space to leave between two node boxes.
+    pub gap: f32,
+    /// How much of an overlap is resolved per pass, from 0.0 to 1.0.
+    pub strength: f32,
+}
+
+/// Pushes overlapping nodes apart until each has clear space around it.
+///
+/// Two nodes repel only while their boxes overlap, along whichever axis they
+/// overlap least, so a pair side by side separates sideways and a stacked pair
+/// separates vertically. Nodes that already have room are left exactly where they
+/// are, which keeps a deliberate arrangement intact.
+///
+/// Returns the adjusted positions; the input is not modified.
+pub fn relax_overlaps(
+    positions: &HashMap<String, Vec2>,
+    node_size: Vec2,
+    spacing: OverlapSpacing,
+) -> HashMap<String, Vec2> {
+    let mut current = positions.clone();
+    // Sorted ids keep the result identical run to run, which a HashMap order
+    // would not.
+    let ids = current.keys().cloned().collect::<BTreeSet<_>>();
+    let required = Vec2::new(node_size.x + spacing.gap, node_size.y + spacing.gap);
+    let strength = spacing.strength.clamp(0.0, 1.0);
+    for _ in 0..spacing.iterations {
+        let mut moved = false;
+        for left in &ids {
+            for right in &ids {
+                if left >= right {
+                    continue;
+                }
+                let (Some(first), Some(second)) = (current.get(left), current.get(right)) else {
+                    continue;
+                };
+                let delta = *second - *first;
+                let overlap_x = required.x - delta.x.abs();
+                let overlap_y = required.y - delta.y.abs();
+                if overlap_x <= 0.0 || overlap_y <= 0.0 {
+                    continue;
+                }
+                // Separate along the axis needing the smaller correction, so nodes
+                // slide apart rather than jumping across each other.
+                let push = if overlap_x < overlap_y {
+                    let direction = if delta.x < 0.0 { -1.0 } else { 1.0 };
+                    Vec2::new(direction * overlap_x * strength / 2.0, 0.0)
+                } else {
+                    let direction = if delta.y < 0.0 { -1.0 } else { 1.0 };
+                    Vec2::new(0.0, direction * overlap_y * strength / 2.0)
+                };
+                let (first, second) = (*first, *second);
+                current.insert(left.clone(), first - push);
+                current.insert(right.clone(), second + push);
+                moved = true;
+            }
+        }
+        if !moved {
+            break;
+        }
+    }
+    current
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        BandSpacing, FlowDirection, FlowSpacing, SeparationSpacing, TimelineSpacing,
-        arrowhead_points, banded_positions, centroid, cluster_points, convex_hull, expand_path,
-        layered_positions, separate_groups, shaft_end, smooth_closed_path, timeline_positions,
+        BandSpacing, FlowDirection, FlowSpacing, OverlapSpacing, SeparationSpacing,
+        TimelineSpacing, arrowhead_points, banded_positions, centroid, cluster_points, convex_hull,
+        expand_path, layered_positions, relax_overlaps, separate_groups, shaft_end,
+        smooth_closed_path, timeline_positions,
     };
     use eframe::egui::{Vec2, pos2};
 
@@ -606,6 +675,67 @@ mod tests {
     fn a_day_in_the_past_sits_left_of_the_origin() {
         let positions = timeline_positions(&[("overdue".to_owned(), Some(-2))], timeline());
         assert!(matches!(positions.get("overdue"), Some(position) if position.x < 0.0));
+    }
+
+    fn overlap_spacing() -> OverlapSpacing {
+        OverlapSpacing {
+            iterations: 60,
+            gap: 20.0,
+            strength: 0.8,
+        }
+    }
+
+    fn node_size() -> Vec2 {
+        Vec2::new(150.0, 58.0)
+    }
+
+    #[test]
+    fn stacked_nodes_are_pushed_apart() {
+        let stacked = placed(&[("a", 0.0, 0.0), ("b", 4.0, 2.0)]);
+        let spread = relax_overlaps(&stacked, node_size(), overlap_spacing());
+        let distance = match (spread.get("a"), spread.get("b")) {
+            (Some(first), Some(second)) => *second - *first,
+            _ => Vec2::ZERO,
+        };
+        assert!(
+            distance.x.abs() >= node_size().x + 20.0 - 0.5
+                || distance.y.abs() >= node_size().y + 20.0 - 0.5
+        );
+    }
+
+    #[test]
+    fn nodes_with_room_are_left_alone() {
+        let placed_apart = placed(&[("a", 0.0, 0.0), ("b", 600.0, 0.0)]);
+        let spread = relax_overlaps(&placed_apart, node_size(), overlap_spacing());
+        assert_eq!(spread, placed_apart);
+    }
+
+    #[test]
+    fn a_side_by_side_pair_separates_sideways() {
+        let pair = placed(&[("a", 0.0, 0.0), ("b", 120.0, 0.0)]);
+        let spread = relax_overlaps(&pair, node_size(), overlap_spacing());
+        assert!(matches!(
+            (spread.get("a"), spread.get("b")),
+            (Some(first), Some(second))
+                if (second.x - first.x).abs() > 120.0 && (second.y - first.y).abs() < 0.001
+        ));
+    }
+
+    #[test]
+    fn relaxing_is_deterministic() {
+        let crowded = placed(&[("a", 0.0, 0.0), ("b", 10.0, 5.0), ("c", 20.0, 10.0)]);
+        let first = relax_overlaps(&crowded, node_size(), overlap_spacing());
+        let second = relax_overlaps(&crowded, node_size(), overlap_spacing());
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn a_single_node_needs_no_room() {
+        let alone = placed(&[("a", 3.0, 4.0)]);
+        assert_eq!(
+            relax_overlaps(&alone, node_size(), overlap_spacing()),
+            alone
+        );
     }
 
     #[test]
