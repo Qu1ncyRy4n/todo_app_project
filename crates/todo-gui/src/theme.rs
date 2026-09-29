@@ -136,6 +136,12 @@ pub struct FocusTheme {
     pub row_gap: f32,
     /// How many nodes a band holds before it wraps.
     pub band_width: usize,
+    /// Whether a task holding active work reads as active itself.
+    ///
+    /// Derived when read, never stored: see TE-0013. A parent is drawn as active
+    /// and joins the Focus Window while a descendant is active, and stops on its
+    /// own when that descendant finishes.
+    pub parents_of_active_read_active: bool,
     /// Whether the frame and its label are drawn around the active band.
     pub show_frame: bool,
     /// Whether tasks deferred or scheduled ahead of today join the future band.
@@ -161,6 +167,7 @@ impl Default for FocusTheme {
             node_gap: 185.0,
             row_gap: 95.0,
             band_width: 4,
+            parents_of_active_read_active: true,
             show_frame: true,
             future_includes_deferred: true,
             exile_multiplier: 3.2,

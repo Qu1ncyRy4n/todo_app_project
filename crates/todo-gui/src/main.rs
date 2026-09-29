@@ -2306,6 +2306,11 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
     // The wheel divides hues between the tags actually on screen, so the palette is
     // rebuilt whenever the visible set changes.
     let effective = app.effective_tag_index(&items);
+    let holding_active = if app.theme.focus.parents_of_active_read_active {
+        ids_holding_active_work(&items)
+    } else {
+        std::collections::HashSet::new()
+    };
     let palette = match app.theme.tag.coloring {
         TagColoring::Wheel => TagPalette::build(
             effective.values().flatten().map(String::as_str),
@@ -2359,7 +2364,10 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
     if app.show_focus_window && app.theme.focus.show_frame {
         let active = items
             .iter()
-            .filter(|item| item.item.state == ItemState::Active)
+            .filter(|item| {
+                item.item.state == ItemState::Active
+                    || holding_active.contains(&item.item.id.to_string())
+            })
             .filter_map(|item| positions.get(&item.item.id.to_string()).copied())
             .collect::<Vec<_>>();
         if let Some(bounds) = bounds_for_points(&active, Vec2::new(105.0, 55.0) * app.graph_zoom) {
@@ -2482,6 +2490,8 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
         let node = Rect::from_center_size(*center, Vec2::new(node_width * zoom, height));
         let response = ui.interact(node, ui.make_persistent_id(&id), Sense::click_and_drag());
         let selected = app.selected.as_deref() == Some(id.as_str());
+        let holds_active = holding_active.contains(&id);
+        let reads_active = item.item.state == ItemState::Active || holds_active;
         let fill = if !item.blocked_by.is_empty() {
             Color32::from_rgb(119, 57, 51)
         } else {
@@ -2489,12 +2499,15 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
                 ItemState::Active => Color32::from_rgb(47, 104, 72),
                 ItemState::Done => Color32::from_gray(80),
                 ItemState::Canceled => Color32::from_rgb(100, 61, 61),
+                // A task holding active work is drawn as underway, in a quieter
+                // shade than work that was picked up in its own right.
+                ItemState::Inbox if holds_active => Color32::from_rgb(44, 82, 64),
                 ItemState::Inbox => Color32::from_rgb(59, 79, 94),
             }
         };
         // While focus mode is on, work that is not active stays drawn but quiet, so
         // it reads as context rather than as part of what is being worked on.
-        let exiled = app.focus_mode && item.item.state != ItemState::Active;
+        let exiled = app.focus_mode && !reads_active;
         let dim = |color: Color32| {
             if exiled {
                 Color32::from_rgba_unmultiplied(
@@ -2536,7 +2549,11 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
             painter.text(
                 node.center_bottom() - Vec2::new(0.0, padding / 2.0),
                 Align2::CENTER_BOTTOM,
-                format!("{} · {}", item.item.state, item.item.priority),
+                if holds_active && item.item.state != ItemState::Active {
+                    format!("{} · holds active work", item.item.state)
+                } else {
+                    format!("{} · {}", item.item.state, item.item.priority)
+                },
                 meta_font,
                 dim(Color32::LIGHT_GRAY),
             );
@@ -2811,6 +2828,42 @@ fn draw_timeline_ruler(painter: &egui::Painter, rect: Rect, origin: Pos2, app: &
 /// nested subtree stays visible inside its ancestor. The color comes from the
 /// parent's own tag, falling back to a neutral outline when it has no tag, so the
 /// region never implies a tag the parent does not carry.
+/// Returns the ids of tasks that hold active work somewhere beneath them.
+///
+/// Derived on every read rather than stored, so it follows reparenting and clears
+/// itself when the last active descendant finishes. See TE-0013.
+fn ids_holding_active_work(items: &[StoredItem]) -> std::collections::HashSet<String> {
+    let by_id = items
+        .iter()
+        .map(|item| (item.item.id.to_string(), item))
+        .collect::<HashMap<_, _>>();
+    let mut holders = std::collections::HashSet::new();
+    for item in items {
+        if item.item.state != ItemState::Active {
+            continue;
+        }
+        let mut current = item.item.parent_id;
+        let mut guard = 0;
+        while let Some(parent) = current {
+            let id = parent.to_string();
+            if !holders.insert(id.clone()) {
+                // This ancestor chain has already been walked for another
+                // active task; walking it again would repeat the same work.
+                break;
+            }
+            let Some(found) = by_id.get(&id) else {
+                break;
+            };
+            guard += 1;
+            if guard > items.len() {
+                break;
+            }
+            current = found.item.parent_id;
+        }
+    }
+    holders
+}
+
 /// Returns each task's visible children, keyed by parent id.
 fn child_index(items: &[StoredItem]) -> HashMap<String, Vec<String>> {
     let mut children: HashMap<String, Vec<String>> = HashMap::new();
@@ -3218,9 +3271,15 @@ fn short_title(title: &str) -> String {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "test fixtures use direct setup and assertion values"
+)]
 mod tests {
     use super::collect_subtree;
     use std::collections::HashMap;
+    use todo_core::{ItemState, Priority};
+    use todo_store::StoredItem;
 
     fn tree(pairs: &[(&str, &[&str])]) -> HashMap<String, Vec<String>> {
         pairs
@@ -3232,6 +3291,85 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    /// Builds visible items with a given parent and state, for activity tests.
+    fn task(id: &str, parent: Option<&str>, state: ItemState) -> StoredItem {
+        let parse = |value: &str| {
+            let padded = format!("0198f58a-1c00-7000-8000-0000000000{value:0>2}");
+            todo_core::ItemId::parse(&padded).unwrap()
+        };
+        StoredItem {
+            item: todo_core::Item {
+                id: parse(id),
+                title: format!("task {id}"),
+                state,
+                project_id: None,
+                parent_id: parent.map(parse),
+                priority: Priority::Normal,
+                due_on: None,
+                defer_until: None,
+                scheduled_on: None,
+                difficulty: None,
+                estimate_minutes: None,
+            },
+            namespaces: Vec::new(),
+            dependencies: Vec::new(),
+            blocked_by: Vec::new(),
+            relations: Vec::new(),
+        }
+    }
+
+    fn holds(items: &[StoredItem], id: &str) -> bool {
+        let holders = super::ids_holding_active_work(items);
+        items
+            .iter()
+            .find(|item| item.item.title == format!("task {id}"))
+            .is_some_and(|item| holders.contains(&item.item.id.to_string()))
+    }
+
+    #[test]
+    fn a_parent_of_active_work_holds_active_work() {
+        let items = vec![
+            task("1", None, ItemState::Inbox),
+            task("2", Some("1"), ItemState::Active),
+        ];
+        assert!(holds(&items, "1"));
+    }
+
+    #[test]
+    fn activity_reaches_every_ancestor() {
+        let items = vec![
+            task("1", None, ItemState::Inbox),
+            task("2", Some("1"), ItemState::Inbox),
+            task("3", Some("2"), ItemState::Active),
+        ];
+        assert!(holds(&items, "1"));
+        assert!(holds(&items, "2"));
+    }
+
+    #[test]
+    fn a_parent_of_finished_work_holds_nothing() {
+        let items = vec![
+            task("1", None, ItemState::Inbox),
+            task("2", Some("1"), ItemState::Done),
+        ];
+        assert!(!holds(&items, "1"));
+    }
+
+    #[test]
+    fn an_active_task_is_not_counted_as_holding_its_own_activity() {
+        let items = vec![task("1", None, ItemState::Active)];
+        assert!(!holds(&items, "1"));
+    }
+
+    #[test]
+    fn a_parent_cycle_does_not_loop_when_deriving_activity() {
+        let items = vec![
+            task("1", Some("2"), ItemState::Inbox),
+            task("2", Some("1"), ItemState::Active),
+        ];
+        let _ = super::ids_holding_active_work(&items);
     }
 
     #[test]
