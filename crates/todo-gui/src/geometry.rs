@@ -310,13 +310,97 @@ pub fn centroid(points: &[Pos2]) -> Option<Pos2> {
     Some((sum / count).to_pos2())
 }
 
+/// Strength and reach of the tag separation pass.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SeparationSpacing {
+    /// How many relaxation passes to run.
+    pub iterations: u8,
+    /// How strongly a node is drawn toward its own group.
+    pub attraction: f32,
+    /// How strongly a node is pushed out of a foreign group.
+    pub repulsion: f32,
+    /// How close a foreign group has to be before it pushes at all.
+    pub radius: f32,
+}
+
+/// Nudges nodes toward their own tag group and out of foreign ones.
+///
+/// Each pass pulls a node toward the centroid of the group it belongs to and pushes
+/// it away from the centroid of any other group within `radius`, so tag regions pull
+/// apart instead of overlapping. Nodes with no group are left where they are.
+///
+/// Returns the adjusted positions; the input is not modified.
+pub fn separate_groups(
+    positions: &HashMap<String, Vec2>,
+    groups: &HashMap<String, String>,
+    spacing: SeparationSpacing,
+) -> HashMap<String, Vec2> {
+    let mut current = positions.clone();
+    // ponytail: groups are approximated by their centroid, not their drawn hull.
+    // A hull containment test is the upgrade if centroids prove too coarse.
+    for _ in 0..spacing.iterations {
+        let centroids = group_centroids(&current, groups);
+        let mut next = current.clone();
+        for (id, position) in &current {
+            let Some(group) = groups.get(id) else {
+                continue;
+            };
+            let mut shift = Vec2::ZERO;
+            if let Some(own) = centroids.get(group) {
+                shift += (*own - *position) * spacing.attraction;
+            }
+            for (other, centroid) in &centroids {
+                if other == group {
+                    continue;
+                }
+                let away = *position - *centroid;
+                let distance = away.length();
+                if distance >= spacing.radius {
+                    continue;
+                }
+                let strength = (spacing.radius - distance) / spacing.radius;
+                let direction = if distance <= f32::EPSILON {
+                    Vec2::new(1.0, 0.0)
+                } else {
+                    away / distance
+                };
+                shift += direction * strength * spacing.repulsion;
+            }
+            next.insert(id.clone(), *position + shift);
+        }
+        current = next;
+    }
+    current
+}
+
+/// Returns the mean position of each group, over the nodes that belong to it.
+fn group_centroids(
+    positions: &HashMap<String, Vec2>,
+    groups: &HashMap<String, String>,
+) -> BTreeMap<String, Vec2> {
+    let mut totals: BTreeMap<String, (Vec2, u16)> = BTreeMap::new();
+    for (id, position) in positions {
+        let Some(group) = groups.get(id) else {
+            continue;
+        };
+        let entry = totals.entry(group.clone()).or_insert((Vec2::ZERO, 0));
+        entry.0 += *position;
+        entry.1 = entry.1.saturating_add(1);
+    }
+    totals
+        .into_iter()
+        .map(|(group, (sum, count))| (group, sum / f32::from(count.max(1))))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        BandSpacing, FlowDirection, FlowSpacing, arrowhead_points, banded_positions, centroid,
-        convex_hull, expand_path, layered_positions, shaft_end, smooth_closed_path,
+        BandSpacing, FlowDirection, FlowSpacing, SeparationSpacing, arrowhead_points,
+        banded_positions, centroid, convex_hull, expand_path, layered_positions, separate_groups,
+        shaft_end, smooth_closed_path,
     };
-    use eframe::egui::pos2;
+    use eframe::egui::{Vec2, pos2};
 
     fn spacing(direction: FlowDirection) -> FlowSpacing {
         FlowSpacing {
@@ -344,6 +428,88 @@ mod tests {
             row_gap: 90.0,
             band_width: 4,
         }
+    }
+
+    fn separation() -> SeparationSpacing {
+        SeparationSpacing {
+            iterations: 12,
+            attraction: 0.12,
+            repulsion: 12.0,
+            radius: 400.0,
+        }
+    }
+
+    fn grouped(pairs: &[(&str, &str)]) -> std::collections::HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(id, group)| ((*id).to_owned(), (*group).to_owned()))
+            .collect()
+    }
+
+    fn placed(pairs: &[(&str, f32, f32)]) -> std::collections::HashMap<String, Vec2> {
+        pairs
+            .iter()
+            .map(|(id, x, y)| ((*id).to_owned(), Vec2::new(*x, *y)))
+            .collect()
+    }
+
+    #[test]
+    fn interleaved_groups_pull_apart() {
+        let positions = placed(&[
+            ("a1", 0.0, 0.0),
+            ("b1", 40.0, 0.0),
+            ("a2", 80.0, 0.0),
+            ("b2", 120.0, 0.0),
+        ]);
+        let groups = grouped(&[("a1", "a"), ("a2", "a"), ("b1", "b"), ("b2", "b")]);
+        let before = spread(&positions, &groups);
+        let after = separate_groups(&positions, &groups, separation());
+        let after = spread(&after, &groups);
+        assert!(matches!((before, after), (Some(before), Some(after)) if after > before));
+    }
+
+    /// Returns the distance between the two group centroids, for comparison.
+    fn spread(
+        positions: &std::collections::HashMap<String, Vec2>,
+        groups: &std::collections::HashMap<String, String>,
+    ) -> Option<f32> {
+        let mut sums: std::collections::BTreeMap<&str, (Vec2, f32)> =
+            std::collections::BTreeMap::new();
+        for (id, position) in positions {
+            let group = groups.get(id)?;
+            let entry = sums.entry(group.as_str()).or_insert((Vec2::ZERO, 0.0));
+            entry.0 += *position;
+            entry.1 += 1.0;
+        }
+        let mut centers = sums.values().map(|(sum, count)| *sum / *count);
+        let first = centers.next()?;
+        let second = centers.next()?;
+        Some((first - second).length())
+    }
+
+    #[test]
+    fn an_untagged_node_stays_put() {
+        let positions = placed(&[("lonely", 5.0, 7.0), ("a1", 0.0, 0.0)]);
+        let groups = grouped(&[("a1", "a")]);
+        let moved = separate_groups(&positions, &groups, separation());
+        assert!(matches!(moved.get("lonely"), Some(position) if *position == Vec2::new(5.0, 7.0)));
+    }
+
+    #[test]
+    fn a_single_group_keeps_every_node() {
+        let positions = placed(&[("a1", 0.0, 0.0), ("a2", 50.0, 0.0)]);
+        let groups = grouped(&[("a1", "a"), ("a2", "a")]);
+        let moved = separate_groups(&positions, &groups, separation());
+        assert_eq!(moved.len(), 2);
+    }
+
+    #[test]
+    fn separation_is_deterministic() {
+        let positions = placed(&[("a1", 0.0, 0.0), ("b1", 30.0, 10.0)]);
+        let groups = grouped(&[("a1", "a"), ("b1", "b")]);
+        let first = separate_groups(&positions, &groups, separation());
+        let second = separate_groups(&positions, &groups, separation());
+        assert_eq!(first, second);
     }
 
     #[test]

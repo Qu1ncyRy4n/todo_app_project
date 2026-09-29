@@ -6,7 +6,7 @@ mod theme;
 use anyhow::{Context, Result, bail};
 use chrono::{Local, NaiveDate};
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
-use geometry::{BandSpacing, FlowSpacing};
+use geometry::{BandSpacing, FlowSpacing, SeparationSpacing};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fs, path::PathBuf};
 use theme::{NodeShape, RegionShape, TagColoring, TagPalette, Theme};
@@ -93,6 +93,7 @@ struct TodoGui {
     layout_undo: Option<HashMap<String, Vec2>>,
     normalize_requested: bool,
     focus_layout_requested: bool,
+    separate_requested: bool,
     new_task_open: bool,
     new_task_title: String,
     note_draft: String,
@@ -158,6 +159,7 @@ impl TodoGui {
             layout_undo: None,
             normalize_requested: false,
             focus_layout_requested: false,
+            separate_requested: false,
             new_task_open: false,
             new_task_title: String::new(),
             note_draft: String::new(),
@@ -166,6 +168,61 @@ impl TodoGui {
         };
         app.refresh();
         app
+    }
+
+    /// Pushes nodes out of tag regions they do not belong to.
+    ///
+    /// Each node is drawn toward the tasks sharing its deepest tag and pushed away
+    /// from other tag groups nearby, so regions pull apart instead of overlapping
+    /// and a node is no longer read as carrying a tag it does not have. Untagged
+    /// tasks are left where they are.
+    fn separate_tag_groups(&mut self, rect: Rect, record_undo: bool) {
+        let items = self.visible_items();
+        let mut groups = HashMap::new();
+        for item in &items {
+            let mut tags = item
+                .namespaces
+                .iter()
+                .map(NamespacePath::as_str)
+                .collect::<Vec<_>>();
+            tags.sort_unstable();
+            if let Some(deepest) = tags.into_iter().max_by_key(|tag| tag.matches('/').count()) {
+                groups.insert(item.item.id.to_string(), deepest.to_owned());
+            }
+        }
+        if groups.is_empty() {
+            self.message = Some("No tagged tasks to separate.".to_owned());
+            return;
+        }
+        let mut placed = HashMap::new();
+        for (index, item) in items.iter().enumerate() {
+            let id = item.item.id.to_string();
+            let offset = self.node_offsets.get(&id).copied().unwrap_or(Vec2::ZERO);
+            placed.insert(id, grid_slot(index, rect).to_vec2() + offset);
+        }
+        let spacing = SeparationSpacing {
+            iterations: self.theme.layout.separation_iterations,
+            attraction: self.theme.layout.separation_attraction,
+            repulsion: self.theme.layout.separation_repulsion,
+            radius: self.theme.layout.separation_radius,
+        };
+        let separated = geometry::separate_groups(&placed, &groups, spacing);
+        if record_undo {
+            self.layout_undo = Some(self.node_offsets.clone());
+        }
+        for (index, item) in items.iter().enumerate() {
+            let id = item.item.id.to_string();
+            let Some(target) = separated.get(&id) else {
+                continue;
+            };
+            self.node_offsets
+                .insert(id, *target - grid_slot(index, rect).to_vec2());
+        }
+        self.save_layout();
+        if record_undo {
+            self.message =
+                Some("Tag groups separated. Undo layout restores the previous one.".to_owned());
+        }
     }
 
     /// Arranges visible nodes into Focus Window bands around the active work.
@@ -208,6 +265,9 @@ impl TodoGui {
             self.node_offsets.insert(id, (center + *target) - slot);
         }
         self.save_layout();
+        if self.theme.layout.separate_after_layout {
+            self.separate_tag_groups(rect, false);
+        }
         self.message =
             Some("Focus Window arranged: done above, active centered, future below.".to_owned());
     }
@@ -258,6 +318,9 @@ impl TodoGui {
                 .insert(id.clone(), (origin + *target) - slot);
         }
         self.save_layout();
+        if self.theme.layout.separate_after_layout {
+            self.separate_tag_groups(rect, false);
+        }
         self.message = Some("Layout normalized. Undo layout restores the previous one.".to_owned());
     }
 
@@ -967,6 +1030,9 @@ impl eframe::App for TodoGui {
                 if ui.button("Focus layout").clicked() {
                     self.focus_layout_requested = true;
                 }
+                if ui.button("Separate tags").clicked() {
+                    self.separate_requested = true;
+                }
                 if ui.button("Undo layout").clicked() {
                     self.undo_layout();
                 }
@@ -1345,6 +1411,10 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
     if app.focus_layout_requested {
         app.focus_layout_requested = false;
         app.focus_layout(rect);
+    }
+    if app.separate_requested {
+        app.separate_requested = false;
+        app.separate_tag_groups(rect, true);
     }
     let items = app.visible_items();
     // The wheel divides hues between the tags actually on screen, so the palette is

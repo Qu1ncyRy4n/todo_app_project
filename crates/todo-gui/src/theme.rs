@@ -65,6 +65,16 @@ pub struct LayoutTheme {
     pub follow_parents: bool,
     /// Whether planned `depends_on` relationships order the layers.
     pub follow_dependencies: bool,
+    /// How many relaxation passes the tag separation runs.
+    pub separation_iterations: u8,
+    /// How strongly separation draws a node toward its own tag group.
+    pub separation_attraction: f32,
+    /// How strongly separation pushes a node out of a foreign tag group.
+    pub separation_repulsion: f32,
+    /// How close a foreign tag group must be before separation pushes at all.
+    pub separation_radius: f32,
+    /// Whether normalize and focus layouts run the separation pass afterwards.
+    pub separate_after_layout: bool,
     /// Whether active `blocked_by` relationships order the layers.
     ///
     /// Off by default, because an active blocker is a subset of the planned
@@ -78,6 +88,11 @@ impl Default for LayoutTheme {
             direction: FlowDirection::default(),
             layer_gap: 120.0,
             node_gap: 185.0,
+            separation_iterations: 14,
+            separation_attraction: 0.10,
+            separation_repulsion: 14.0,
+            separation_radius: 420.0,
+            separate_after_layout: true,
             follow_parents: true,
             follow_dependencies: true,
             follow_blockers: false,
