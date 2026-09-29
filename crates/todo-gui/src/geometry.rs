@@ -641,13 +641,86 @@ pub fn ruler_ticks(
     ticks
 }
 
+/// Spacing for a hanging tree layout.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TreeSpacing {
+    /// Horizontal distance between neighboring leaves.
+    pub leaf_gap: f32,
+    /// Vertical distance between a task and its children.
+    pub row_gap: f32,
+}
+
+/// Hangs each task's children beneath it, with every parent centered over its own.
+///
+/// A tidy tree rather than a layered graph: depth sets the row, leaves claim equal
+/// width, and a parent sits at the midpoint of the children it holds. Roots are
+/// laid out left to right in the order given, so the caller decides what leads.
+///
+/// Returns positions relative to the first root's leftmost leaf.
+pub fn tree_positions(
+    roots: &[String],
+    children: &BTreeMap<String, Vec<String>>,
+    spacing: TreeSpacing,
+) -> HashMap<String, Vec2> {
+    let mut positions = HashMap::new();
+    let mut cursor = 0.0_f32;
+    for root in roots {
+        let mut seen = BTreeSet::new();
+        cursor = place_subtree(
+            root,
+            0,
+            cursor,
+            children,
+            spacing,
+            &mut seen,
+            &mut positions,
+        );
+        cursor += spacing.leaf_gap;
+    }
+    positions
+}
+
+/// Places one subtree and returns the x cursor just past it.
+fn place_subtree(
+    id: &str,
+    depth: usize,
+    cursor: f32,
+    children: &BTreeMap<String, Vec<String>>,
+    spacing: TreeSpacing,
+    seen: &mut BTreeSet<String>,
+    positions: &mut HashMap<String, Vec2>,
+) -> f32 {
+    if !seen.insert(id.to_owned()) {
+        // A parent cycle cannot be hung as a tree; stopping leaves the rest placed.
+        return cursor;
+    }
+    let row = f32::from(u16::try_from(depth).unwrap_or(u16::MAX)) * spacing.row_gap;
+    let empty = Vec::new();
+    let offspring = children.get(id).unwrap_or(&empty);
+    if offspring.is_empty() {
+        positions.insert(id.to_owned(), Vec2::new(cursor, row));
+        return cursor + spacing.leaf_gap;
+    }
+    let start = cursor;
+    let mut next = cursor;
+    for child in offspring {
+        next = place_subtree(child, depth + 1, next, children, spacing, seen, positions);
+    }
+    // Centering over the span, rather than over the first child, keeps a parent
+    // above the middle of what it holds however lopsided the branch is.
+    let end = (next - spacing.leaf_gap).max(start);
+    positions.insert(id.to_owned(), Vec2::new((start + end) / 2.0, row));
+    next
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         BandSpacing, FlowDirection, FlowSpacing, OverlapSpacing, SeparationSpacing,
-        TimelineSpacing, arrowhead_points, banded_positions, centroid, cluster_points, convex_hull,
-        ease_toward, expand_path, fit_view, is_settled, layered_positions, relax_overlaps,
-        ruler_ticks, separate_groups, shaft_end, smooth_closed_path, timeline_positions,
+        TimelineSpacing, TreeSpacing, arrowhead_points, banded_positions, centroid, cluster_points,
+        convex_hull, ease_toward, expand_path, fit_view, is_settled, layered_positions,
+        relax_overlaps, ruler_ticks, separate_groups, shaft_end, smooth_closed_path,
+        timeline_positions, tree_positions,
     };
     use eframe::egui::{Rect, Vec2, pos2};
 
@@ -1105,6 +1178,110 @@ mod tests {
     fn an_empty_band_places_nothing() {
         let positions = banded_positions(&[], &[], &[], band_spacing());
         assert!(positions.is_empty());
+    }
+
+    fn tree_spacing() -> TreeSpacing {
+        TreeSpacing {
+            leaf_gap: 100.0,
+            row_gap: 80.0,
+        }
+    }
+
+    fn tree_of(pairs: &[(&str, &[&str])]) -> std::collections::BTreeMap<String, Vec<String>> {
+        pairs
+            .iter()
+            .map(|(parent, children)| {
+                (
+                    (*parent).to_owned(),
+                    children.iter().map(|child| (*child).to_owned()).collect(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_child_hangs_below_its_parent() {
+        let positions = tree_positions(
+            &ids(&["root"]),
+            &tree_of(&[("root", &["child"])]),
+            tree_spacing(),
+        );
+        assert!(matches!(
+            (positions.get("root"), positions.get("child")),
+            (Some(root), Some(child)) if child.y > root.y
+        ));
+    }
+
+    #[test]
+    fn a_parent_sits_centered_over_its_children() {
+        let positions = tree_positions(
+            &ids(&["root"]),
+            &tree_of(&[("root", &["left", "right"])]),
+            tree_spacing(),
+        );
+        assert!(matches!(
+            (positions.get("root"), positions.get("left"), positions.get("right")),
+            (Some(root), Some(left), Some(right))
+                if ((left.x + right.x) / 2.0 - root.x).abs() < 0.001
+        ));
+    }
+
+    #[test]
+    fn siblings_do_not_overlap() {
+        let positions = tree_positions(
+            &ids(&["root"]),
+            &tree_of(&[("root", &["a", "b", "c"])]),
+            tree_spacing(),
+        );
+        let mut columns = ["a", "b", "c"]
+            .iter()
+            .filter_map(|id| positions.get(*id).map(|position| position.x))
+            .collect::<Vec<_>>();
+        columns.sort_by(f32::total_cmp);
+        for pair in columns.windows(2) {
+            if let [first, second] = pair {
+                assert!(second - first >= 100.0 - 0.001);
+            }
+        }
+    }
+
+    #[test]
+    fn separate_roots_do_not_collide() {
+        let positions = tree_positions(
+            &ids(&["first", "second"]),
+            &tree_of(&[("first", &["a", "b"])]),
+            tree_spacing(),
+        );
+        assert!(matches!(
+            (positions.get("b"), positions.get("second")),
+            (Some(last_child), Some(second)) if second.x > last_child.x
+        ));
+    }
+
+    #[test]
+    fn a_deeper_branch_drops_one_row_per_level() {
+        let positions = tree_positions(
+            &ids(&["root"]),
+            &tree_of(&[("root", &["child"]), ("child", &["grandchild"])]),
+            tree_spacing(),
+        );
+        assert!(matches!(
+            (positions.get("root"), positions.get("child"), positions.get("grandchild")),
+            (Some(root), Some(child), Some(deep))
+                if (child.y - root.y - 80.0).abs() < 0.001
+                    && (deep.y - child.y - 80.0).abs() < 0.001
+        ));
+    }
+
+    #[test]
+    fn a_parent_cycle_still_places_what_it_can() {
+        let positions = tree_positions(
+            &ids(&["a"]),
+            &tree_of(&[("a", &["b"]), ("b", &["a"])]),
+            tree_spacing(),
+        );
+        assert!(positions.contains_key("a"));
+        assert!(positions.contains_key("b"));
     }
 
     #[test]

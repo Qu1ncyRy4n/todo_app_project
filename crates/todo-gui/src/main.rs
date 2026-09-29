@@ -8,14 +8,16 @@ mod theme;
 use anyhow::{Context, Result, bail};
 use chrono::{Datelike, Local, NaiveDate};
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
-use geometry::{BandSpacing, FlowSpacing, OverlapSpacing, SeparationSpacing, TimelineSpacing};
+use geometry::{
+    BandSpacing, FlowSpacing, OverlapSpacing, SeparationSpacing, TimelineSpacing, TreeSpacing,
+};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fs, path::PathBuf};
 use tags::{TagFilter, TagFilterState};
 use theme::TagInheritance;
 use theme::{
-    Channel, InspectorTheme, NodeShape, ParentRegionStyle, RegionShape, TagColoring, TagPalette,
-    Theme,
+    Channel, InspectorTheme, NodeShape, NormalizeStyle, ParentRegionStyle, RegionShape,
+    TagColoring, TagPalette, Theme,
 };
 use todo_core::{ItemId, ItemState, NamespacePath, Priority, RelationKind, WeightInputs};
 use todo_store::{
@@ -1197,11 +1199,134 @@ impl TodoGui {
             Some("Focus Window arranged: done above, active centered, future below.".to_owned());
     }
 
+    /// Hangs each task's subtree beneath it, with active work leading.
+    ///
+    /// Roots are ordered so active work, and work holding active work, comes first,
+    /// which puts what is being worked on across the top with its children below it.
+    /// Finished prerequisites are lifted into a band above, where they read as
+    /// context rather than as work still waiting.
+    fn hierarchy_layout(&mut self, rect: Rect) {
+        let items = self.visible_items();
+        let visible = items
+            .iter()
+            .map(|item| item.item.id.to_string())
+            .collect::<std::collections::HashSet<_>>();
+        let holding = ids_holding_active_work(&items);
+        let mut children: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        let mut roots = Vec::new();
+        for item in &items {
+            let id = item.item.id.to_string();
+            match item.item.parent_id.map(|parent| parent.to_string()) {
+                Some(parent) if visible.contains(&parent) => {
+                    children.entry(parent).or_default().push(id);
+                }
+                // A task whose parent is filtered out leads its own tree rather
+                // than disappearing into one that is not on screen.
+                _ => roots.push(id),
+            }
+        }
+        let lifted = if self.theme.layout.done_above {
+            self.finished_prerequisites(&items)
+        } else {
+            std::collections::HashSet::new()
+        };
+        let leading = |id: &String| {
+            let item = items
+                .iter()
+                .find(|candidate| candidate.item.id.to_string() == *id);
+            let active = item
+                .is_some_and(|item| item.item.state == ItemState::Active || holding.contains(id));
+            (!active, id.clone())
+        };
+        roots.retain(|id| !lifted.contains(id));
+        roots.sort_by_key(leading);
+        let spacing = TreeSpacing {
+            leaf_gap: self.theme.layout.leaf_gap,
+            row_gap: self.theme.layout.row_gap,
+        };
+        let mut arranged = geometry::tree_positions(&roots, &children, spacing);
+        // Finished prerequisites sit above the work that needed them, so a glance
+        // down the column reads as what was done, then what is being done.
+        let mut lifted_column = 0.0_f32;
+        for id in lifted {
+            let above = items
+                .iter()
+                .filter(|candidate| {
+                    candidate
+                        .dependencies
+                        .iter()
+                        .any(|dependency| dependency.to_string() == id)
+                })
+                .find_map(|dependent| {
+                    arranged
+                        .get(&dependent.item.id.to_string())
+                        .map(|placed| placed.x)
+                });
+            let x = above.unwrap_or_else(|| {
+                lifted_column += spacing.leaf_gap;
+                lifted_column
+            });
+            arranged.insert(id, Vec2::new(x, -self.theme.layout.done_band_gap));
+        }
+        self.apply_arrangement(
+            rect,
+            &items,
+            &arranged,
+            Pos2::new(rect.center().x, rect.top() + 200.0),
+        );
+        self.relax_if_enabled(rect);
+        self.timeline_origin = None;
+        self.focus_mode = false;
+        self.message =
+            Some("Hierarchy arranged. Undo layout restores the previous one.".to_owned());
+    }
+
+    /// Returns finished tasks that something visible still depends on.
+    fn finished_prerequisites(&self, items: &[StoredItem]) -> std::collections::HashSet<String> {
+        let finished = items
+            .iter()
+            .filter(|item| {
+                item.item.state == ItemState::Done || item.item.state == ItemState::Canceled
+            })
+            .map(|item| item.item.id.to_string())
+            .collect::<std::collections::HashSet<_>>();
+        items
+            .iter()
+            .flat_map(|item| item.dependencies.iter().map(|id| id.to_string()))
+            .filter(|id| finished.contains(id))
+            .collect()
+    }
+
+    /// Writes an arrangement of graph-space positions into the saved offsets.
+    fn apply_arrangement(
+        &mut self,
+        rect: Rect,
+        items: &[StoredItem],
+        arranged: &HashMap<String, Vec2>,
+        origin: Pos2,
+    ) {
+        self.layout_undo = Some(self.node_offsets.clone());
+        for (index, item) in items.iter().enumerate() {
+            let id = item.item.id.to_string();
+            let Some(target) = arranged.get(&id) else {
+                continue;
+            };
+            self.node_offsets
+                .insert(id, (origin + *target) - grid_slot(index, rect));
+        }
+        self.save_layout();
+    }
+
     /// Rearranges visible nodes so relationships flow one way, down or right.
     ///
     /// The previous arrangement is kept in `layout_undo`, so a normalize that
     /// scatters a hand-built layout can be taken back.
     fn normalize_layout(&mut self, rect: Rect) {
+        if self.theme.layout.style == NormalizeStyle::Hierarchy {
+            self.hierarchy_layout(rect);
+            return;
+        }
         let items = self.visible_items();
         let ids = items
             .iter()

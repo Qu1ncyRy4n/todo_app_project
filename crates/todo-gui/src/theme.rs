@@ -57,10 +57,31 @@ impl Theme {
     }
 }
 
+/// How Normalize arranges the graph.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NormalizeStyle {
+    /// Hang each task's children beneath it, active work leading.
+    #[default]
+    Hierarchy,
+    /// Layer the whole graph by longest path over parents and dependencies.
+    Layered,
+}
+
 /// Controls how the Normalize command arranges the graph.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LayoutTheme {
+    /// How Normalize arranges the graph.
+    pub style: NormalizeStyle,
+    /// Horizontal distance between neighboring leaves in a hierarchy.
+    pub leaf_gap: f32,
+    /// Vertical distance between a task and its children in a hierarchy.
+    pub row_gap: f32,
+    /// Vertical distance from active work up to the finished work it depended on.
+    pub done_band_gap: f32,
+    /// Whether finished prerequisites are lifted into a band above.
+    pub done_above: bool,
     /// Whether a normalized graph flows downward or rightward.
     pub direction: FlowDirection,
     /// Distance between one layer and the next.
@@ -103,6 +124,11 @@ pub struct LayoutTheme {
 impl Default for LayoutTheme {
     fn default() -> Self {
         Self {
+            style: NormalizeStyle::default(),
+            leaf_gap: 210.0,
+            row_gap: 130.0,
+            done_band_gap: 190.0,
+            done_above: true,
             direction: FlowDirection::default(),
             layer_gap: 120.0,
             node_gap: 185.0,
