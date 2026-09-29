@@ -609,3 +609,23 @@ fn typed_relations_are_set_shown_and_withdrawn() {
     harness.ok(&["unrelate", &work, "implements", &spec]);
     assert!(!harness.ok(&["show", &work]).contains("implements"));
 }
+
+#[test]
+fn a_void_item_leaves_every_listing_and_comes_back_on_request() {
+    let harness = Harness::new();
+    harness.ok(&["init"]);
+    harness.ok(&["add", "Real work"]);
+    harness.ok(&["add", "Mistyped capture"]);
+    let listed = harness.ok(&["ls"]);
+    let mistake = spoken_id(&listed, "Mistyped capture");
+
+    harness.ok(&["void", &mistake]);
+    // Even asking for every state leaves it out: a void item was never work.
+    assert!(!harness.ok(&["ls", "--all"]).contains("Mistyped capture"));
+    assert!(harness.ok(&["ls"]).contains("Real work"));
+    assert!(harness.ok(&["voided"]).contains("Mistyped capture"));
+
+    harness.ok(&["reopen", &mistake]);
+    assert!(harness.ok(&["ls"]).contains("Mistyped capture"));
+    assert!(harness.ok(&["voided"]).contains("No void items."));
+}

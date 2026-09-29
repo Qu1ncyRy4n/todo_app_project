@@ -8,6 +8,7 @@ use todo_core::{
     NamespaceId, NamespaceKind, NamespacePath, Priority, RelationKind, decode_envelope,
     event_protocol_v5_cid, event_protocol_v6_cid, event_protocol_v7_cid, event_protocol_v8_cid,
     event_protocol_v9_cid, event_protocol_v10_cid, event_protocol_v11_cid, event_protocol_v12_cid,
+    event_protocol_v13_cid,
 };
 use turso::{Builder, Connection, Value};
 use uuid::Uuid;
@@ -847,6 +848,36 @@ impl Ledger {
         self.get_item(&found.id.to_string()).await
     }
 
+    /// Returns items marked void, which every other listing leaves out.
+    ///
+    /// Void items are noise by definition, so nothing surfaces them by accident;
+    /// this is how one is found again when it was voided by mistake.
+    pub async fn void_items(&self) -> Result<Vec<StoredItem>> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until, scheduled_on, difficulty, estimate_minutes FROM items WHERE deleted_at IS NULL AND state = 'void' ORDER BY id",
+                (),
+            )
+            .await?;
+        let mut items = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let item = item_from_row(&row)?;
+            let namespaces = self.item_namespaces(item.id).await?;
+            let dependencies = self.item_dependencies(item.id).await?;
+            let blocked_by = self.item_active_blockers(item.id).await?;
+            let relations = self.item_relations(item.id).await?;
+            items.push(StoredItem {
+                item,
+                namespaces,
+                dependencies,
+                blocked_by,
+                relations,
+            });
+        }
+        Ok(items)
+    }
+
     /// Returns every deleted item, newest deletion first.
     pub async fn deleted_items(&self) -> Result<Vec<DeletedItem>> {
         let mut rows = self
@@ -1515,27 +1546,27 @@ impl Ledger {
         };
         let (sql, params) = match (scope, project_id, all_states) {
             (ItemScope::Project(_), Some(id), true) => (
-                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until, scheduled_on, difficulty, estimate_minutes FROM items WHERE deleted_at IS NULL AND project_id = ?1 ORDER BY id",
+                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until, scheduled_on, difficulty, estimate_minutes FROM items WHERE deleted_at IS NULL AND state != 'void' AND project_id = ?1 ORDER BY id",
                 values([id.to_string()]),
             ),
             (ItemScope::Project(_), Some(id), false) => (
-                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until, scheduled_on, difficulty, estimate_minutes FROM items WHERE deleted_at IS NULL AND project_id = ?1 AND state NOT IN ('done', 'canceled') ORDER BY id",
+                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until, scheduled_on, difficulty, estimate_minutes FROM items WHERE deleted_at IS NULL AND project_id = ?1 AND state NOT IN ('done', 'canceled', 'void') ORDER BY id",
                 values([id.to_string()]),
             ),
             (ItemScope::Unscoped, None, true) => (
-                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until, scheduled_on, difficulty, estimate_minutes FROM items WHERE deleted_at IS NULL AND project_id IS NULL ORDER BY id",
+                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until, scheduled_on, difficulty, estimate_minutes FROM items WHERE deleted_at IS NULL AND state != 'void' AND project_id IS NULL ORDER BY id",
                 Vec::<Value>::new(),
             ),
             (ItemScope::Unscoped, None, false) => (
-                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until, scheduled_on, difficulty, estimate_minutes FROM items WHERE deleted_at IS NULL AND project_id IS NULL AND state NOT IN ('done', 'canceled') ORDER BY id",
+                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until, scheduled_on, difficulty, estimate_minutes FROM items WHERE deleted_at IS NULL AND project_id IS NULL AND state NOT IN ('done', 'canceled', 'void') ORDER BY id",
                 Vec::<Value>::new(),
             ),
             (ItemScope::All, None, true) => (
-                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until, scheduled_on, difficulty, estimate_minutes FROM items WHERE deleted_at IS NULL ORDER BY id",
+                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until, scheduled_on, difficulty, estimate_minutes FROM items WHERE deleted_at IS NULL AND state != 'void' ORDER BY id",
                 Vec::<Value>::new(),
             ),
             (ItemScope::All, None, false) => (
-                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until, scheduled_on, difficulty, estimate_minutes FROM items WHERE deleted_at IS NULL AND state NOT IN ('done', 'canceled') ORDER BY id",
+                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until, scheduled_on, difficulty, estimate_minutes FROM items WHERE deleted_at IS NULL AND state NOT IN ('done', 'canceled', 'void') ORDER BY id",
                 Vec::<Value>::new(),
             ),
             _ => bail!("invalid resolved item scope"),
@@ -1897,6 +1928,7 @@ impl Ledger {
                 && envelope.protocol_cid() != &event_protocol_v10_cid()
                 && envelope.protocol_cid() != &event_protocol_v11_cid()
                 && envelope.protocol_cid() != &event_protocol_v12_cid()
+                && envelope.protocol_cid() != &event_protocol_v13_cid()
             {
                 bail!("event {} uses an unknown protocol", record.cid);
             }
@@ -2594,6 +2626,9 @@ fn compare_focus(left: &StoredItem, right: &StoredItem) -> Ordering {
         ItemState::Active => 0,
         ItemState::Inbox => 1,
         ItemState::Done | ItemState::Canceled => 2,
+        // Void items are filtered out long before this, but ranking them last
+        // keeps the comparison total rather than relying on that.
+        ItemState::Void => 3,
     };
     state_rank(left.item.state)
         .cmp(&state_rank(right.item.state))
@@ -2689,6 +2724,50 @@ mod tests {
     async fn ledger() -> Ledger {
         let directory = tempdir().unwrap().keep();
         Ledger::open(&directory.join("ledger.db")).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_void_item_leaves_every_listing_but_can_be_brought_back() {
+        let ledger = ledger().await;
+        let keeper = ledger.add_item("Real work", None).await.unwrap();
+        let mistake = ledger.add_item("Mistyped capture", None).await.unwrap();
+        let id = mistake.item.id.to_string();
+        ledger.set_state(&id, ItemState::Void).await.unwrap();
+
+        // Even an all-states listing leaves it out: all states means all the work.
+        let listed = ledger.list_items(ItemScope::All, true).await.unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].item.id, keeper.item.id);
+
+        let voided = ledger.void_items().await.unwrap();
+        assert_eq!(voided.len(), 1);
+        assert_eq!(voided[0].item.title, "Mistyped capture");
+
+        ledger.set_state(&id, ItemState::Inbox).await.unwrap();
+        assert_eq!(
+            ledger.list_items(ItemScope::All, true).await.unwrap().len(),
+            2
+        );
+        assert!(ledger.void_items().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn voiding_survives_a_view_rebuild() {
+        let ledger = ledger().await;
+        let mistake = ledger.add_item("Duplicate", None).await.unwrap();
+        ledger
+            .set_state(&mistake.item.id.to_string(), ItemState::Void)
+            .await
+            .unwrap();
+        ledger.rebuild_views().await.unwrap();
+        assert!(
+            ledger
+                .list_items(ItemScope::All, true)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(ledger.void_items().await.unwrap().len(), 1);
     }
 
     #[tokio::test]

@@ -53,6 +53,8 @@ pub enum ItemState {
     Active,
     Done,
     Canceled,
+    /// Created in error: a duplicate or a mistyped capture, never real work.
+    Void,
 }
 
 impl ItemState {
@@ -62,6 +64,10 @@ impl ItemState {
             (Self::Inbox, Self::Active | Self::Done | Self::Canceled) => true,
             (Self::Active, Self::Inbox | Self::Done | Self::Canceled) => true,
             (Self::Done | Self::Canceled, Self::Active) => true,
+            // Anything can turn out to have been a mistake, and a mistake can
+            // always be taken back, so voiding never loses a task.
+            (_, Self::Void) => true,
+            (Self::Void, Self::Inbox | Self::Active) => true,
             _ => false,
         }
     }
@@ -74,6 +80,7 @@ impl fmt::Display for ItemState {
             Self::Active => "active",
             Self::Done => "done",
             Self::Canceled => "canceled",
+            Self::Void => "void",
         };
         formatter.write_str(value)
     }
@@ -92,6 +99,7 @@ impl FromStr for ItemState {
             "active" | "ongoing" => Ok(Self::Active),
             "done" => Ok(Self::Done),
             "canceled" | "cancelled" => Ok(Self::Canceled),
+            "void" | "error" | "mistake" => Ok(Self::Void),
             _ => Err(ParseItemStateError(value.to_owned())),
         }
     }
@@ -238,6 +246,42 @@ mod tests {
         assert_eq!("p0".parse(), Ok(Priority::Critical));
         assert!(Priority::Critical.rank() > Priority::High.rank());
         assert!(Priority::High.rank() > Priority::Normal.rank());
+    }
+}
+
+#[cfg(test)]
+mod void_tests {
+    use super::ItemState;
+
+    #[test]
+    fn any_state_can_be_found_to_have_been_a_mistake() {
+        for state in [
+            ItemState::Inbox,
+            ItemState::Active,
+            ItemState::Done,
+            ItemState::Canceled,
+        ] {
+            assert!(state.can_transition_to(ItemState::Void));
+        }
+    }
+
+    #[test]
+    fn voiding_can_be_taken_back() {
+        assert!(ItemState::Void.can_transition_to(ItemState::Inbox));
+        assert!(ItemState::Void.can_transition_to(ItemState::Active));
+    }
+
+    #[test]
+    fn void_parses_from_the_words_people_reach_for() {
+        assert_eq!("void".parse(), Ok(ItemState::Void));
+        assert_eq!("error".parse(), Ok(ItemState::Void));
+        assert_eq!("mistake".parse(), Ok(ItemState::Void));
+    }
+
+    #[test]
+    fn void_is_not_canceled() {
+        assert_ne!(ItemState::Void, ItemState::Canceled);
+        assert_eq!(ItemState::Void.to_string(), "void");
     }
 }
 

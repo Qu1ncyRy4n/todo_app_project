@@ -646,6 +646,7 @@ impl TodoGui {
                     ItemState::Active,
                     ItemState::Done,
                     ItemState::Canceled,
+                    ItemState::Void,
                 ]
                 .into_iter()
                 .filter(|state| item.item.state.can_transition_to(*state))
@@ -3852,6 +3853,9 @@ fn status_color(item: &StoredItem, holds_active: bool) -> Color32 {
         ItemState::Active => Color32::from_rgb(47, 104, 72),
         ItemState::Done => Color32::from_gray(80),
         ItemState::Canceled => Color32::from_rgb(100, 61, 61),
+        // Void work is drawn flattest of all: noise kept only so it can be
+        // brought back if it was voided by mistake.
+        ItemState::Void => Color32::from_gray(52),
         // A task holding active work is drawn as underway, in a quieter shade
         // than work that was picked up in its own right.
         ItemState::Inbox if holds_active => Color32::from_rgb(44, 82, 64),

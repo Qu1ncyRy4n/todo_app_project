@@ -65,6 +65,13 @@ enum Command {
     Difficulty { item: String, value: String },
     /// Set or clear an effort estimate in minutes. Pass "clear" to remove it.
     Estimate { item: String, value: String },
+    /// Mark an item as created in error, hiding it from every listing.
+    ///
+    /// Distinct from cancel, which records work deliberately abandoned. Reverse it
+    /// with `todo reopen` or by setting any other state.
+    Void { item: String },
+    /// List items marked void.
+    Voided,
     /// Delete an item, hiding it from every view. Reversible with `todo restore`.
     #[command(alias = "delete")]
     Rm {
@@ -466,6 +473,20 @@ async fn run() -> Result<()> {
                 updated.item.id,
                 describe_optional(updated.item.estimate_minutes)
             );
+        }
+        Command::Void { item } => {
+            let updated = ledger.set_state(&item, ItemState::Void).await?;
+            println!("{} marked void", short_id(updated.item.id));
+            println!("It is hidden from every listing. `todo reopen` brings it back.");
+        }
+        Command::Voided => {
+            let voided = ledger.void_items().await?;
+            if voided.is_empty() {
+                println!("No void items.");
+            }
+            for item in voided {
+                print_state(&item);
+            }
         }
         Command::Rm { item, force } => {
             // A delete without --force reports what would go and changes nothing, so
@@ -1151,6 +1172,7 @@ fn state_mark(state: ItemState) -> &'static str {
         ItemState::Active => "[>]",
         ItemState::Done => "[x]",
         ItemState::Canceled => "[-]",
+        ItemState::Void => "[~]",
     }
 }
 
@@ -1357,6 +1379,9 @@ fn markdown_line(output: &mut String, depth: usize, state: ItemState, title: &st
         ItemState::Active => '>',
         ItemState::Done => 'x',
         ItemState::Canceled => '-',
+        // Markdown has no marker for "was never a task", and a void item is left
+        // out of the listings this renders anyway; '-' keeps the tree readable.
+        ItemState::Void => '-',
     };
     let title = title.replace(['\r', '\n'], " ");
     output.push_str(&format!("{}- [{marker}] {title}\n", "  ".repeat(depth)));
