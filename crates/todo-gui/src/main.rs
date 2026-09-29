@@ -2341,7 +2341,55 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
     {
         draw_timeline_ruler(&painter, rect, origin, app);
     }
-    if app.show_parent_regions && app.theme.parent.show_regions {
+    let boxes = if app.show_parent_regions
+        && app.theme.parent.show_regions
+        && app.theme.parent.region_style == ParentRegionStyle::Box
+    {
+        container_boxes(&items, &positions, &app.theme, app.graph_zoom)
+    } else {
+        HashMap::new()
+    };
+    if !boxes.is_empty() {
+        // Outermost first, so a nested container stays visible inside its ancestor.
+        let mut ordered = boxes.iter().collect::<Vec<_>>();
+        ordered.sort_by(|left, right| {
+            (right.1.area())
+                .partial_cmp(&left.1.area())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        for (id, box_rect) in ordered {
+            let Some(item) = items
+                .iter()
+                .find(|candidate| candidate.item.id.to_string() == *id)
+            else {
+                continue;
+            };
+            let color = node_tag_color(item, &app.theme, &palette, &effective)
+                .unwrap_or(Color32::from_gray(150));
+            let fill = Color32::from_rgba_unmultiplied(
+                color.r(),
+                color.g(),
+                color.b(),
+                app.theme.parent.fill_alpha,
+            );
+            let stroke = Stroke::new(
+                app.theme.parent.stroke_width,
+                Color32::from_rgba_unmultiplied(
+                    color.r(),
+                    color.g(),
+                    color.b(),
+                    app.theme.parent.stroke_alpha,
+                ),
+            );
+            let rounding = app.theme.parent.corner_radius * app.graph_zoom;
+            painter.rect_filled(*box_rect, rounding, fill);
+            painter.rect_stroke(*box_rect, rounding, stroke, egui::StrokeKind::Outside);
+        }
+    }
+    if app.show_parent_regions
+        && app.theme.parent.show_regions
+        && app.theme.parent.region_style == ParentRegionStyle::Hull
+    {
         draw_parent_regions(
             &painter,
             &items,
@@ -2489,7 +2537,12 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
         let height = needed
             .max(node_height * zoom)
             .min(app.theme.node.max_height * zoom);
-        let node = Rect::from_center_size(*center, Vec2::new(node_width * zoom, height));
+        // A container's card is its box header: the parent is the box, rather than
+        // a separate card floating inside a labeled region.
+        let node = match boxes.get(&id) {
+            Some(box_rect) => container_header(*box_rect, &app.theme, app.graph_zoom),
+            None => Rect::from_center_size(*center, Vec2::new(node_width * zoom, height)),
+        };
         let response = ui.interact(node, ui.make_persistent_id(&id), Sense::click_and_drag());
         let selected = app.selected.as_deref() == Some(id.as_str());
         let holds_active = holding_active.contains(&id);
@@ -2598,10 +2651,24 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
         {
             let dragged_distance = (pointer - pointer_start) / app.graph_zoom.max(f32::EPSILON);
             let dragged_to = offset_start + dragged_distance;
+            let moved = dragged_to - offset_start;
             app.node_offsets.insert(id.clone(), dragged_to);
             // A dragged node follows the pointer exactly; easing it would feel like
             // lag rather than like motion.
             app.drawn_offsets.insert(id.clone(), dragged_to);
+            if boxes.contains_key(&id) {
+                // Dragging a container takes its contents along, since the box is
+                // drawn from where its descendants are.
+                for member in collect_subtree(&id, &child_index) {
+                    if member == id {
+                        continue;
+                    }
+                    let previous = app.node_offsets.get(&member).copied().unwrap_or(Vec2::ZERO);
+                    let next = previous + moved;
+                    app.node_offsets.insert(member.clone(), next);
+                    app.drawn_offsets.insert(member, next);
+                }
+            }
         }
         if response.drag_stopped() {
             app.drag_anchor = None;
@@ -3236,6 +3303,60 @@ fn bounds_for_points(points: &[Pos2], half_size: Vec2) -> Option<Rect> {
         Rect::from_center_size(first, half_size * 2.0),
         |bounds, point| bounds.union(Rect::from_center_size(*point, half_size * 2.0)),
     ))
+}
+
+/// Returns the box each parent task encloses its subtree in, keyed by parent id.
+///
+/// The box is sized to the descendants, with room above for the parent's own card,
+/// which is drawn as its header: the parent is the container, not a separate node
+/// floating inside a labeled region. Parents with no visible descendants get no
+/// box and stay ordinary cards.
+fn container_boxes(
+    items: &[StoredItem],
+    positions: &HashMap<String, Pos2>,
+    theme: &Theme,
+    zoom: f32,
+) -> HashMap<String, Rect> {
+    let children = child_index(items);
+    let (width, height) = theme.node.size();
+    let half = Vec2::new(width / 2.0, height / 2.0) * zoom;
+    let mut boxes = HashMap::new();
+    for item in items {
+        let id = item.item.id.to_string();
+        let subtree = collect_subtree(&id, &children);
+        let descendants = subtree
+            .iter()
+            .filter(|member| **member != id)
+            .filter_map(|member| positions.get(member).copied())
+            .collect::<Vec<_>>();
+        if descendants.len() < theme.parent.min_descendants.max(1) {
+            continue;
+        }
+        let Some(bounds) = bounds_for_points(&descendants, half) else {
+            continue;
+        };
+        let depth = ancestor_depth(item, items);
+        let nesting = f32::from(u8::try_from(depth).unwrap_or(u8::MAX)) * theme.parent.nest_padding;
+        let padding = (theme.parent.padding + nesting) * zoom;
+        let header = theme.node.height.max(theme.parent.header_height) * zoom;
+        boxes.insert(
+            id,
+            Rect::from_min_max(
+                bounds.left_top() - Vec2::new(padding, padding + header),
+                bounds.right_bottom() + Vec2::new(padding, padding),
+            ),
+        );
+    }
+    boxes
+}
+
+/// Returns the header strip of a container box, where the parent's card is drawn.
+fn container_header(box_rect: Rect, theme: &Theme, zoom: f32) -> Rect {
+    let header = theme.node.height.max(theme.parent.header_height) * zoom;
+    Rect::from_min_max(
+        box_rect.left_top(),
+        egui::pos2(box_rect.right(), box_rect.top() + header),
+    )
 }
 
 /// Returns the lifecycle color for a task.
