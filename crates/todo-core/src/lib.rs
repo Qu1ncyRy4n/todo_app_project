@@ -9,7 +9,7 @@ mod namespace;
 pub use event::{
     Event, EventBuilder, EventDecodeError, EventKind, EventLink, EventPayload, decode_envelope,
     event_protocol_v4_cid, event_protocol_v5_cid, event_protocol_v6_cid, event_protocol_v7_cid,
-    event_protocol_v8_cid, event_protocol_v9_cid,
+    event_protocol_v8_cid, event_protocol_v9_cid, event_protocol_v10_cid,
 };
 pub use grid::{
     GRID_CBOR_CODEC, GRID_TAG, GridEnvelope, GridEnvelopeBuilder, GridError, RAW_CODEC,

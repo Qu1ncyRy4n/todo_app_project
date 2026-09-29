@@ -46,6 +46,18 @@ enum Command {
     Cancel { item: String },
     /// Reopen a done or canceled item as active.
     Reopen { item: String },
+    /// Delete an item, hiding it from every view. Reversible with `todo restore`.
+    #[command(alias = "delete")]
+    Rm {
+        item: String,
+        /// Confirm the deletion. Without it, the item is only described.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Restore a deleted item.
+    Restore { item: String },
+    /// List deleted items.
+    Deleted,
     /// Add an append-only note.
     Note { item: String, body: String },
     /// Add a file path, URL, or other citation.
@@ -390,6 +402,42 @@ async fn run() -> Result<()> {
             print_state(&ledger.set_state(&item, ItemState::Canceled).await?)
         }
         Command::Reopen { item } => print_state(&ledger.set_state(&item, ItemState::Active).await?),
+        Command::Rm { item, force } => {
+            // A delete without --force reports what would go and changes nothing, so
+            // the destructive step is always a deliberate second command.
+            let found = ledger.get_item(&item).await?;
+            if force {
+                let deleted = ledger.delete_item(&item).await?;
+                println!("Deleted {} {}", deleted.id, deleted.title);
+                println!("Restore it with: todo restore {}", deleted.id);
+            } else {
+                println!("Would delete {} {}", found.item.id, found.item.title);
+                println!(
+                    "State {} · {} dependencies · {} active blockers · {} tags",
+                    found.item.state,
+                    found.dependencies.len(),
+                    found.blocked_by.len(),
+                    found.namespaces.len()
+                );
+                println!("Re-run with --force to delete it. Deletion is reversible.");
+            }
+        }
+        Command::Restore { item } => {
+            let restored = ledger.restore_item(&item).await?;
+            println!("Restored {} {}", restored.item.id, restored.item.title);
+        }
+        Command::Deleted => {
+            let deleted = ledger.deleted_items().await?;
+            if deleted.is_empty() {
+                println!("No deleted items.");
+            }
+            for entry in deleted {
+                println!(
+                    "{} {} (deleted {})",
+                    entry.id, entry.title, entry.deleted_at
+                );
+            }
+        }
         Command::Note { item, body } => {
             ledger.add_note(&item, &body).await?;
             println!("Note added to {item}");

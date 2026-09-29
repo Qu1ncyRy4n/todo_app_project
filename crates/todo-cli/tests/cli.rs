@@ -539,3 +539,35 @@ fn explicit_git_sync_converges_two_independent_ledgers() {
             .contains("events.jsonl merge=union")
     );
 }
+
+#[test]
+fn deleting_an_item_is_confirmed_then_reversible() {
+    let harness = Harness::new();
+    harness.ok(&["init"]);
+    harness.ok(&["add", "Accidental duplicate"]);
+    let listed = harness.ok(&["ls"]);
+    let id = listed
+        .lines()
+        .find(|line| line.contains("Accidental duplicate"))
+        .and_then(|line| {
+            line.split_whitespace()
+                .find(|token| token.len() >= 6 && token.chars().all(|c| c.is_ascii_hexdigit()))
+        })
+        .unwrap()
+        .to_owned();
+
+    // Without --force nothing is removed, so a mistyped delete is harmless.
+    let dry_run = harness.ok(&["rm", &id]);
+    assert!(dry_run.contains("Would delete"));
+    assert!(harness.ok(&["ls"]).contains("Accidental duplicate"));
+
+    let deleted = harness.ok(&["rm", &id, "--force"]);
+    assert!(deleted.contains("Deleted"));
+    assert!(!harness.ok(&["ls"]).contains("Accidental duplicate"));
+    assert!(harness.ok(&["deleted"]).contains("Accidental duplicate"));
+
+    let restored = harness.ok(&["restore", &id]);
+    assert!(restored.contains("Restored"));
+    assert!(harness.ok(&["ls"]).contains("Accidental duplicate"));
+    assert!(harness.ok(&["deleted"]).contains("No deleted items."));
+}

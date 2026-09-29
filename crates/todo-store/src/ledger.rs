@@ -7,6 +7,7 @@ use todo_core::{
     Event, EventBuilder, EventKind, GRID_CBOR_CODEC, GridEnvelope, Item, ItemId, ItemState,
     NamespaceId, NamespaceKind, NamespacePath, Priority, decode_envelope, event_protocol_v5_cid,
     event_protocol_v6_cid, event_protocol_v7_cid, event_protocol_v8_cid, event_protocol_v9_cid,
+    event_protocol_v10_cid,
 };
 use turso::{Builder, Connection, Value};
 use uuid::Uuid;
@@ -108,6 +109,15 @@ pub struct StoredItem {
     pub dependencies: Vec<ItemId>,
     /// Current impediments. The inverse `blocks` view is derived from this edge.
     pub blocked_by: Vec<ItemId>,
+}
+
+/// A task hidden by deletion, as reported by [`Ledger::deleted_items`].
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct DeletedItem {
+    pub id: ItemId,
+    pub title: String,
+    /// RFC 3339 timestamp of the deletion.
+    pub deleted_at: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -250,6 +260,8 @@ impl Ledger {
         self.add_column_if_missing("defer_until", "defer_until TEXT")
             .await?;
         self.add_column_if_missing("scheduled_on", "scheduled_on TEXT")
+            .await?;
+        self.add_column_if_missing("deleted_at", "deleted_at TEXT")
             .await?;
         self.connection
             .execute(
@@ -645,6 +657,137 @@ impl Ledger {
         .await;
         self.transaction_finish(result).await?;
         self.get_item(&current.item.id.to_string()).await
+    }
+
+    /// Marks an item deleted, hiding it from every ordinary read.
+    ///
+    /// The item's rows are retained and the log stays append-only, so the deletion
+    /// can be reversed with [`Ledger::restore_item`]. A deleted item keeps its
+    /// relationships, but they are hidden with it.
+    ///
+    /// Refuses while other visible items still point at this one as a parent,
+    /// dependency, or blocker, so a delete cannot silently orphan work.
+    pub async fn delete_item(&self, reference: &str) -> Result<DeletedItem> {
+        let current = self.get_item(reference).await?;
+        let blockers = self.deletion_blockers(current.item.id).await?;
+        if !blockers.is_empty() {
+            bail!(
+                "item {} is still referenced by {}; detach those references first",
+                current.item.id,
+                blockers.join(", ")
+            );
+        }
+        let deleted_at = Utc::now();
+        let event = self
+            .event(
+                EventBuilder::for_item(EventKind::ItemDeleted, current.item.id)
+                    .project(current.item.project_id)
+                    .data("deleted_at", deleted_at.to_rfc3339())
+                    .data("title", current.item.title.clone()),
+            )
+            .await?;
+        self.transaction_begin().await?;
+        let result = async {
+            self.insert_event(&event).await?;
+            self.connection
+                .execute(
+                    "UPDATE items SET deleted_at = ?1 WHERE id = ?2",
+                    values([deleted_at.to_rfc3339(), current.item.id.to_string()]),
+                )
+                .await?;
+            self.set_head(&event.cid).await
+        }
+        .await;
+        self.transaction_finish(result).await?;
+        Ok(DeletedItem {
+            id: current.item.id,
+            title: current.item.title,
+            deleted_at: deleted_at.to_rfc3339(),
+        })
+    }
+
+    /// Clears an item's deletion mark, returning it to ordinary reads.
+    pub async fn restore_item(&self, reference: &str) -> Result<StoredItem> {
+        let deleted = self.deleted_items().await?;
+        let reference = reference.trim();
+        let matches = deleted
+            .into_iter()
+            .filter(|entry| {
+                let id = entry.id.to_string();
+                id == reference || id.ends_with(reference)
+            })
+            .collect::<Vec<_>>();
+        let found = match matches.len() {
+            0 => bail!("no deleted item matches {reference}"),
+            1 => matches.into_iter().next(),
+            _ => bail!("deleted item reference {reference} is ambiguous; use the full ID"),
+        };
+        let Some(found) = found else {
+            bail!("no deleted item matches {reference}");
+        };
+        let event = self
+            .event(EventBuilder::for_item(EventKind::ItemRestored, found.id))
+            .await?;
+        self.transaction_begin().await?;
+        let result = async {
+            self.insert_event(&event).await?;
+            self.connection
+                .execute(
+                    "UPDATE items SET deleted_at = NULL WHERE id = ?1",
+                    values([found.id.to_string()]),
+                )
+                .await?;
+            self.set_head(&event.cid).await
+        }
+        .await;
+        self.transaction_finish(result).await?;
+        self.get_item(&found.id.to_string()).await
+    }
+
+    /// Returns every deleted item, newest deletion first.
+    pub async fn deleted_items(&self) -> Result<Vec<DeletedItem>> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT id, title, deleted_at FROM items WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC, id",
+                (),
+            )
+            .await?;
+        let mut deleted = Vec::new();
+        while let Some(row) = rows.next().await? {
+            deleted.push(DeletedItem {
+                id: ItemId::parse(&text(&row, 0)?)?,
+                title: text(&row, 1)?,
+                deleted_at: text(&row, 2)?,
+            });
+        }
+        Ok(deleted)
+    }
+
+    /// Returns descriptions of visible items that still reference this one.
+    async fn deletion_blockers(&self, id: ItemId) -> Result<Vec<String>> {
+        let mut blockers = Vec::new();
+        let checks = [
+            (
+                "SELECT 1 FROM items WHERE parent_id = ?1 AND deleted_at IS NULL LIMIT 1",
+                "child tasks",
+            ),
+            (
+                "SELECT 1 FROM item_dependencies WHERE blocker_id = ?1 LIMIT 1",
+                "dependencies",
+            ),
+            (
+                "SELECT 1 FROM item_blocks WHERE blocker_id = ?1 LIMIT 1",
+                "active blockers",
+            ),
+        ];
+        for (sql, label) in checks {
+            let mut rows = self.connection.query(sql, values([id.to_string()])).await?;
+            if rows.next().await?.is_some() {
+                blockers.push(label.to_owned());
+            }
+        }
+        Ok(blockers)
     }
 
     pub async fn edit_title(&self, reference: &str, title: &str) -> Result<StoredItem> {
@@ -1269,27 +1412,27 @@ impl Ledger {
         };
         let (sql, params) = match (scope, project_id, all_states) {
             (ItemScope::Project(_), Some(id), true) => (
-                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until, scheduled_on FROM items WHERE project_id = ?1 ORDER BY id",
+                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until, scheduled_on FROM items WHERE deleted_at IS NULL AND project_id = ?1 ORDER BY id",
                 values([id.to_string()]),
             ),
             (ItemScope::Project(_), Some(id), false) => (
-                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until, scheduled_on FROM items WHERE project_id = ?1 AND state NOT IN ('done', 'canceled') ORDER BY id",
+                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until, scheduled_on FROM items WHERE deleted_at IS NULL AND project_id = ?1 AND state NOT IN ('done', 'canceled') ORDER BY id",
                 values([id.to_string()]),
             ),
             (ItemScope::Unscoped, None, true) => (
-                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until, scheduled_on FROM items WHERE project_id IS NULL ORDER BY id",
+                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until, scheduled_on FROM items WHERE deleted_at IS NULL AND project_id IS NULL ORDER BY id",
                 Vec::<Value>::new(),
             ),
             (ItemScope::Unscoped, None, false) => (
-                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until, scheduled_on FROM items WHERE project_id IS NULL AND state NOT IN ('done', 'canceled') ORDER BY id",
+                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until, scheduled_on FROM items WHERE deleted_at IS NULL AND project_id IS NULL AND state NOT IN ('done', 'canceled') ORDER BY id",
                 Vec::<Value>::new(),
             ),
             (ItemScope::All, None, true) => (
-                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until, scheduled_on FROM items ORDER BY id",
+                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until, scheduled_on FROM items WHERE deleted_at IS NULL ORDER BY id",
                 Vec::<Value>::new(),
             ),
             (ItemScope::All, None, false) => (
-                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until, scheduled_on FROM items WHERE state NOT IN ('done', 'canceled') ORDER BY id",
+                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until, scheduled_on FROM items WHERE deleted_at IS NULL AND state NOT IN ('done', 'canceled') ORDER BY id",
                 Vec::<Value>::new(),
             ),
             _ => bail!("invalid resolved item scope"),
@@ -1360,7 +1503,7 @@ impl Ledger {
         let mut rows = self
             .connection
             .query(
-                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until, scheduled_on FROM items WHERE id = ?1 OR id LIKE ?2 ORDER BY id LIMIT 2",
+                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until, scheduled_on FROM items WHERE deleted_at IS NULL AND (id = ?1 OR id LIKE ?2) ORDER BY id LIMIT 2",
                 values([reference.to_owned(), pattern]),
             )
             .await?;
@@ -1639,6 +1782,7 @@ impl Ledger {
                 && envelope.protocol_cid() != &event_protocol_v7_cid()
                 && envelope.protocol_cid() != &event_protocol_v8_cid()
                 && envelope.protocol_cid() != &event_protocol_v9_cid()
+                && envelope.protocol_cid() != &event_protocol_v10_cid()
             {
                 bail!("event {} uses an unknown protocol", record.cid);
             }
@@ -2025,6 +2169,14 @@ impl Ledger {
                     ],
                 ).await?
             }
+            EventKind::ItemDeleted => self.connection.execute(
+                "UPDATE items SET deleted_at = ?1 WHERE id = ?2",
+                values([value("deleted_at")?.to_owned(), event.payload.subject_id.clone()]),
+            ).await?,
+            EventKind::ItemRestored => self.connection.execute(
+                "UPDATE items SET deleted_at = NULL WHERE id = ?1",
+                values([event.payload.subject_id.clone()]),
+            ).await?,
             EventKind::ItemStateChanged => self.connection.execute(
                 "UPDATE items SET state = ?1 WHERE id = ?2",
                 values([value("to")?.to_owned(), event.payload.subject_id.clone()]),
@@ -2236,6 +2388,62 @@ mod tests {
     async fn ledger() -> Ledger {
         let directory = tempdir().unwrap().keep();
         Ledger::open(&directory.join("ledger.db")).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_deleted_item_disappears_from_reads_and_can_be_restored() {
+        let ledger = ledger().await;
+        let item = ledger.add_item("Duplicate task", None).await.unwrap();
+        let id = item.item.id.to_string();
+        let deleted = ledger.delete_item(&id).await.unwrap();
+        assert_eq!(deleted.title, "Duplicate task");
+        assert!(
+            ledger
+                .list_items(ItemScope::All, true)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(ledger.get_item(&id).await.is_err());
+        let listed = ledger.deleted_items().await.unwrap();
+        assert_eq!(listed.len(), 1);
+        let restored = ledger.restore_item(&id).await.unwrap();
+        assert_eq!(restored.item.title, "Duplicate task");
+        assert_eq!(
+            ledger.list_items(ItemScope::All, true).await.unwrap().len(),
+            1
+        );
+        assert!(ledger.deleted_items().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn deleting_a_referenced_item_is_refused() {
+        let ledger = ledger().await;
+        let parent = ledger.add_item("Parent", None).await.unwrap();
+        let child = ledger.add_item("Child", None).await.unwrap();
+        ledger
+            .set_parent(&child.item.id.to_string(), &parent.item.id.to_string())
+            .await
+            .unwrap();
+        let refused = ledger.delete_item(&parent.item.id.to_string()).await;
+        assert!(refused.is_err());
+        assert_eq!(
+            ledger.list_items(ItemScope::All, true).await.unwrap().len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn a_deletion_survives_a_view_rebuild() {
+        let ledger = ledger().await;
+        let item = ledger.add_item("Gone", None).await.unwrap();
+        let keeper = ledger.add_item("Kept", None).await.unwrap();
+        ledger.delete_item(&item.item.id.to_string()).await.unwrap();
+        ledger.rebuild_views().await.unwrap();
+        let remaining = ledger.list_items(ItemScope::All, true).await.unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].item.id, keeper.item.id);
+        assert_eq!(ledger.deleted_items().await.unwrap().len(), 1);
     }
 
     #[tokio::test]

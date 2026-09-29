@@ -12,8 +12,8 @@ use std::{collections::HashMap, fs, path::PathBuf};
 use theme::{InspectorTheme, NodeShape, RegionShape, TagColoring, TagPalette, Theme};
 use todo_core::{ItemState, NamespacePath, Priority};
 use todo_store::{
-    AppConfig, AppPaths, Citation, FocusSequence, ItemPatch, ItemScope, Ledger, NamespaceEntry,
-    Note, StoredItem, WorkSession,
+    AppConfig, AppPaths, Citation, DeletedItem, FocusSequence, ItemPatch, ItemScope, Ledger,
+    NamespaceEntry, Note, StoredItem, WorkSession,
 };
 use tokio::runtime::Runtime;
 
@@ -91,6 +91,8 @@ struct TodoGui {
     theme: Theme,
     theme_path: PathBuf,
     inspector: InspectorTheme,
+    delete_confirm: Option<String>,
+    deleted: Vec<DeletedItem>,
     layout_undo: Option<HashMap<String, Vec2>>,
     normalize_requested: bool,
     focus_layout_requested: bool,
@@ -159,6 +161,8 @@ impl TodoGui {
             graph_pan: Vec2::ZERO,
             graph_zoom: 1.0,
             inspector: theme.inspector,
+            delete_confirm: None,
+            deleted: Vec::new(),
             theme,
             theme_path,
             layout_undo: None,
@@ -176,6 +180,60 @@ impl TodoGui {
         };
         app.refresh();
         app
+    }
+
+    /// Deletes the selected task, hiding it from every view.
+    ///
+    /// The deletion is reversible: the task is listed under Deleted and can be
+    /// restored. A task still referenced as a parent, dependency, or blocker is
+    /// refused by the ledger rather than silently orphaning that work.
+    fn delete_selected(&mut self) {
+        let Some(id) = self.selected.clone() else {
+            return;
+        };
+        match self.runtime.block_on(self.ledger.delete_item(&id)) {
+            Ok(deleted) => {
+                self.selected = None;
+                self.delete_confirm = None;
+                self.node_offsets.remove(&id);
+                self.save_layout();
+                self.message = Some(format!(
+                    "Deleted {}. Restore it from the Deleted list.",
+                    deleted.title
+                ));
+                self.refresh();
+            }
+            Err(error) => {
+                self.delete_confirm = None;
+                self.message = Some(format!("Not deleted: {error:#}"));
+            }
+        }
+    }
+
+    /// Restores a deleted task, returning it to every view.
+    fn restore_item(&mut self, id: &str) {
+        match self.runtime.block_on(self.ledger.restore_item(id)) {
+            Ok(restored) => {
+                self.message = Some(format!("Restored {}.", restored.item.title));
+                self.refresh();
+            }
+            Err(error) => self.message = Some(format!("Not restored: {error:#}")),
+        }
+    }
+
+    /// Re-reads the list of deleted tasks, leaving any failure to the next explicit refresh.
+    fn refresh_deleted_quietly(&mut self) {
+        if let Ok(deleted) = self.runtime.block_on(self.ledger.deleted_items()) {
+            self.deleted = deleted;
+        }
+    }
+
+    /// Re-reads the list of deleted tasks.
+    fn refresh_deleted(&mut self) {
+        match self.runtime.block_on(self.ledger.deleted_items()) {
+            Ok(deleted) => self.deleted = deleted,
+            Err(error) => self.message = Some(format!("Deleted list unavailable: {error:#}")),
+        }
     }
 
     /// Lays the graph out along a day axis driven by scheduled dates.
@@ -442,6 +500,7 @@ impl TodoGui {
     }
 
     fn refresh(&mut self) {
+        self.refresh_deleted_quietly();
         match self
             .runtime
             .block_on(self.ledger.list_items(ItemScope::All, true))
@@ -1418,6 +1477,45 @@ impl eframe::App for TodoGui {
                             self.tag_draft = namespace;
                             self.add_tag();
                         }
+                    }
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        if self.delete_confirm.as_deref() == Some(item.item.id.to_string().as_str())
+                        {
+                            ui.colored_label(Color32::from_rgb(228, 126, 94), "Delete this task?");
+                            if ui.button("Yes, delete").clicked() {
+                                self.delete_selected();
+                            }
+                            if ui.button("Keep it").clicked() {
+                                self.delete_confirm = None;
+                            }
+                        } else if ui.button("Delete task").clicked() {
+                            if self.theme.safety.confirm_delete {
+                                self.delete_confirm = Some(item.item.id.to_string());
+                            } else {
+                                self.delete_selected();
+                            }
+                        }
+                    });
+                    ui.weak("Deleting hides a task from every view and is reversible.");
+                    if self.theme.safety.show_deleted_list {
+                        egui::CollapsingHeader::new(format!("Deleted ({})", self.deleted.len()))
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                if ui.button("Refresh list").clicked() {
+                                    self.refresh_deleted();
+                                }
+                                let listed = self.deleted.clone();
+                                for entry in listed {
+                                    ui.horizontal(|ui| {
+                                        ui.label(short_title(&entry.title));
+                                        if ui.small_button("Restore").clicked() {
+                                            self.restore_item(&entry.id.to_string());
+                                        }
+                                    });
+                                    ui.weak(entry.deleted_at.clone());
+                                }
+                            });
                     }
                     // Shared by the dependency and blocker sections, so either can be
                     // hidden without taking the list away from the other.

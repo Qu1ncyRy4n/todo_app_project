@@ -18,6 +18,7 @@ use std::{
 #[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Theme {
+    pub safety: SafetyTheme,
     pub inspector: InspectorTheme,
     pub focus: FocusTheme,
     pub timeline: TimelineTheme,
@@ -344,6 +345,28 @@ fn assign_sector(
             theme,
             colors,
         );
+    }
+}
+
+/// Controls the guards on destructive actions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SafetyTheme {
+    /// Whether deleting a task asks for confirmation first.
+    ///
+    /// On by default: a delete is easy to hit by accident and the confirmation is
+    /// the only thing standing between a click and a disappeared task.
+    pub confirm_delete: bool,
+    /// Whether the Deleted list is offered in the inspector.
+    pub show_deleted_list: bool,
+}
+
+impl Default for SafetyTheme {
+    fn default() -> Self {
+        Self {
+            confirm_delete: true,
+            show_deleted_list: true,
+        }
     }
 }
 
