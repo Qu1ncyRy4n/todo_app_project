@@ -1,0 +1,12 @@
+# Status on every channel, for reading lifecycle at a distance.
+# Tags still color their regions, so the family is visible without the card
+# carrying it too.
+
+[node]
+bar_encodes = "status"
+body_encodes = "status"
+outline_encodes = "status"
+
+[tag]
+colormap = "rainbow"
+brightness = 1.25

@@ -178,6 +178,27 @@ impl Default for FocusTheme {
     }
 }
 
+/// What a visual channel on a node stands for.
+///
+/// Separating the channels from their meanings is what lets the same card say
+/// different things: a border can carry the tag family while the bar carries
+/// status, or the two can be swapped, without either being hardcoded.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Channel {
+    /// Nothing; the channel is drawn neutral.
+    None,
+    /// Lifecycle: inbox, active, done, canceled, blocked, holding active work.
+    #[default]
+    Status,
+    /// The task's own deepest tag.
+    Tag,
+    /// Priority, from low to critical along the ramp.
+    Priority,
+    /// Computed weight, from light to heavy along the ramp.
+    Weight,
+}
+
 /// The outline a task node is drawn with.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -210,11 +231,17 @@ pub struct NodeTheme {
     pub meta_font_size: f32,
     /// Whether the state and priority line is drawn at all.
     pub show_meta_line: bool,
-    /// Whether a node's outline takes its tag color rather than a neutral gray.
+    /// What the accent bar on the leading edge stands for.
+    pub bar_encodes: Channel,
+    /// What the body fill stands for.
     ///
-    /// On by default: tasks sharing a tag then read as one family from their
-    /// borders alone, without having to trace which region encloses them.
-    pub outline_from_tag: bool,
+    /// A body carrying anything other than status is tinted down to
+    /// `body_tint_value`, because a bright fill cannot sit behind readable text.
+    pub body_encodes: Channel,
+    /// What the border stands for.
+    pub outline_encodes: Channel,
+    /// Brightness a non-status body is tinted to, so text stays legible on it.
+    pub body_tint_value: f32,
     /// Outline thickness of an unselected node.
     pub outline_width: f32,
     /// Whether a long title wraps onto more lines instead of being cut short.
@@ -239,7 +266,12 @@ impl Default for NodeTheme {
             title_font_size: 14.0,
             meta_font_size: 11.0,
             show_meta_line: true,
-            outline_from_tag: true,
+            // The bar says where the work stands; the body and border say what it
+            // belongs to. Swapping these is a theme edit, not a code change.
+            bar_encodes: Channel::Status,
+            body_encodes: Channel::Tag,
+            outline_encodes: Channel::Tag,
+            body_tint_value: 0.26,
             outline_width: 1.6,
             wrap_titles: true,
             text_padding: 9.0,
@@ -776,6 +808,17 @@ mod tests {
     use super::{EdgeTheme, NodeShape, NodeTheme, TagColoring, TagPalette, TagTheme, Theme};
     use eframe::egui::Color32;
     use std::path::Path;
+
+    #[test]
+    fn the_example_theme_files_parse() {
+        for text in [
+            include_str!("../../../docs/themes/semantic-body.toml"),
+            include_str!("../../../docs/themes/status-first.toml"),
+        ] {
+            let parsed: Result<Theme, _> = toml::from_str(text);
+            assert!(parsed.is_ok(), "example theme failed to parse: {parsed:?}");
+        }
+    }
 
     #[test]
     fn a_missing_theme_file_yields_the_defaults() {

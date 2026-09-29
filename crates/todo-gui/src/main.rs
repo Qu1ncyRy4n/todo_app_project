@@ -14,7 +14,8 @@ use std::{collections::HashMap, fs, path::PathBuf};
 use tags::{TagFilter, TagFilterState};
 use theme::TagInheritance;
 use theme::{
-    InspectorTheme, NodeShape, ParentRegionStyle, RegionShape, TagColoring, TagPalette, Theme,
+    Channel, InspectorTheme, NodeShape, ParentRegionStyle, RegionShape, TagColoring, TagPalette,
+    Theme,
 };
 use todo_core::{ItemId, ItemState, NamespacePath, Priority, RelationKind, WeightInputs};
 use todo_store::{
@@ -2493,19 +2494,19 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
         let selected = app.selected.as_deref() == Some(id.as_str());
         let holds_active = holding_active.contains(&id);
         let reads_active = item.item.state == ItemState::Active || holds_active;
-        let fill = if !item.blocked_by.is_empty() {
-            Color32::from_rgb(119, 57, 51)
-        } else {
-            match item.item.state {
-                ItemState::Active => Color32::from_rgb(47, 104, 72),
-                ItemState::Done => Color32::from_gray(80),
-                ItemState::Canceled => Color32::from_rgb(100, 61, 61),
-                // A task holding active work is drawn as underway, in a quieter
-                // shade than work that was picked up in its own right.
-                ItemState::Inbox if holds_active => Color32::from_rgb(44, 82, 64),
-                ItemState::Inbox => Color32::from_rgb(59, 79, 94),
-            }
-        };
+        let accent = node_tag_color(item, &app.theme, &palette, &effective);
+        let status = status_color(item, holds_active);
+        let weight = item_weight(item, &child_index, &app.theme);
+        let fill = channel_color(
+            app.theme.node.body_encodes,
+            status,
+            accent,
+            item,
+            weight,
+            &app.theme,
+            true,
+        )
+        .unwrap_or(status);
         // While focus mode is on, work that is not active stays drawn but quiet, so
         // it reads as context rather than as part of what is being worked on.
         let exiled = app.focus_mode && !reads_active;
@@ -2522,14 +2523,30 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
             }
         };
         let fill = dim(fill);
-        let accent = node_tag_color(item, &app.theme, &palette, &effective).map(dim);
-        // Borders carry the tag color so tasks in one family read as related from
-        // their outlines alone. Selection still overrides it, since which task is
-        // selected must never be ambiguous.
-        let border = match accent {
-            Some(color) if app.theme.node.outline_from_tag => color,
-            _ => dim(Color32::LIGHT_GRAY),
-        };
+        let bar = channel_color(
+            app.theme.node.bar_encodes,
+            status,
+            accent,
+            item,
+            weight,
+            &app.theme,
+            false,
+        )
+        .map(dim);
+
+        // Selection overrides the border, since which task is selected must never
+        // be ambiguous whatever the border is otherwise saying.
+        let border = channel_color(
+            app.theme.node.outline_encodes,
+            status,
+            accent,
+            item,
+            weight,
+            &app.theme,
+            false,
+        )
+        .map(dim)
+        .unwrap_or(dim(Color32::LIGHT_GRAY));
         let outline = Stroke::new(
             if selected {
                 3.0
@@ -2543,7 +2560,7 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
             node,
             fill,
             outline,
-            accent,
+            bar,
             &app.theme,
             app.graph_zoom,
         );
@@ -3219,6 +3236,63 @@ fn bounds_for_points(points: &[Pos2], half_size: Vec2) -> Option<Rect> {
         Rect::from_center_size(first, half_size * 2.0),
         |bounds, point| bounds.union(Rect::from_center_size(*point, half_size * 2.0)),
     ))
+}
+
+/// Returns the lifecycle color for a task.
+fn status_color(item: &StoredItem, holds_active: bool) -> Color32 {
+    if !item.blocked_by.is_empty() {
+        return Color32::from_rgb(119, 57, 51);
+    }
+    match item.item.state {
+        ItemState::Active => Color32::from_rgb(47, 104, 72),
+        ItemState::Done => Color32::from_gray(80),
+        ItemState::Canceled => Color32::from_rgb(100, 61, 61),
+        // A task holding active work is drawn as underway, in a quieter shade
+        // than work that was picked up in its own right.
+        ItemState::Inbox if holds_active => Color32::from_rgb(44, 82, 64),
+        ItemState::Inbox => Color32::from_rgb(59, 79, 94),
+    }
+}
+
+/// Returns the color a visual channel should carry, or `None` for neutral.
+///
+/// `tint` asks for a color dark enough to sit behind text, which is what the body
+/// needs and the bar and border do not.
+fn channel_color(
+    channel: Channel,
+    status: Color32,
+    accent: Option<Color32>,
+    item: &StoredItem,
+    weight: f32,
+    theme: &Theme,
+    tint: bool,
+) -> Option<Color32> {
+    let color = match channel {
+        Channel::None => return None,
+        Channel::Status => return Some(status),
+        Channel::Tag => accent?,
+        Channel::Priority => {
+            let rank = f32::from(item.item.priority.rank().min(3)) / 3.0;
+            theme.tag.shade(rank, 0)
+        }
+        Channel::Weight => theme.tag.shade(weight.clamp(0.0, 1.0), 0),
+    };
+    Some(if tint {
+        tinted(color, theme.node.body_tint_value)
+    } else {
+        color
+    })
+}
+
+/// Returns a color darkened to a fixed brightness, keeping its hue.
+///
+/// A bright tag color cannot sit behind white text; darkening it to a common value
+/// keeps the family recognizable while the title stays readable.
+fn tinted(color: Color32, value: f32) -> Color32 {
+    let mut hsva = egui::ecolor::Hsva::from(color);
+    hsva.v = value.clamp(0.05, 1.0);
+    hsva.s = (hsva.s * 0.9).clamp(0.0, 1.0);
+    Color32::from(hsva)
 }
 
 /// Returns a node's tag accent from the item's own deepest tag.

@@ -1,0 +1,14 @@
+# Status on the bar, tag family on the body and border.
+# This is the default arrangement, written out so it can be edited.
+
+[node]
+bar_encodes = "status"
+body_encodes = "tag"
+outline_encodes = "tag"
+body_tint_value = 0.26
+wrap_titles = true
+
+[tag]
+colormap = "rainbow"
+brightness = 1.15
+inherit = "implicit"
