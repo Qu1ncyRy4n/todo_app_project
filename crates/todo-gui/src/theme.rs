@@ -4,6 +4,7 @@
 //! opinionated default and can be overridden without touching code. Values that
 //! encode protocol or data meaning never belong here.
 
+use crate::geometry::FlowDirection;
 use anyhow::{Context, Result};
 use eframe::egui::{Color32, ecolor::Hsva};
 use serde::{Deserialize, Serialize};
@@ -13,6 +14,7 @@ use std::{fs, path::Path};
 #[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Theme {
+    pub layout: LayoutTheme,
     pub node: NodeTheme,
     pub tag: TagTheme,
     pub edge: EdgeTheme,
@@ -40,6 +42,40 @@ impl Theme {
     /// Renders the theme as TOML, for writing a starting point a developer can edit.
     pub fn to_toml(&self) -> Result<String> {
         toml::to_string_pretty(self).context("serialize theme")
+    }
+}
+
+/// Controls how the Normalize command arranges the graph.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LayoutTheme {
+    /// Whether a normalized graph flows downward or rightward.
+    pub direction: FlowDirection,
+    /// Distance between one layer and the next.
+    pub layer_gap: f32,
+    /// Distance between neighbors inside a layer.
+    pub node_gap: f32,
+    /// Whether parent relationships order the layers.
+    pub follow_parents: bool,
+    /// Whether planned `depends_on` relationships order the layers.
+    pub follow_dependencies: bool,
+    /// Whether active `blocked_by` relationships order the layers.
+    ///
+    /// Off by default, because an active blocker is a subset of the planned
+    /// dependency it came from and would only duplicate that edge.
+    pub follow_blockers: bool,
+}
+
+impl Default for LayoutTheme {
+    fn default() -> Self {
+        Self {
+            direction: FlowDirection::default(),
+            layer_gap: 120.0,
+            node_gap: 185.0,
+            follow_parents: true,
+            follow_dependencies: true,
+            follow_blockers: false,
+        }
     }
 }
 

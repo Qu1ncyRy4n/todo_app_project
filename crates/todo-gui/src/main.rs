@@ -6,6 +6,7 @@ mod theme;
 use anyhow::{Context, Result, bail};
 use chrono::{Local, NaiveDate};
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
+use geometry::FlowSpacing;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fs, path::PathBuf};
 use theme::{NodeShape, Theme};
@@ -88,6 +89,8 @@ struct TodoGui {
     graph_zoom: f32,
     theme: Theme,
     theme_path: PathBuf,
+    layout_undo: Option<HashMap<String, Vec2>>,
+    normalize_requested: bool,
     new_task_open: bool,
     new_task_title: String,
     note_draft: String,
@@ -149,6 +152,8 @@ impl TodoGui {
             graph_zoom: 1.0,
             theme,
             theme_path,
+            layout_undo: None,
+            normalize_requested: false,
             new_task_open: false,
             new_task_title: String::new(),
             note_draft: String::new(),
@@ -157,6 +162,86 @@ impl TodoGui {
         };
         app.refresh();
         app
+    }
+
+    /// Rearranges visible nodes so relationships flow one way, down or right.
+    ///
+    /// The previous arrangement is kept in `layout_undo`, so a normalize that
+    /// scatters a hand-built layout can be taken back.
+    fn normalize_layout(&mut self, rect: Rect) {
+        let items = self.visible_items();
+        let ids = items
+            .iter()
+            .map(|item| item.item.id.to_string())
+            .collect::<Vec<_>>();
+        let mut edges = Vec::new();
+        for item in &items {
+            let id = item.item.id.to_string();
+            if self.theme.layout.follow_parents
+                && let Some(parent) = item.item.parent_id
+            {
+                edges.push((parent.to_string(), id.clone()));
+            }
+            if self.theme.layout.follow_dependencies {
+                for dependency in &item.dependencies {
+                    edges.push((dependency.to_string(), id.clone()));
+                }
+            }
+            if self.theme.layout.follow_blockers {
+                for blocker in &item.blocked_by {
+                    edges.push((blocker.to_string(), id.clone()));
+                }
+            }
+        }
+        let spacing = FlowSpacing {
+            direction: self.theme.layout.direction,
+            layer_gap: self.theme.layout.layer_gap,
+            node_gap: self.theme.layout.node_gap,
+        };
+        let arranged = geometry::layered_positions(&ids, &edges, spacing);
+        let origin = grid_slot(0, rect);
+        self.layout_undo = Some(self.node_offsets.clone());
+        for (index, id) in ids.iter().enumerate() {
+            let Some(target) = arranged.get(id) else {
+                continue;
+            };
+            let slot = grid_slot(index, rect);
+            self.node_offsets
+                .insert(id.clone(), (origin + *target) - slot);
+        }
+        self.save_layout();
+        self.message = Some("Layout normalized. Undo layout restores the previous one.".to_owned());
+    }
+
+    /// Restores the arrangement captured before the last normalize.
+    fn undo_layout(&mut self) {
+        match self.layout_undo.take() {
+            Some(offsets) => {
+                self.node_offsets = offsets;
+                self.save_layout();
+                self.message = Some("Previous layout restored.".to_owned());
+            }
+            None => self.message = Some("No layout change to undo.".to_owned()),
+        }
+    }
+
+    /// Returns the items the graph is currently drawing, after state and tag filters.
+    fn visible_items(&self) -> Vec<StoredItem> {
+        let tag_filter = self.tag_filter.to_lowercase();
+        self.items
+            .iter()
+            .filter(|item| {
+                (self.show_completed
+                    || (item.item.state != ItemState::Done
+                        && item.item.state != ItemState::Canceled))
+                    && (tag_filter.is_empty()
+                        || item
+                            .namespaces
+                            .iter()
+                            .any(|tag| tag.as_str().to_lowercase().contains(&tag_filter)))
+            })
+            .cloned()
+            .collect()
     }
 
     /// Re-reads `theme.toml`, so visual tuning does not need a restart.
@@ -825,6 +910,14 @@ impl eframe::App for TodoGui {
                 if ui.button("+").clicked() {
                     self.graph_zoom = (self.graph_zoom * 1.2).min(2.5);
                 }
+                if ui.button("Normalize").clicked() {
+                    // The graph rect is only known while drawing, so the request is
+                    // deferred one frame rather than guessed at here.
+                    self.normalize_requested = true;
+                }
+                if ui.button("Undo layout").clicked() {
+                    self.undo_layout();
+                }
                 if ui.button("Reload theme").clicked() {
                     self.reload_theme();
                 }
@@ -1193,21 +1286,11 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
         app.graph_pan += ui.input(|input| input.pointer.delta());
     }
     let painter = ui.painter_at(rect);
-    let tag_filter = app.tag_filter.to_lowercase();
-    let items = app
-        .items
-        .iter()
-        .filter(|item| {
-            (app.show_completed
-                || (item.item.state != ItemState::Done && item.item.state != ItemState::Canceled))
-                && (tag_filter.is_empty()
-                    || item
-                        .namespaces
-                        .iter()
-                        .any(|tag| tag.as_str().to_lowercase().contains(&tag_filter)))
-        })
-        .cloned()
-        .collect::<Vec<_>>();
+    if app.normalize_requested {
+        app.normalize_requested = false;
+        app.normalize_layout(rect);
+    }
+    let items = app.visible_items();
     let positions = graph_positions(
         &items,
         rect,
@@ -1368,8 +1451,9 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
             && dragged == id
             && let Some(pointer) = response.interact_pointer_pos()
         {
+            let dragged_distance = (pointer - pointer_start) / app.graph_zoom.max(f32::EPSILON);
             app.node_offsets
-                .insert(id.clone(), offset_start + (pointer - pointer_start));
+                .insert(id.clone(), offset_start + dragged_distance);
         }
         if response.drag_stopped() {
             app.drag_anchor = None;
@@ -1387,6 +1471,27 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
     }
 }
 
+/// Returns the unpositioned grid slot an item occupies before any offset.
+///
+/// Normalizing works by moving a node from this slot to a computed one, so the
+/// base grid and the normalized layout share one coordinate space.
+fn grid_slot(index: usize, rect: Rect) -> Pos2 {
+    let width = (rect.width() - 190.0).max(1.0);
+    let column = index % 4;
+    let row = index / 4;
+    let column_offset = match column {
+        0 => 0.0,
+        1 => 1.0,
+        2 => 2.0,
+        _ => 3.0,
+    };
+    let row_offset = u16::try_from(row).map_or(f32::MAX, f32::from);
+    Pos2::new(
+        rect.left() + 95.0 + column_offset * (width / 3.0),
+        rect.top() + 70.0 + row_offset * 105.0,
+    )
+}
+
 fn graph_positions(
     items: &[StoredItem],
     rect: Rect,
@@ -1394,27 +1499,14 @@ fn graph_positions(
     pan: Vec2,
     zoom: f32,
 ) -> HashMap<String, Pos2> {
-    let width = (rect.width() - 190.0).max(1.0);
     let mut positions = HashMap::new();
     for (index, item) in items.iter().enumerate() {
-        let column = index % 4;
-        let row = index / 4;
-        let column_offset = match column {
-            0 => 0.0,
-            1 => 1.0,
-            2 => 2.0,
-            _ => 3.0,
-        };
-        let row_offset = u16::try_from(row).map_or(f32::MAX, f32::from);
         let id = item.item.id.to_string();
-        let position = Pos2::new(
-            rect.left() + 95.0 + column_offset * (width / 3.0),
-            rect.top() + 70.0 + row_offset * 105.0,
-        );
-        let position = rect.center()
-            + (position - rect.center()) * zoom
-            + pan
-            + offsets.get(&id).copied().unwrap_or(Vec2::ZERO);
+        let position = grid_slot(index, rect);
+        // Offsets live in graph units, before zoom, so a normalized or dragged
+        // arrangement keeps its shape when the graph is zoomed.
+        let position = position + offsets.get(&id).copied().unwrap_or(Vec2::ZERO);
+        let position = rect.center() + (position - rect.center()) * zoom + pan;
         positions.insert(id, position);
     }
     positions
