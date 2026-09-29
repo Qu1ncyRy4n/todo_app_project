@@ -13,11 +13,13 @@ use std::{
     fs,
     path::Path,
 };
+use todo_core::WeightFactors;
 
 /// Presentation settings for the whole graph editor.
 #[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Theme {
+    pub weight: WeightTheme,
     pub safety: SafetyTheme,
     pub inspector: InspectorTheme,
     pub focus: FocusTheme,
@@ -345,6 +347,42 @@ fn assign_sector(
             theme,
             colors,
         );
+    }
+}
+
+/// Controls how task weight is computed and shown.
+#[derive(Clone, Copy, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WeightTheme {
+    /// Whether node size follows the computed weight.
+    pub size_nodes_by_weight: bool,
+    /// Size multiplier applied to the lightest task.
+    pub min_scale: f32,
+    /// Size multiplier applied to the heaviest task.
+    pub max_scale: f32,
+    /// How each input contributes to the weight.
+    pub factors: WeightFactors,
+}
+
+impl Default for WeightTheme {
+    fn default() -> Self {
+        Self {
+            size_nodes_by_weight: false,
+            min_scale: 0.85,
+            max_scale: 1.45,
+            factors: WeightFactors::default(),
+        }
+    }
+}
+
+impl WeightTheme {
+    /// Returns the size multiplier for a weight between 0.0 and 1.0.
+    pub fn scale(&self, weight: f32) -> f32 {
+        if !self.size_nodes_by_weight {
+            return 1.0;
+        }
+        let span = self.max_scale - self.min_scale;
+        self.min_scale + weight.clamp(0.0, 1.0) * span
     }
 }
 
@@ -679,6 +717,21 @@ mod tests {
     fn the_coloring_mode_can_be_configured() {
         let parsed: Result<Theme, _> = toml::from_str("[tag]\ncoloring = \"group_hash\"\n");
         assert!(matches!(parsed, Ok(theme) if theme.tag.coloring == TagColoring::GroupHash));
+    }
+
+    #[test]
+    fn weight_scaling_is_off_until_asked_for() {
+        let theme = super::WeightTheme::default();
+        assert!((theme.scale(1.0) - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn a_heavier_task_scales_larger_when_enabled() {
+        let theme = super::WeightTheme {
+            size_nodes_by_weight: true,
+            ..super::WeightTheme::default()
+        };
+        assert!(theme.scale(1.0) > theme.scale(0.0));
     }
 
     #[test]

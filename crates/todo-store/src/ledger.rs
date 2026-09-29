@@ -7,7 +7,7 @@ use todo_core::{
     Event, EventBuilder, EventKind, GRID_CBOR_CODEC, GridEnvelope, Item, ItemId, ItemState,
     NamespaceId, NamespaceKind, NamespacePath, Priority, decode_envelope, event_protocol_v5_cid,
     event_protocol_v6_cid, event_protocol_v7_cid, event_protocol_v8_cid, event_protocol_v9_cid,
-    event_protocol_v10_cid,
+    event_protocol_v10_cid, event_protocol_v11_cid,
 };
 use turso::{Builder, Connection, Value};
 use uuid::Uuid;
@@ -50,7 +50,9 @@ CREATE TABLE IF NOT EXISTS items (
   priority TEXT NOT NULL DEFAULT 'normal',
   due_on TEXT,
   defer_until TEXT,
-  scheduled_on TEXT
+  scheduled_on TEXT,
+  difficulty INTEGER,
+  estimate_minutes INTEGER
 );
 CREATE INDEX IF NOT EXISTS items_project_state ON items(project_id, state);
 CREATE TABLE IF NOT EXISTS notes (
@@ -262,6 +264,10 @@ impl Ledger {
         self.add_column_if_missing("scheduled_on", "scheduled_on TEXT")
             .await?;
         self.add_column_if_missing("deleted_at", "deleted_at TEXT")
+            .await?;
+        self.add_column_if_missing("difficulty", "difficulty INTEGER")
+            .await?;
+        self.add_column_if_missing("estimate_minutes", "estimate_minutes INTEGER")
             .await?;
         self.connection
             .execute(
@@ -488,6 +494,8 @@ impl Ledger {
                 due_on: None,
                 defer_until: None,
                 scheduled_on: None,
+                difficulty: None,
+                estimate_minutes: None,
             },
             namespaces: namespace_entries
                 .into_iter()
@@ -650,6 +658,80 @@ impl Ledger {
                 .execute(
                     "UPDATE items SET state = ?1 WHERE id = ?2",
                     values([next.to_string(), current.item.id.to_string()]),
+                )
+                .await?;
+            self.set_head(&event.cid).await
+        }
+        .await;
+        self.transaction_finish(result).await?;
+        self.get_item(&current.item.id.to_string()).await
+    }
+
+    /// Sets or clears an item's difficulty, from 1 to 5.
+    ///
+    /// Difficulty is descriptive: nothing in the ledger derives readiness or
+    /// ordering from it, so a reader is free to weigh it however it likes.
+    pub async fn set_difficulty(
+        &self,
+        reference: &str,
+        difficulty: Option<u8>,
+    ) -> Result<StoredItem> {
+        if let Some(value) = difficulty
+            && !(1..=5).contains(&value)
+        {
+            bail!("difficulty must be between 1 and 5");
+        }
+        let current = self.get_item(reference).await?;
+        let rendered = difficulty
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+        let event = self
+            .event(
+                EventBuilder::for_item(EventKind::ItemDifficultyChanged, current.item.id)
+                    .project(current.item.project_id)
+                    .data("difficulty", rendered.clone()),
+            )
+            .await?;
+        self.transaction_begin().await?;
+        let result = async {
+            self.insert_event(&event).await?;
+            self.connection
+                .execute(
+                    "UPDATE items SET difficulty = ?1 WHERE id = ?2",
+                    vec![
+                        parse_optional_number(&rendered)?,
+                        Value::Text(current.item.id.to_string()),
+                    ],
+                )
+                .await?;
+            self.set_head(&event.cid).await
+        }
+        .await;
+        self.transaction_finish(result).await?;
+        self.get_item(&current.item.id.to_string()).await
+    }
+
+    /// Sets or clears an item's effort estimate, in minutes.
+    pub async fn set_estimate(&self, reference: &str, minutes: Option<u32>) -> Result<StoredItem> {
+        let current = self.get_item(reference).await?;
+        let rendered = minutes.map(|value| value.to_string()).unwrap_or_default();
+        let event = self
+            .event(
+                EventBuilder::for_item(EventKind::ItemEstimateChanged, current.item.id)
+                    .project(current.item.project_id)
+                    .data("estimate_minutes", rendered.clone()),
+            )
+            .await?;
+        self.transaction_begin().await?;
+        let result = async {
+            self.insert_event(&event).await?;
+            self.connection
+                .execute(
+                    "UPDATE items SET estimate_minutes = ?1 WHERE id = ?2",
+                    vec![
+                        parse_optional_number(&rendered)?,
+                        Value::Text(current.item.id.to_string()),
+                    ],
                 )
                 .await?;
             self.set_head(&event.cid).await
@@ -1412,27 +1494,27 @@ impl Ledger {
         };
         let (sql, params) = match (scope, project_id, all_states) {
             (ItemScope::Project(_), Some(id), true) => (
-                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until, scheduled_on FROM items WHERE deleted_at IS NULL AND project_id = ?1 ORDER BY id",
+                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until, scheduled_on, difficulty, estimate_minutes FROM items WHERE deleted_at IS NULL AND project_id = ?1 ORDER BY id",
                 values([id.to_string()]),
             ),
             (ItemScope::Project(_), Some(id), false) => (
-                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until, scheduled_on FROM items WHERE deleted_at IS NULL AND project_id = ?1 AND state NOT IN ('done', 'canceled') ORDER BY id",
+                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until, scheduled_on, difficulty, estimate_minutes FROM items WHERE deleted_at IS NULL AND project_id = ?1 AND state NOT IN ('done', 'canceled') ORDER BY id",
                 values([id.to_string()]),
             ),
             (ItemScope::Unscoped, None, true) => (
-                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until, scheduled_on FROM items WHERE deleted_at IS NULL AND project_id IS NULL ORDER BY id",
+                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until, scheduled_on, difficulty, estimate_minutes FROM items WHERE deleted_at IS NULL AND project_id IS NULL ORDER BY id",
                 Vec::<Value>::new(),
             ),
             (ItemScope::Unscoped, None, false) => (
-                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until, scheduled_on FROM items WHERE deleted_at IS NULL AND project_id IS NULL AND state NOT IN ('done', 'canceled') ORDER BY id",
+                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until, scheduled_on, difficulty, estimate_minutes FROM items WHERE deleted_at IS NULL AND project_id IS NULL AND state NOT IN ('done', 'canceled') ORDER BY id",
                 Vec::<Value>::new(),
             ),
             (ItemScope::All, None, true) => (
-                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until, scheduled_on FROM items WHERE deleted_at IS NULL ORDER BY id",
+                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until, scheduled_on, difficulty, estimate_minutes FROM items WHERE deleted_at IS NULL ORDER BY id",
                 Vec::<Value>::new(),
             ),
             (ItemScope::All, None, false) => (
-                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until, scheduled_on FROM items WHERE deleted_at IS NULL AND state NOT IN ('done', 'canceled') ORDER BY id",
+                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until, scheduled_on, difficulty, estimate_minutes FROM items WHERE deleted_at IS NULL AND state NOT IN ('done', 'canceled') ORDER BY id",
                 Vec::<Value>::new(),
             ),
             _ => bail!("invalid resolved item scope"),
@@ -1503,7 +1585,7 @@ impl Ledger {
         let mut rows = self
             .connection
             .query(
-                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until, scheduled_on FROM items WHERE deleted_at IS NULL AND (id = ?1 OR id LIKE ?2) ORDER BY id LIMIT 2",
+                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until, scheduled_on, difficulty, estimate_minutes FROM items WHERE deleted_at IS NULL AND (id = ?1 OR id LIKE ?2) ORDER BY id LIMIT 2",
                 values([reference.to_owned(), pattern]),
             )
             .await?;
@@ -1783,6 +1865,7 @@ impl Ledger {
                 && envelope.protocol_cid() != &event_protocol_v8_cid()
                 && envelope.protocol_cid() != &event_protocol_v9_cid()
                 && envelope.protocol_cid() != &event_protocol_v10_cid()
+                && envelope.protocol_cid() != &event_protocol_v11_cid()
             {
                 bail!("event {} uses an unknown protocol", record.cid);
             }
@@ -2173,6 +2256,20 @@ impl Ledger {
                 "UPDATE items SET deleted_at = ?1 WHERE id = ?2",
                 values([value("deleted_at")?.to_owned(), event.payload.subject_id.clone()]),
             ).await?,
+            EventKind::ItemDifficultyChanged => self.connection.execute(
+                "UPDATE items SET difficulty = ?1 WHERE id = ?2",
+                vec![
+                    parse_optional_number(value("difficulty")?)?,
+                    Value::Text(event.payload.subject_id.clone()),
+                ],
+            ).await?,
+            EventKind::ItemEstimateChanged => self.connection.execute(
+                "UPDATE items SET estimate_minutes = ?1 WHERE id = ?2",
+                vec![
+                    parse_optional_number(value("estimate_minutes")?)?,
+                    Value::Text(event.payload.subject_id.clone()),
+                ],
+            ).await?,
             EventKind::ItemRestored => self.connection.execute(
                 "UPDATE items SET deleted_at = NULL WHERE id = ?1",
                 values([event.payload.subject_id.clone()]),
@@ -2370,7 +2467,33 @@ fn item_from_row(row: &turso::Row) -> Result<Item> {
         scheduled_on: optional_text(row, 8)?
             .map(|value| NaiveDate::parse_from_str(&value, "%Y-%m-%d"))
             .transpose()?,
+        difficulty: optional_integer(row, 9)?
+            .map(u8::try_from)
+            .transpose()
+            .context("difficulty is out of range")?,
+        estimate_minutes: optional_integer(row, 10)?
+            .map(u32::try_from)
+            .transpose()
+            .context("estimate is out of range")?,
     })
+}
+
+/// Parses an event data field holding a number, where empty clears the value.
+fn parse_optional_number(raw: &str) -> Result<Value> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(Value::Null);
+    }
+    Ok(Value::Integer(raw.parse::<i64>()?))
+}
+
+/// Reads an optional integer column, rejecting any other stored type.
+fn optional_integer(row: &turso::Row, index: usize) -> Result<Option<i64>> {
+    match row.get_value(index)? {
+        Value::Null => Ok(None),
+        Value::Integer(value) => Ok(Some(value)),
+        _ => bail!("column {index} is neither an integer nor null"),
+    }
 }
 
 #[cfg(test)]

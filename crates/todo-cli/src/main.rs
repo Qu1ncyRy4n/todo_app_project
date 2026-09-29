@@ -46,6 +46,10 @@ enum Command {
     Cancel { item: String },
     /// Reopen a done or canceled item as active.
     Reopen { item: String },
+    /// Set or clear how hard an item is, from 1 to 5. Pass "clear" to remove it.
+    Difficulty { item: String, value: String },
+    /// Set or clear an effort estimate in minutes. Pass "clear" to remove it.
+    Estimate { item: String, value: String },
     /// Delete an item, hiding it from every view. Reversible with `todo restore`.
     #[command(alias = "delete")]
     Rm {
@@ -402,6 +406,24 @@ async fn run() -> Result<()> {
             print_state(&ledger.set_state(&item, ItemState::Canceled).await?)
         }
         Command::Reopen { item } => print_state(&ledger.set_state(&item, ItemState::Active).await?),
+        Command::Difficulty { item, value } => {
+            let parsed = parse_clearable(&value, "difficulty")?;
+            let updated = ledger.set_difficulty(&item, parsed).await?;
+            println!(
+                "{} difficulty {}",
+                updated.item.id,
+                describe_optional(updated.item.difficulty)
+            );
+        }
+        Command::Estimate { item, value } => {
+            let parsed = parse_clearable(&value, "estimate")?;
+            let updated = ledger.set_estimate(&item, parsed).await?;
+            println!(
+                "{} estimate {}",
+                updated.item.id,
+                describe_optional(updated.item.estimate_minutes)
+            );
+        }
         Command::Rm { item, force } => {
             // A delete without --force reports what would go and changes nothing, so
             // the destructive step is always a deliberate second command.
@@ -1298,6 +1320,23 @@ fn markdown_line(output: &mut String, depth: usize, state: ItemState, title: &st
     };
     let title = title.replace(['\r', '\n'], " ");
     output.push_str(&format!("{}- [{marker}] {title}\n", "  ".repeat(depth)));
+}
+
+/// Parses a numeric argument where "clear" and an empty value remove the setting.
+fn parse_clearable<T: std::str::FromStr>(value: &str, label: &str) -> Result<Option<T>> {
+    let value = value.trim();
+    if value.is_empty() || value.eq_ignore_ascii_case("clear") || value == "-" {
+        return Ok(None);
+    }
+    value
+        .parse::<T>()
+        .map(Some)
+        .map_err(|_| anyhow::anyhow!("{label} must be a whole number, or \"clear\""))
+}
+
+/// Renders an optional number for terminal output.
+fn describe_optional<T: std::fmt::Display>(value: Option<T>) -> String {
+    value.map_or_else(|| "cleared".to_owned(), |value| value.to_string())
 }
 
 fn print_state(item: &StoredItem) {

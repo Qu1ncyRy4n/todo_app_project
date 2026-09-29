@@ -10,7 +10,7 @@ use geometry::{BandSpacing, FlowSpacing, SeparationSpacing, TimelineSpacing};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fs, path::PathBuf};
 use theme::{InspectorTheme, NodeShape, RegionShape, TagColoring, TagPalette, Theme};
-use todo_core::{ItemState, NamespacePath, Priority};
+use todo_core::{ItemState, NamespacePath, Priority, WeightInputs};
 use todo_store::{
     AppConfig, AppPaths, Citation, DeletedItem, FocusSequence, ItemPatch, ItemScope, Ledger,
     NamespaceEntry, Note, StoredItem, WorkSession,
@@ -86,6 +86,8 @@ struct TodoGui {
     due_draft: String,
     defer_draft: String,
     scheduled_draft: String,
+    difficulty_draft: String,
+    estimate_draft: String,
     graph_pan: Vec2,
     graph_zoom: f32,
     theme: Theme,
@@ -158,6 +160,8 @@ impl TodoGui {
             due_draft: String::new(),
             defer_draft: String::new(),
             scheduled_draft: String::new(),
+            difficulty_draft: String::new(),
+            estimate_draft: String::new(),
             graph_pan: Vec2::ZERO,
             graph_zoom: 1.0,
             inspector: theme.inspector,
@@ -180,6 +184,51 @@ impl TodoGui {
         };
         app.refresh();
         app
+    }
+
+    /// Saves the selected task's difficulty, where an empty draft clears it.
+    fn save_difficulty(&mut self) {
+        let Some(id) = self.selected.clone() else {
+            return;
+        };
+        let parsed = match parse_optional_number::<u8>(&self.difficulty_draft) {
+            Ok(parsed) => parsed,
+            Err(message) => {
+                self.message = Some(message);
+                return;
+            }
+        };
+        match self
+            .runtime
+            .block_on(self.ledger.set_difficulty(&id, parsed))
+        {
+            Ok(_) => {
+                self.message = Some("Difficulty saved.".to_owned());
+                self.refresh();
+            }
+            Err(error) => self.message = Some(format!("Difficulty not saved: {error:#}")),
+        }
+    }
+
+    /// Saves the selected task's estimate, where an empty draft clears it.
+    fn save_estimate(&mut self) {
+        let Some(id) = self.selected.clone() else {
+            return;
+        };
+        let parsed = match parse_optional_number::<u32>(&self.estimate_draft) {
+            Ok(parsed) => parsed,
+            Err(message) => {
+                self.message = Some(message);
+                return;
+            }
+        };
+        match self.runtime.block_on(self.ledger.set_estimate(&id, parsed)) {
+            Ok(_) => {
+                self.message = Some("Estimate saved.".to_owned());
+                self.refresh();
+            }
+            Err(error) => self.message = Some(format!("Estimate not saved: {error:#}")),
+        }
     }
 
     /// Deletes the selected task, hiding it from every view.
@@ -616,6 +665,16 @@ impl TodoGui {
                 .item
                 .defer_until
                 .map_or(String::new(), |date| date.to_string());
+            self.difficulty_draft = item
+                .item
+                .difficulty
+                .map(|value| value.to_string())
+                .unwrap_or_default();
+            self.estimate_draft = item
+                .item
+                .estimate_minutes
+                .map(|value| value.to_string())
+                .unwrap_or_default();
             self.scheduled_draft = item
                 .item
                 .scheduled_on
@@ -1223,6 +1282,20 @@ fn next_month(year: i32, month: u32) -> (i32, u32) {
     }
 }
 
+/// Parses a whole-number draft, where an empty draft means "cleared".
+fn parse_optional_number<T: std::str::FromStr>(
+    value: &str,
+) -> std::result::Result<Option<T>, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    value
+        .parse::<T>()
+        .map(Some)
+        .map_err(|_| "Value must be a whole number, or empty to clear it.".to_owned())
+}
+
 fn parse_date(value: &str) -> std::result::Result<Option<NaiveDate>, String> {
     let value = value.trim();
     if value.is_empty() {
@@ -1667,6 +1740,23 @@ impl eframe::App for TodoGui {
                             calendar_picker(ui, "scheduled", &mut self.scheduled_draft);
                             if ui.button("Save scheduled").clicked() { self.save_scheduled(); }
                         });
+                        ui.horizontal(|ui| {
+                            ui.label("Difficulty 1-5");
+                            ui.text_edit_singleline(&mut self.difficulty_draft);
+                            if ui.button("Save difficulty").clicked() { self.save_difficulty(); }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Estimate minutes");
+                            ui.text_edit_singleline(&mut self.estimate_draft);
+                            if ui.button("Save estimate").clicked() { self.save_estimate(); }
+                        });
+                        // Weight is computed for display; nothing is stored for it.
+                        let children = child_index(&self.items);
+                        ui.weak(format!(
+                            "Weight {:.2} · size by weight is {}",
+                            item_weight(&item, &children, &self.theme),
+                            if self.theme.weight.size_nodes_by_weight { "on" } else { "off" }
+                        ));
                     }
                     // Work sessions hides only the view; the underlying relationships stay.
                     if self.inspector.show_sessions {
@@ -1885,14 +1975,21 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
             }
         }
     }
+    let child_index = child_index(&items);
     for item in &items {
         let id = item.item.id.to_string();
         let Some(center) = positions.get(&id) else {
             continue;
         };
         let (node_width, node_height) = app.theme.node.size();
-        let node =
-            Rect::from_center_size(*center, Vec2::new(node_width, node_height) * app.graph_zoom);
+        let scale = app
+            .theme
+            .weight
+            .scale(item_weight(item, &child_index, &app.theme));
+        let node = Rect::from_center_size(
+            *center,
+            Vec2::new(node_width, node_height) * app.graph_zoom * scale,
+        );
         let response = ui.interact(node, ui.make_persistent_id(&id), Sense::click_and_drag());
         let selected = app.selected.as_deref() == Some(id.as_str());
         let fill = if !item.blocked_by.is_empty() {
@@ -2176,14 +2273,8 @@ fn draw_timeline_ruler(painter: &egui::Painter, rect: Rect, origin: Pos2, app: &
 /// nested subtree stays visible inside its ancestor. The color comes from the
 /// parent's own tag, falling back to a neutral outline when it has no tag, so the
 /// region never implies a tag the parent does not carry.
-fn draw_parent_regions(
-    painter: &egui::Painter,
-    items: &[StoredItem],
-    positions: &HashMap<String, Pos2>,
-    zoom: f32,
-    theme: &Theme,
-    palette: &TagPalette,
-) {
+/// Returns each task's visible children, keyed by parent id.
+fn child_index(items: &[StoredItem]) -> HashMap<String, Vec<String>> {
     let mut children: HashMap<String, Vec<String>> = HashMap::new();
     for item in items {
         if let Some(parent) = item.item.parent_id {
@@ -2193,6 +2284,18 @@ fn draw_parent_regions(
                 .push(item.item.id.to_string());
         }
     }
+    children
+}
+
+fn draw_parent_regions(
+    painter: &egui::Painter,
+    items: &[StoredItem],
+    positions: &HashMap<String, Pos2>,
+    zoom: f32,
+    theme: &Theme,
+    palette: &TagPalette,
+) {
+    let children = child_index(items);
     let half_size = {
         let (width, height) = theme.node.size();
         Vec2::new(width / 2.0, height / 2.0) * zoom
@@ -2253,6 +2356,26 @@ fn draw_parent_regions(
             );
         }
     }
+}
+
+/// Returns the presentation weight of one task, from 0.0 to 1.0.
+///
+/// The weight is computed here rather than stored, so changing how work is weighed
+/// never touches the ledger. Descendants are counted among the visible items only,
+/// so a filtered view weighs what it actually shows.
+fn item_weight(item: &StoredItem, children: &HashMap<String, Vec<String>>, theme: &Theme) -> f32 {
+    let today = Local::now().date_naive();
+    let descendants = collect_subtree(&item.item.id.to_string(), children)
+        .len()
+        .saturating_sub(1);
+    let inputs = WeightInputs {
+        priority_rank: item.item.priority.rank(),
+        days_until_due: item.item.due_on.map(|due| (due - today).num_days()),
+        difficulty: item.item.difficulty,
+        estimate_minutes: item.item.estimate_minutes,
+        descendants,
+    };
+    todo_core::weight(inputs, theme.weight.factors)
 }
 
 /// Returns a task's id together with every visible descendant beneath it.

@@ -95,6 +95,10 @@ pub struct Item {
     pub due_on: Option<NaiveDate>,
     pub defer_until: Option<NaiveDate>,
     pub scheduled_on: Option<NaiveDate>,
+    /// How hard the work is, from 1 to 5. Independent of how long it takes.
+    pub difficulty: Option<u8>,
+    /// Expected effort in minutes.
+    pub estimate_minutes: Option<u32>,
 }
 
 use crate::NamespaceId;
