@@ -90,6 +90,10 @@ pub struct LayoutTheme {
     pub compact_active: bool,
     /// Distance between active heads once they are pulled together.
     pub active_head_gap: f32,
+    /// Horizontal distance between grouped columns.
+    pub group_column_gap: f32,
+    /// Vertical distance between members of a grouped column.
+    pub group_row_gap: f32,
     /// Whether a normalized graph flows downward or rightward.
     pub direction: FlowDirection,
     /// Distance between one layer and the next.
@@ -139,6 +143,8 @@ impl Default for LayoutTheme {
             done_above: true,
             compact_active: true,
             active_head_gap: 240.0,
+            group_column_gap: 280.0,
+            group_row_gap: 96.0,
             direction: FlowDirection::default(),
             layer_gap: 120.0,
             node_gap: 185.0,

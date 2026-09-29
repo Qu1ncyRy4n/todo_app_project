@@ -713,14 +713,43 @@ fn place_subtree(
     next
 }
 
+/// Spacing for a grouped column layout.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GroupSpacing {
+    /// Horizontal distance between one column and the next.
+    pub column_gap: f32,
+    /// Vertical distance between members of a column.
+    pub row_gap: f32,
+}
+
+/// Arranges named groups into columns, each member stacked beneath the last.
+///
+/// Columns keep the order given, and members keep the order within their group, so
+/// the caller decides both what leads and how a column reads top to bottom.
+/// Returns positions relative to the first column's first member.
+pub fn grouped_positions(
+    groups: &[(String, Vec<String>)],
+    spacing: GroupSpacing,
+) -> HashMap<String, Vec2> {
+    let mut positions = HashMap::new();
+    for (column, (_, members)) in groups.iter().enumerate() {
+        let x = f32::from(u16::try_from(column).unwrap_or(u16::MAX)) * spacing.column_gap;
+        for (row, id) in members.iter().enumerate() {
+            let y = f32::from(u16::try_from(row).unwrap_or(u16::MAX)) * spacing.row_gap;
+            positions.insert(id.clone(), Vec2::new(x, y));
+        }
+    }
+    positions
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        BandSpacing, FlowDirection, FlowSpacing, OverlapSpacing, SeparationSpacing,
+        BandSpacing, FlowDirection, FlowSpacing, GroupSpacing, OverlapSpacing, SeparationSpacing,
         TimelineSpacing, TreeSpacing, arrowhead_points, banded_positions, centroid, cluster_points,
-        convex_hull, ease_toward, expand_path, fit_view, is_settled, layered_positions,
-        relax_overlaps, ruler_ticks, separate_groups, shaft_end, smooth_closed_path,
-        timeline_positions, tree_positions,
+        convex_hull, ease_toward, expand_path, fit_view, grouped_positions, is_settled,
+        layered_positions, relax_overlaps, ruler_ticks, separate_groups, shaft_end,
+        smooth_closed_path, timeline_positions, tree_positions,
     };
     use eframe::egui::{Rect, Vec2, pos2};
 
@@ -1197,6 +1226,62 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    fn group_spacing() -> GroupSpacing {
+        GroupSpacing {
+            column_gap: 260.0,
+            row_gap: 90.0,
+        }
+    }
+
+    fn groups(pairs: &[(&str, &[&str])]) -> Vec<(String, Vec<String>)> {
+        pairs
+            .iter()
+            .map(|(name, members)| {
+                (
+                    (*name).to_owned(),
+                    members.iter().map(|id| (*id).to_owned()).collect(),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn each_group_takes_its_own_column() {
+        let positions = grouped_positions(
+            &groups(&[("work", &["a"]), ("home", &["b"])]),
+            group_spacing(),
+        );
+        assert!(matches!(
+            (positions.get("a"), positions.get("b")),
+            (Some(first), Some(second)) if second.x > first.x
+        ));
+    }
+
+    #[test]
+    fn members_stack_down_their_column() {
+        let positions = grouped_positions(&groups(&[("work", &["a", "b"])]), group_spacing());
+        assert!(matches!(
+            (positions.get("a"), positions.get("b")),
+            (Some(first), Some(second))
+                if (first.x - second.x).abs() < 0.001 && second.y > first.y
+        ));
+    }
+
+    #[test]
+    fn grouping_keeps_the_order_it_was_given() {
+        let positions =
+            grouped_positions(&groups(&[("z", &["a"]), ("a", &["b"])]), group_spacing());
+        assert!(matches!(
+            (positions.get("a"), positions.get("b")),
+            (Some(first), Some(second)) if first.x < second.x
+        ));
+    }
+
+    #[test]
+    fn grouping_nothing_places_nothing() {
+        assert!(grouped_positions(&[], group_spacing()).is_empty());
     }
 
     #[test]

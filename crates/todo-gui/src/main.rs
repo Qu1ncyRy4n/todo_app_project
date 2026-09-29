@@ -9,7 +9,8 @@ use anyhow::{Context, Result, bail};
 use chrono::{Datelike, Local, NaiveDate};
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
 use geometry::{
-    BandSpacing, FlowSpacing, OverlapSpacing, SeparationSpacing, TimelineSpacing, TreeSpacing,
+    BandSpacing, FlowSpacing, GroupSpacing, OverlapSpacing, SeparationSpacing, TimelineSpacing,
+    TreeSpacing,
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fs, path::PathBuf};
@@ -57,6 +58,74 @@ fn main() -> Result<()> {
         }),
     )
     .context("run native Todo Ledger window")
+}
+
+/// What the graph is grouped into columns by.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum GroupBy {
+    #[default]
+    Tag,
+    Sequence,
+    Time,
+    Priority,
+    State,
+}
+
+impl GroupBy {
+    /// Returns every grouping, for the sidebar control.
+    fn all() -> [Self; 5] {
+        [
+            Self::Tag,
+            Self::Sequence,
+            Self::Time,
+            Self::Priority,
+            Self::State,
+        ]
+    }
+
+    /// Returns the label shown for this grouping.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Tag => "Tag",
+            Self::Sequence => "Sequence",
+            Self::Time => "Time",
+            Self::Priority => "Priority",
+            Self::State => "State",
+        }
+    }
+}
+
+/// What members of a group are ordered by.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum SortBy {
+    #[default]
+    Title,
+    Priority,
+    Due,
+    Weight,
+    State,
+}
+
+impl SortBy {
+    fn all() -> [Self; 5] {
+        [
+            Self::Title,
+            Self::Priority,
+            Self::Due,
+            Self::Weight,
+            Self::State,
+        ]
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Title => "Title",
+            Self::Priority => "Priority",
+            Self::Due => "Due date",
+            Self::Weight => "Weight",
+            Self::State => "State",
+        }
+    }
 }
 
 struct TodoGui {
@@ -114,6 +183,10 @@ struct TodoGui {
     relax_overlaps: bool,
     focus_mode: bool,
     focus_only: bool,
+    group_by: GroupBy,
+    sort_by: SortBy,
+    group_requested: bool,
+    group_labels: Vec<(String, Pos2)>,
     drawn_offsets: HashMap<String, Vec2>,
     timeline_requested: bool,
     show_timeline_ruler: bool,
@@ -197,6 +270,10 @@ impl TodoGui {
             relax_overlaps: relax_after_layout,
             focus_mode: false,
             focus_only: false,
+            group_by: GroupBy::default(),
+            sort_by: SortBy::default(),
+            group_requested: false,
+            group_labels: Vec::new(),
             drawn_offsets: HashMap::new(),
             timeline_requested: false,
             show_timeline_ruler: true,
@@ -329,6 +406,23 @@ impl TodoGui {
             egui::CollapsingHeader::new("Layout")
                 .default_open(true)
                 .show(ui, |ui| {
+                    ui.label("Group by");
+                    egui::ComboBox::from_id_salt("group-by")
+                        .selected_text(self.group_by.label())
+                        .show_ui(ui, |ui| {
+                            for grouping in GroupBy::all() {
+                                ui.selectable_value(&mut self.group_by, grouping, grouping.label());
+                            }
+                        });
+                    ui.label("Sort by");
+                    egui::ComboBox::from_id_salt("sort-by")
+                        .selected_text(self.sort_by.label())
+                        .show_ui(ui, |ui| {
+                            for sort in SortBy::all() {
+                                ui.selectable_value(&mut self.sort_by, sort, sort.label());
+                            }
+                        });
+                    ui.weak("Group arranges columns from these.");
                     ui.checkbox(&mut self.relax_overlaps, "Push overlaps apart");
                     ui.weak("Runs after every layout command. Unstack runs it now.");
                 });
@@ -1043,6 +1137,7 @@ impl TodoGui {
         }
         self.timeline_origin = Some(origin);
         self.save_layout();
+        self.group_labels.clear();
         self.message = Some("Timeline arranged by scheduled date.".to_owned());
     }
 
@@ -1195,6 +1290,7 @@ impl TodoGui {
         if self.theme.focus.zoom_to_active {
             self.frame_active(rect, &active);
         }
+        self.group_labels.clear();
         self.message =
             Some("Focus Window arranged: done above, active centered, future below.".to_owned());
     }
@@ -1293,8 +1389,110 @@ impl TodoGui {
         }
         self.timeline_origin = None;
         self.focus_mode = false;
+        self.group_labels.clear();
         self.message =
             Some("Hierarchy arranged. Undo layout restores the previous one.".to_owned());
+    }
+
+    /// Arranges the graph into labeled columns by the chosen grouping.
+    ///
+    /// Grouping answers a different question from the hierarchy: not what work
+    /// belongs to what, but what work shares a property. Tasks holding none of the
+    /// property land in their own column rather than being dropped, which is how
+    /// untagged work becomes findable instead of merely absent.
+    fn group_layout(&mut self, rect: Rect) {
+        let items = self.visible_items();
+        if items.is_empty() {
+            self.message = Some("Nothing to group.".to_owned());
+            return;
+        }
+        let mut columns: std::collections::BTreeMap<String, Vec<&StoredItem>> =
+            std::collections::BTreeMap::new();
+        for item in &items {
+            columns.entry(self.group_key(item)).or_default().push(item);
+        }
+        let sort = self.sort_by;
+        let weights = {
+            let children = child_index(&items);
+            items
+                .iter()
+                .map(|item| {
+                    (
+                        item.item.id.to_string(),
+                        item_weight(item, &children, &self.theme),
+                    )
+                })
+                .collect::<HashMap<_, _>>()
+        };
+        let ordered = columns
+            .into_iter()
+            .map(|(name, mut members)| {
+                members.sort_by(|left, right| sort_items(sort, left, right, &weights));
+                let ids = members
+                    .into_iter()
+                    .map(|item| item.item.id.to_string())
+                    .collect::<Vec<_>>();
+                (name, ids)
+            })
+            .collect::<Vec<_>>();
+        let spacing = GroupSpacing {
+            column_gap: self.theme.layout.group_column_gap,
+            row_gap: self.theme.layout.group_row_gap,
+        };
+        let arranged = geometry::grouped_positions(&ordered, spacing);
+        let origin = Pos2::new(rect.left() + 220.0, rect.top() + 190.0);
+        self.apply_arrangement(rect, &items, &arranged, origin);
+        // Column headings are remembered in graph space, so they follow the pan and
+        // zoom exactly as the columns they name do.
+        self.group_labels = ordered
+            .iter()
+            .enumerate()
+            .map(|(column, (name, _))| {
+                let x = f32::from(u16::try_from(column).unwrap_or(u16::MAX)) * spacing.column_gap;
+                (name.clone(), origin + Vec2::new(x, -70.0))
+            })
+            .collect();
+        self.relax_if_enabled(rect);
+        self.timeline_origin = None;
+        self.focus_mode = false;
+        self.message = Some(format!(
+            "Grouped by {}, sorted by {}.",
+            self.group_by.label().to_lowercase(),
+            self.sort_by.label().to_lowercase()
+        ));
+    }
+
+    /// Returns the column a task belongs in under the current grouping.
+    fn group_key(&self, item: &StoredItem) -> String {
+        match self.group_by {
+            GroupBy::Tag => {
+                let mut tags = self.effective_tags(item);
+                tags.sort();
+                tags.into_iter()
+                    .max_by_key(|tag| tag.matches('/').count())
+                    .unwrap_or_else(|| "(untagged)".to_owned())
+            }
+            GroupBy::Sequence => {
+                let id = item.item.id.to_string();
+                self.focus_sequences
+                    .iter()
+                    .find(|sequence| sequence.items.iter().any(|member| member.to_string() == id))
+                    .map_or_else(|| "(no sequence)".to_owned(), |found| found.title.clone())
+            }
+            GroupBy::Time => {
+                let today = Local::now().date_naive();
+                let when = item.item.scheduled_on.or(item.item.due_on);
+                match when {
+                    None => "(undated)".to_owned(),
+                    Some(date) if date < today => "overdue".to_owned(),
+                    Some(date) if date == today => "today".to_owned(),
+                    Some(date) if (date - today).num_days() <= 7 => "this week".to_owned(),
+                    Some(_) => "later".to_owned(),
+                }
+            }
+            GroupBy::Priority => item.item.priority.to_string(),
+            GroupBy::State => item.item.state.to_string(),
+        }
     }
 
     /// Pulls active heads together, each carrying its own subtree.
@@ -1442,6 +1640,7 @@ impl TodoGui {
         self.relax_if_enabled(rect);
         self.timeline_origin = None;
         self.focus_mode = false;
+        self.group_labels.clear();
         self.message = Some("Layout normalized. Undo layout restores the previous one.".to_owned());
     }
 
@@ -2406,6 +2605,9 @@ impl eframe::App for TodoGui {
                 if ui.button("Focus layout").clicked() {
                     self.focus_layout_requested = true;
                 }
+                if ui.button("Group").clicked() {
+                    self.group_requested = true;
+                }
                 if ui.button("Timeline").clicked() {
                     self.timeline_requested = true;
                 }
@@ -2490,6 +2692,10 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
     if app.separate_requested {
         app.separate_requested = false;
         app.separate_tag_groups(rect, true);
+    }
+    if app.group_requested {
+        app.group_requested = false;
+        app.group_layout(rect);
     }
     if app.timeline_requested {
         app.timeline_requested = false;
@@ -2576,6 +2782,17 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
             painter.rect_filled(*box_rect, rounding, fill);
             painter.rect_stroke(*box_rect, rounding, stroke, egui::StrokeKind::Outside);
         }
+    }
+    for (name, at) in &app.group_labels {
+        let center = rect.center();
+        let drawn = center + (*at - center) * app.graph_zoom + app.graph_pan;
+        painter.text(
+            drawn,
+            Align2::LEFT_BOTTOM,
+            name,
+            FontId::proportional(13.0),
+            Color32::from_gray(170),
+        );
     }
     if app.show_parent_regions
         && app.theme.parent.show_regions
@@ -3548,6 +3765,48 @@ fn container_header(box_rect: Rect, theme: &Theme, zoom: f32) -> Rect {
         box_rect.left_top(),
         egui::pos2(box_rect.right(), box_rect.top() + header),
     )
+}
+
+/// Orders two tasks by the chosen sort, breaking ties on title for stability.
+fn sort_items(
+    sort: SortBy,
+    left: &StoredItem,
+    right: &StoredItem,
+    weights: &HashMap<String, f32>,
+) -> std::cmp::Ordering {
+    let title = || left.item.title.cmp(&right.item.title);
+    match sort {
+        SortBy::Title => title(),
+        // Most urgent first, which is the order these are usually scanned in.
+        SortBy::Priority => right
+            .item
+            .priority
+            .rank()
+            .cmp(&left.item.priority.rank())
+            .then_with(title),
+        SortBy::Due => match (left.item.due_on, right.item.due_on) {
+            (Some(first), Some(second)) => first.cmp(&second).then_with(title),
+            // A task with no due date sorts after one that has one.
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => title(),
+        },
+        SortBy::Weight => {
+            let weight = |item: &StoredItem| {
+                weights
+                    .get(&item.item.id.to_string())
+                    .copied()
+                    .unwrap_or_default()
+            };
+            weight(right).total_cmp(&weight(left)).then_with(title)
+        }
+        SortBy::State => left
+            .item
+            .state
+            .to_string()
+            .cmp(&right.item.state.to_string())
+            .then_with(title),
+    }
 }
 
 /// Returns the lifecycle color for a task.
