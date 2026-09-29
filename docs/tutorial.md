@@ -155,7 +155,8 @@ Readiness is a filter, not a score:
 ```text
 open state
 AND defer date is absent, today, or past
-AND every blocker is done or canceled
+AND every planned dependency is done or canceled
+AND no active blocker remains
 ```
 
 ### 4. Ask for one deterministic next item
@@ -178,7 +179,7 @@ Example:
 ```text
 [ ] 429e570b Implement PIH spike  !critical due:2026-09-04 depends:1
 why:
-  ready: no incomplete blockers and defer date reached
+  ready: no incomplete dependencies, no active blockers, and defer date reached
   state: inbox
   priority: critical
   due: 2026-09-04
@@ -203,10 +204,10 @@ commands to recover titles, lifecycle states, project scopes, and hierarchy in
 a clean ledger. IDs and richer facts are retained as evidence in JSON/CBOR but
 are not yet restored by the Markdown path.
 
-New events use the v5 Grid-CBOR protocol while existing v1-v4 event bytes and
+New events use the v6 Grid-CBOR protocol while existing v1-v5 event bytes and
 CIDs remain valid. This is an event-format transition, not a database reset.
 
-## v0.4: Synchronize exact v5 events through Git
+## v0.4: Synchronize exact events through Git
 
 The portable record is a dedicated Git checkout containing a versioned
 `ledger.toml` and canonical `events.jsonl`. The local `ledger.db` remains a
@@ -248,6 +249,6 @@ todo sync
 ```
 
 The second `todo sync` imports the exact event history and rebuilds its local
-views. New v5 events include a persistent local actor identifier. v1-v4 events
+views. New v6 events include a persistent local actor identifier. v1-v5 events
 remain preserved historical evidence but are not yet replayable by this first
 portable-sync implementation.

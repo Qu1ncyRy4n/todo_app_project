@@ -18,6 +18,10 @@ const PROTOCOL_V2_BYTES: &[u8] = include_bytes!("../../../docs/protocols/todo-le
 const PROTOCOL_V3_BYTES: &[u8] = include_bytes!("../../../docs/protocols/todo-ledger-event-v3.md");
 const PROTOCOL_V4_BYTES: &[u8] = include_bytes!("../../../docs/protocols/todo-ledger-event-v4.md");
 const PROTOCOL_V5_BYTES: &[u8] = include_bytes!("../../../docs/protocols/todo-ledger-event-v5.md");
+const PROTOCOL_V6_BYTES: &[u8] = include_bytes!("../../../docs/protocols/todo-ledger-event-v6.md");
+const PROTOCOL_V7_BYTES: &[u8] = include_bytes!("../../../docs/protocols/todo-ledger-event-v7.md");
+const PROTOCOL_V8_BYTES: &[u8] = include_bytes!("../../../docs/protocols/todo-ledger-event-v8.md");
+const PROTOCOL_V9_BYTES: &[u8] = include_bytes!("../../../docs/protocols/todo-ledger-event-v9.md");
 
 pub fn event_protocol_v4_cid() -> Cid {
     raw_cid(PROTOCOL_V4_BYTES)
@@ -25,6 +29,20 @@ pub fn event_protocol_v4_cid() -> Cid {
 
 pub fn event_protocol_v5_cid() -> Cid {
     raw_cid(PROTOCOL_V5_BYTES)
+}
+
+pub fn event_protocol_v6_cid() -> Cid {
+    raw_cid(PROTOCOL_V6_BYTES)
+}
+
+pub fn event_protocol_v7_cid() -> Cid {
+    raw_cid(PROTOCOL_V7_BYTES)
+}
+pub fn event_protocol_v8_cid() -> Cid {
+    raw_cid(PROTOCOL_V8_BYTES)
+}
+pub fn event_protocol_v9_cid() -> Cid {
+    raw_cid(PROTOCOL_V9_BYTES)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -42,6 +60,14 @@ pub enum EventKind {
     ItemDeferDateChanged,
     ItemDependencyAdded,
     ItemDependencyRemoved,
+    ItemBlockAdded,
+    ItemBlockRemoved,
+    FocusSequenceCreated,
+    FocusSequenceEntryAdded,
+    FocusSequenceEntryRemoved,
+    ItemSessionStarted,
+    ItemSessionFinished,
+    ItemPatched,
     NamespaceCreated,
     NamespaceRenamed,
     NamespaceAssigned,
@@ -64,6 +90,14 @@ impl fmt::Display for EventKind {
             Self::ItemDeferDateChanged => "item.defer-date-changed",
             Self::ItemDependencyAdded => "item.dependency-added",
             Self::ItemDependencyRemoved => "item.dependency-removed",
+            Self::ItemBlockAdded => "item.block-added",
+            Self::ItemBlockRemoved => "item.block-removed",
+            Self::FocusSequenceCreated => "focus-sequence.created",
+            Self::FocusSequenceEntryAdded => "focus-sequence.entry-added",
+            Self::FocusSequenceEntryRemoved => "focus-sequence.entry-removed",
+            Self::ItemSessionStarted => "item.session-started",
+            Self::ItemSessionFinished => "item.session-finished",
+            Self::ItemPatched => "item.patched",
             Self::NamespaceCreated => "namespace.created",
             Self::NamespaceRenamed => "namespace.renamed",
             Self::NamespaceAssigned => "namespace.assigned",
@@ -90,6 +124,14 @@ impl std::str::FromStr for EventKind {
             "item.defer-date-changed" => Self::ItemDeferDateChanged,
             "item.dependency-added" => Self::ItemDependencyAdded,
             "item.dependency-removed" => Self::ItemDependencyRemoved,
+            "item.block-added" => Self::ItemBlockAdded,
+            "item.block-removed" => Self::ItemBlockRemoved,
+            "focus-sequence.created" => Self::FocusSequenceCreated,
+            "focus-sequence.entry-added" => Self::FocusSequenceEntryAdded,
+            "focus-sequence.entry-removed" => Self::FocusSequenceEntryRemoved,
+            "item.session-started" => Self::ItemSessionStarted,
+            "item.session-finished" => Self::ItemSessionFinished,
+            "item.patched" => Self::ItemPatched,
             "namespace.created" => Self::NamespaceCreated,
             "namespace.renamed" => Self::NamespaceRenamed,
             "namespace.assigned" => Self::NamespaceAssigned,
@@ -189,9 +231,9 @@ impl EventBuilder {
     }
 
     pub fn build(self) -> Result<Event, EventEncodeError> {
-        // All new writes use the v4 Grid-CBOR codec. Historical v1-v3 rows are
+        // All new writes use the v9 Grid-CBOR protocol. Historical rows are
         // never rebuilt or relabeled. Source: DI-0008.
-        let protocol_cid = event_protocol_v5_cid();
+        let protocol_cid = event_protocol_v9_cid();
         let bytes = encode_envelope(&protocol_cid, self.parent.as_ref(), &self.payload)?;
         let cid = grid_cbor_cid(&bytes);
         Ok(Event {
@@ -417,7 +459,7 @@ fn encode_envelope(
 mod tests {
     use super::{
         EventBuilder, EventKind, PROTOCOL_V1_BYTES, PROTOCOL_V2_BYTES, PROTOCOL_V3_BYTES,
-        PROTOCOL_V4_BYTES, PROTOCOL_V5_BYTES,
+        PROTOCOL_V4_BYTES, PROTOCOL_V5_BYTES, PROTOCOL_V9_BYTES,
     };
     use crate::{GRID_CBOR_CODEC, GRID_TAG, GridEnvelope, ItemId, raw_cid};
     use chrono::DateTime;
@@ -451,7 +493,7 @@ mod tests {
 
         let parsed = GridEnvelope::parse(&first.bytes).unwrap();
         assert_eq!(parsed.slot_count(), 3);
-        assert_eq!(parsed.protocol_cid(), &raw_cid(PROTOCOL_V5_BYTES));
+        assert_eq!(parsed.protocol_cid(), &raw_cid(PROTOCOL_V9_BYTES));
         assert_eq!(parsed.cid(), first.cid);
     }
 

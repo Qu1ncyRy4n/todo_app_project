@@ -70,17 +70,39 @@ enum Command {
     Due(DateArgs),
     /// Hide an item from ready work until a date.
     Defer(DateArgs),
-    /// Declare that an item is blocked by another item.
+    /// Declare an active blocker. It remains active until explicitly removed.
     Block {
         item: String,
         #[arg(long = "on")]
         blocker: String,
     },
-    /// Remove a blocking relationship.
+    /// Remove an active blocking relationship.
     Unblock {
         item: String,
         #[arg(long = "on")]
         blocker: String,
+    },
+    /// Declare a planned prerequisite; it clears automatically once done.
+    Depends {
+        item: String,
+        #[arg(long = "on")]
+        dependency: String,
+    },
+    /// Remove a planned prerequisite.
+    Undepends {
+        item: String,
+        #[arg(long = "on")]
+        dependency: String,
+    },
+    /// Manage ordered focus sequences that reference existing tasks.
+    Focus {
+        #[command(subcommand)]
+        command: FocusCommand,
+    },
+    /// Track append-only work sessions for an item.
+    Session {
+        #[command(subcommand)]
+        command: SessionCommand,
     },
     /// List open, non-deferred items with no incomplete blockers.
     Ready(FocusArgs),
@@ -103,6 +125,20 @@ enum Command {
     Backup { directory: PathBuf },
     /// Synchronize exact events through an explicitly configured Git repository.
     Sync(SyncArgs),
+}
+
+#[derive(Subcommand)]
+enum FocusCommand {
+    Create { title: String },
+    Add { sequence: String, item: String },
+    Ls,
+}
+
+#[derive(Subcommand)]
+enum SessionCommand {
+    Start { item: String },
+    Stop { item: String },
+    Ls { item: String },
 }
 
 #[derive(Args)]
@@ -399,13 +435,64 @@ async fn run() -> Result<()> {
             print_item(&ledger.set_defer_until(&args.item, date).await?, 0);
         }
         Command::Block { item, blocker } => {
-            ledger.add_dependency(&item, &blocker).await?;
+            ledger.add_blocker(&item, &blocker).await?;
             println!("{item} is blocked by {blocker}");
         }
         Command::Unblock { item, blocker } => {
-            ledger.remove_dependency(&item, &blocker).await?;
+            ledger.remove_blocker(&item, &blocker).await?;
             println!("Removed blocker {blocker} from {item}");
         }
+        Command::Depends { item, dependency } => {
+            ledger.add_dependency(&item, &dependency).await?;
+            println!("{item} depends on {dependency}");
+        }
+        Command::Undepends { item, dependency } => {
+            ledger.remove_dependency(&item, &dependency).await?;
+            println!("Removed dependency {dependency} from {item}");
+        }
+        Command::Focus { command } => match command {
+            FocusCommand::Create { title } => {
+                let sequence = ledger.create_focus_sequence(&title).await?;
+                println!("created focus sequence {} {}", sequence.id, sequence.title);
+            }
+            FocusCommand::Add { sequence, item } => {
+                ledger.add_focus_sequence_item(&sequence, &item).await?;
+                println!("added {item} to focus sequence {sequence}");
+            }
+            FocusCommand::Ls => {
+                for sequence in ledger.focus_sequences().await? {
+                    println!("{} {}", sequence.id, sequence.title);
+                    for item in sequence.items {
+                        println!("  {item}");
+                    }
+                }
+            }
+        },
+        Command::Session { command } => match command {
+            SessionCommand::Start { item } => {
+                let session = ledger.start_session(&item, chrono::Utc::now()).await?;
+                println!("started session {} at {}", session.id, session.started_at);
+            }
+            SessionCommand::Stop { item } => {
+                let session = ledger.finish_session(&item, chrono::Utc::now()).await?;
+                println!(
+                    "finished session {} at {}",
+                    session.id,
+                    session.finished_at.unwrap_or_default()
+                );
+            }
+            SessionCommand::Ls { item } => {
+                let stored = ledger.get_item(&item).await?;
+                for session in ledger.sessions(stored.item.id).await? {
+                    println!(
+                        "{} {} {}",
+                        session.id,
+                        session.started_at,
+                        session.finished_at.unwrap_or_else(|| "active".to_owned())
+                    );
+                }
+            }
+        },
         Command::Ready(args) => {
             let project = if args.global {
                 None
@@ -981,8 +1068,11 @@ fn print_item(stored: &StoredItem, depth: usize) {
     if let Some(defer) = stored.item.defer_until {
         focus.push(format!("defer:{defer}"));
     }
-    if !stored.blockers.is_empty() {
-        focus.push(format!("depends:{}", stored.blockers.len()));
+    if !stored.dependencies.is_empty() {
+        focus.push(format!("depends:{}", stored.dependencies.len()));
+    }
+    if !stored.blocked_by.is_empty() {
+        focus.push(format!("blocked:{}", stored.blocked_by.len()));
     }
     let focus = if focus.is_empty() {
         String::new()
@@ -1197,7 +1287,10 @@ async fn show(ledger: &Ledger, reference: &str, include_history: bool) -> Result
                 .join(", ")
         );
     }
-    for blocker in &stored.blockers {
+    for blocker in &stored.dependencies {
+        println!("depends-on: {blocker}");
+    }
+    for blocker in &stored.blocked_by {
         println!("blocked-by: {blocker}");
     }
     for note in ledger.notes(stored.item.id).await? {

@@ -113,7 +113,7 @@ project-scoped work, see [the weekly-notes tutorial](docs/weekly-notes-tutorial.
 
 Development proceeds from one working local global ledger, to interaction with
 one-to-three repositories, and then to personal/shared spaces and multiple
-users. Exact v5 events can now be synchronized through an explicit Git
+users. Exact v5 and v6 events can now be synchronized through an explicit Git
 checkout; each device keeps its database as a rebuildable local view. See
 [DI-0007](DI/DI-0007-staged-global-to-shared-rollout.md).
 

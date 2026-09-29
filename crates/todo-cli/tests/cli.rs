@@ -178,7 +178,7 @@ fn failed_creation_does_not_leave_a_partial_item() {
 }
 
 #[test]
-fn focus_workflow_respects_blockers_defer_dates_and_explains_next() {
+fn focus_workflow_respects_dependencies_defer_dates_and_explains_next() {
     let harness = Harness::new();
     harness.ok(&["init"]);
     let access = harness.ok(&["add", "Get access"]);
@@ -190,7 +190,7 @@ fn focus_workflow_respects_blockers_defer_dates_and_explains_next() {
 
     harness.ok(&["priority", implementation, "critical"]);
     harness.ok(&["due", implementation, "2099-01-01"]);
-    harness.ok(&["block", implementation, "--on", access]);
+    harness.ok(&["depends", implementation, "--on", access]);
     harness.ok(&["defer", future, "2999-01-01"]);
     let start_deferred = harness.run(&["start", future]);
     assert!(!start_deferred.status.success());
@@ -202,9 +202,9 @@ fn focus_workflow_respects_blockers_defer_dates_and_explains_next() {
     assert!(!ready.contains("Future task"));
     let next = harness.ok(&["next", "--explain"]);
     assert!(next.contains("Get access"));
-    assert!(next.contains("ready: no incomplete blockers"));
+    assert!(next.contains("ready: no incomplete dependencies"));
 
-    let cycle = harness.run(&["block", access, "--on", implementation]);
+    let cycle = harness.run(&["depends", access, "--on", implementation]);
     assert!(!cycle.status.success());
     assert!(String::from_utf8_lossy(&cycle.stderr).contains("dependency cycle"));
 
@@ -214,7 +214,7 @@ fn focus_workflow_respects_blockers_defer_dates_and_explains_next() {
     assert!(next.contains("priority: critical"));
     assert!(next.contains("due: 2099-01-01"));
 
-    harness.ok(&["unblock", implementation, "--on", access]);
+    harness.ok(&["undepends", implementation, "--on", access]);
     harness.ok(&["defer", future, "--clear"]);
     let ready = harness.ok(&["ready"]);
     assert!(ready.contains("Future task"));

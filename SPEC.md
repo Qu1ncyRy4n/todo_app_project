@@ -51,8 +51,7 @@ because they are todo-side:
 
 ## Interface path
 
-CLI now (current Rust binary); close/desktop GUI (Tauri) later — same path as the
-teacher bot.
-
-
+CLI is the current control surface. A native Rust desktop GUI is the next
+interface experiment; it must operate on the same ledger API and durable event
+model, rather than create a second store or a browser bridge.
 

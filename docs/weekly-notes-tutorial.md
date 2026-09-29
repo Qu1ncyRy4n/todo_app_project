@@ -9,7 +9,7 @@ dogfooded deliberately instead of receiving a bulk dump.
 
 The application has one global event ledger with optional project scopes. It
 can attach multiple repository directories to projects and explicitly
-synchronize exact v5 events through a dedicated Git checkout. It does not read
+synchronize exact v5 and v6 events through a dedicated Git checkout. It does not read
 repository TODO files or pin remote GitHub task sources.
 
 On macOS, the default paths selected by the `dirs` crate are:
@@ -239,7 +239,7 @@ only a citation. The ledger does not fetch, verify, or import it.
 todo priority <item-id> high
 todo due <item-id> 2026-12-01
 todo defer <item-id> 2026-09-14
-todo block <analysis-id> --on <foundation-id>
+todo depends <analysis-id> --on <foundation-id>
 ```
 
 Avoid assigning speculative dates to every item. The notes already show the
@@ -269,7 +269,8 @@ todo ls --all
 ```
 
 `ready` implements the useful core of the existing daily query: open, no longer
-deferred, and free of incomplete blockers. `next` then orders ready work by
+deferred, free of incomplete planned dependencies, and free of active blockers.
+`next` then orders ready work by
 active state, priority, due date, and age. Dedicated overdue, completed-today,
 tag-grouped, and scheduled-today views are not implemented.
 
@@ -320,7 +321,7 @@ todo backup /path/to/new/todo-backup-2026-09-04
 ```
 
 Markdown is readable and partially restorable. JSON is a rich current view.
-CBOR and the event log preserve exact event bytes. To synchronize v5 events,
+CBOR and the event log preserve exact event bytes. To synchronize events,
 configure a dedicated Git checkout once with `todo sync init --repo PATH`, then
 run `todo sync` explicitly on each machine. The command imports remote events,
 publishes local events, and uses Git's union merge for concurrent appends.
@@ -380,31 +381,20 @@ whether readable slugs, block IDs, links, or a sidecar are best.
 This capability is not implemented. A commit-pinned GitHub citation is the
 honest current substitute.
 
-## A Lightweight Native Graph Viewer
+## A Lightweight Native Graph Editor
 
-A graph prototype is straightforward because the domain already distinguishes
-node identity and two important edge types. The renderer should consume a
-snapshot adapter rather than query Turso tables directly.
-
-Recommended first stack:
-
-```text
-Rust
-petgraph          graph structure and traversal
-macroquad         small native window, input, and 2D drawing
-custom force layout for the first few hundred nodes
-```
-
-`macroquad` is substantially lighter than Tauri or a browser application and
-does not require JavaScript. A simple force-directed layout needs repulsion,
-spring forces for edges, damping, dragging, zooming, and labels. An O(n²)
-repulsion pass is adequate for early dogfooding; spatial partitioning can wait.
+A graph editor is straightforward because the domain already distinguishes
+node identity and two important edge types. The first native application should
+use Rust with `egui`/`eframe`, and read/write through the public ledger API
+rather than query Turso tables directly. It starts with selection and a
+validated inspector editor; interaction that creates graph relationships is a
+later slice.
 
 Visual vocabulary should preserve domain meaning:
 
 ```text
-solid edge        structural parent
-arrow edge        blocked-by
+solid arrow       blocker to blocked task
+dashed line       parent to child
 dashed edge       future cross-scope relation
 node color        lifecycle state
 node border       project
@@ -412,21 +402,16 @@ node size         priority
 faded node        deferred
 ```
 
-Start with 2D. It is easier to read, label, select, and compare over time. A
-read-only 2D prototype fed by `todo export json --global --all` is roughly a
-one-to-three day slice. Filters, stable layouts, details, and live refresh make
-it closer to one or two weeks.
+Start with 2D. It is easier to read, label, select, and compare over time. The
+initial overlays are hierarchy, blockers, and their combined view; projects and
+tags are filters, not edges. Layout stays deterministic and presentation-only
+until manual positions have durable, synchronizable semantics. A later 3D
+experiment can be an alternate view, not the initial interaction model.
 
-For a later 3D experiment, `kiss3d` is a relatively direct native Rust option.
-A basic point-and-edge scene is a few days, but useful labels, selection,
-occlusion control, and navigation take longer. Three dimensions provide more
-space but usually make task dependencies harder to understand, so they should
-be an alternate view over the same graph snapshot rather than the initial UI.
-
-The first graph-specific product change should be a stable snapshot containing
-items, project names, namespaces, and typed edges. That keeps visualization
-read-only and prevents an attractive prototype from defining storage or task
-semantics accidentally.
+The editor must not invent task semantics. Its raw record is parsed and domain
+validated before save, then maps each accepted field to the existing ledger
+operations. The detailed first-slice contract is in
+[`gui-graph-v0.md`](gui-graph-v0.md).
 
 ## Practical Starting Point
 

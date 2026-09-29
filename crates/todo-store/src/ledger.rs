@@ -1,13 +1,15 @@
 use anyhow::{Context, Result, anyhow, bail};
-use chrono::{Local, NaiveDate};
+use chrono::{DateTime, Local, NaiveDate, Utc};
 use cid::Cid;
 use serde::Serialize;
 use std::{cmp::Ordering, collections::HashSet, path::Path, str::FromStr};
 use todo_core::{
     Event, EventBuilder, EventKind, GRID_CBOR_CODEC, GridEnvelope, Item, ItemId, ItemState,
     NamespaceId, NamespaceKind, NamespacePath, Priority, decode_envelope, event_protocol_v5_cid,
+    event_protocol_v6_cid, event_protocol_v7_cid, event_protocol_v8_cid, event_protocol_v9_cid,
 };
 use turso::{Builder, Connection, Value};
+use uuid::Uuid;
 
 const OPEN_RETRY_ATTEMPTS: usize = 50;
 const OPEN_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(20);
@@ -46,7 +48,8 @@ CREATE TABLE IF NOT EXISTS items (
   parent_id TEXT,
   priority TEXT NOT NULL DEFAULT 'normal',
   due_on TEXT,
-  defer_until TEXT
+  defer_until TEXT,
+  scheduled_on TEXT
 );
 CREATE INDEX IF NOT EXISTS items_project_state ON items(project_id, state);
 CREATE TABLE IF NOT EXISTS notes (
@@ -73,13 +76,38 @@ CREATE TABLE IF NOT EXISTS item_dependencies (
   PRIMARY KEY(item_id, blocker_id)
 );
 CREATE INDEX IF NOT EXISTS dependencies_blocker ON item_dependencies(blocker_id);
+CREATE TABLE IF NOT EXISTS item_blocks (
+  item_id TEXT NOT NULL,
+  blocker_id TEXT NOT NULL,
+  PRIMARY KEY(item_id, blocker_id)
+);
+CREATE INDEX IF NOT EXISTS blocks_blocker ON item_blocks(blocker_id);
+CREATE TABLE IF NOT EXISTS focus_sequences (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS focus_sequence_entries (
+  sequence_id TEXT NOT NULL,
+  position INTEGER NOT NULL,
+  item_id TEXT NOT NULL,
+  PRIMARY KEY(sequence_id, position)
+);
+CREATE TABLE IF NOT EXISTS item_sessions (
+  session_id TEXT PRIMARY KEY,
+  item_id TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  finished_at TEXT
+);
 "#;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct StoredItem {
     pub item: Item,
     pub namespaces: Vec<NamespacePath>,
-    pub blockers: Vec<ItemId>,
+    /// Planned prerequisites. Historical `item_dependencies` rows populate this.
+    pub dependencies: Vec<ItemId>,
+    /// Current impediments. The inverse `blocks` view is derived from this edge.
+    pub blocked_by: Vec<ItemId>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -100,6 +128,31 @@ pub struct Citation {
     pub target: String,
     pub label: Option<String>,
     pub recorded_at: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct FocusSequence {
+    pub id: String,
+    pub title: String,
+    pub items: Vec<ItemId>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct WorkSession {
+    pub id: String,
+    pub item_id: ItemId,
+    pub started_at: String,
+    pub finished_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ItemPatch {
+    pub title: Option<String>,
+    pub priority: Option<Priority>,
+    pub state: Option<ItemState>,
+    pub due_on: Option<Option<NaiveDate>>,
+    pub defer_until: Option<Option<NaiveDate>>,
+    pub scheduled_on: Option<Option<NaiveDate>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -195,6 +248,8 @@ impl Ledger {
             .await?;
         self.add_column_if_missing("due_on", "due_on TEXT").await?;
         self.add_column_if_missing("defer_until", "defer_until TEXT")
+            .await?;
+        self.add_column_if_missing("scheduled_on", "scheduled_on TEXT")
             .await?;
         self.connection
             .execute(
@@ -420,12 +475,14 @@ impl Ledger {
                 priority: Priority::Normal,
                 due_on: None,
                 defer_until: None,
+                scheduled_on: None,
             },
             namespaces: namespace_entries
                 .into_iter()
                 .map(|entry| entry.path)
                 .collect(),
-            blockers: Vec::new(),
+            dependencies: Vec::new(),
+            blocked_by: Vec::new(),
         })
     }
 
@@ -645,6 +702,62 @@ impl Ledger {
                     values([next.to_string(), current.item.id.to_string()]),
                 )
                 .await?;
+            self.set_head(&event.cid).await
+        }
+        .await;
+        self.transaction_finish(result).await?;
+        self.get_item(&current.item.id.to_string()).await
+    }
+
+    pub async fn apply_patch(&self, reference: &str, patch: ItemPatch) -> Result<StoredItem> {
+        let current = self.get_item(reference).await?;
+        if patch
+            .title
+            .as_deref()
+            .is_some_and(|title| title.trim().is_empty())
+        {
+            bail!("title cannot be empty");
+        }
+        if patch
+            .state
+            .is_some_and(|state| !current.item.state.can_transition_to(state))
+        {
+            bail!("invalid lifecycle transition");
+        }
+        let mut builder = EventBuilder::for_item(EventKind::ItemPatched, current.item.id)
+            .project(current.item.project_id);
+        if let Some(title) = &patch.title {
+            builder = builder.data("title", title.trim());
+        }
+        if let Some(priority) = patch.priority {
+            builder = builder.data("priority", priority.to_string());
+        }
+        if let Some(state) = patch.state {
+            builder = builder.data("state", state.to_string());
+        }
+        if let Some(date) = patch.due_on {
+            builder = builder.data(
+                "due_on",
+                date.map(|value| value.to_string()).unwrap_or_default(),
+            );
+        }
+        if let Some(date) = patch.defer_until {
+            builder = builder.data(
+                "defer_until",
+                date.map(|value| value.to_string()).unwrap_or_default(),
+            );
+        }
+        if let Some(date) = patch.scheduled_on {
+            builder = builder.data(
+                "scheduled_on",
+                date.map(|value| value.to_string()).unwrap_or_default(),
+            );
+        }
+        let event = self.event(builder).await?;
+        self.transaction_begin().await?;
+        let result = async {
+            self.insert_event(&event).await?;
+            self.apply_event(&event).await?;
             self.set_head(&event.cid).await
         }
         .await;
@@ -888,12 +1001,13 @@ impl Ledger {
             return Ok(item);
         }
         if item.item.parent_id.is_some()
-            || !item.blockers.is_empty()
+            || !item.dependencies.is_empty()
+            || !item.blocked_by.is_empty()
             || self.has_children(item.item.id).await?
             || self.has_dependents(item.item.id).await?
         {
             bail!(
-                "cannot move an item with parent, children, blockers, or dependents; clear those relationships first"
+                "cannot move an item with parent, children, dependencies, blockers, or dependents; clear those relationships first"
             );
         }
         let event = self
@@ -942,7 +1056,7 @@ impl Ledger {
         if item.item.project_id != blocker.item.project_id {
             bail!("an item and its blocker must be in the same project scope");
         }
-        if item.blockers.contains(&blocker.item.id) {
+        if item.dependencies.contains(&blocker.item.id) {
             return Ok(());
         }
         if self
@@ -955,7 +1069,7 @@ impl Ledger {
             .event(
                 EventBuilder::for_item(EventKind::ItemDependencyAdded, item.item.id)
                     .project(item.item.project_id)
-                    .link("blocked-by", blocker.item.id.to_string()),
+                    .link("depends-on", blocker.item.id.to_string()),
             )
             .await?;
         self.transaction_begin().await?;
@@ -980,14 +1094,14 @@ impl Ledger {
     ) -> Result<()> {
         let item = self.get_item(item_reference).await?;
         let blocker = self.get_item(blocker_reference).await?;
-        if !item.blockers.contains(&blocker.item.id) {
-            bail!("{} is not blocked by {}", item.item.id, blocker.item.id);
+        if !item.dependencies.contains(&blocker.item.id) {
+            bail!("{} does not depend on {}", item.item.id, blocker.item.id);
         }
         let event = self
             .event(
                 EventBuilder::for_item(EventKind::ItemDependencyRemoved, item.item.id)
                     .project(item.item.project_id)
-                    .link("unblocked-by", blocker.item.id.to_string()),
+                    .link("no-longer-depends-on", blocker.item.id.to_string()),
             )
             .await?;
         self.transaction_begin().await?;
@@ -996,6 +1110,78 @@ impl Ledger {
             self.connection
                 .execute(
                     "DELETE FROM item_dependencies WHERE item_id = ?1 AND blocker_id = ?2",
+                    values([item.item.id.to_string(), blocker.item.id.to_string()]),
+                )
+                .await?;
+            self.set_head(&event.cid).await
+        }
+        .await;
+        self.transaction_finish(result).await
+    }
+
+    /// Add a current impediment. Unlike a planned dependency, this stays active
+    /// until explicitly removed, even if the referenced task is completed.
+    pub async fn add_blocker(&self, item_reference: &str, blocker_reference: &str) -> Result<()> {
+        let item = self.get_item(item_reference).await?;
+        let blocker = self.get_item(blocker_reference).await?;
+        if item.item.id == blocker.item.id {
+            bail!("an item cannot block itself");
+        }
+        if item.item.project_id != blocker.item.project_id {
+            bail!("an item and its blocker must be in the same project scope");
+        }
+        if item.blocked_by.contains(&blocker.item.id) {
+            return Ok(());
+        }
+        let event = self
+            .event(
+                EventBuilder::for_item(EventKind::ItemBlockAdded, item.item.id)
+                    .project(item.item.project_id)
+                    .link("blocked-by", blocker.item.id.to_string()),
+            )
+            .await?;
+        self.transaction_begin().await?;
+        let result = async {
+            self.insert_event(&event).await?;
+            self.connection
+                .execute(
+                    "INSERT INTO item_blocks(item_id, blocker_id) VALUES (?1, ?2)",
+                    values([item.item.id.to_string(), blocker.item.id.to_string()]),
+                )
+                .await?;
+            self.set_head(&event.cid).await
+        }
+        .await;
+        self.transaction_finish(result).await
+    }
+
+    pub async fn remove_blocker(
+        &self,
+        item_reference: &str,
+        blocker_reference: &str,
+    ) -> Result<()> {
+        let item = self.get_item(item_reference).await?;
+        let blocker = self.get_item(blocker_reference).await?;
+        if !item.blocked_by.contains(&blocker.item.id) {
+            bail!(
+                "{} is not actively blocked by {}",
+                item.item.id,
+                blocker.item.id
+            );
+        }
+        let event = self
+            .event(
+                EventBuilder::for_item(EventKind::ItemBlockRemoved, item.item.id)
+                    .project(item.item.project_id)
+                    .link("no-longer-blocked-by", blocker.item.id.to_string()),
+            )
+            .await?;
+        self.transaction_begin().await?;
+        let result = async {
+            self.insert_event(&event).await?;
+            self.connection
+                .execute(
+                    "DELETE FROM item_blocks WHERE item_id = ?1 AND blocker_id = ?2",
                     values([item.item.id.to_string(), blocker.item.id.to_string()]),
                 )
                 .await?;
@@ -1083,27 +1269,27 @@ impl Ledger {
         };
         let (sql, params) = match (scope, project_id, all_states) {
             (ItemScope::Project(_), Some(id), true) => (
-                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until FROM items WHERE project_id = ?1 ORDER BY id",
+                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until, scheduled_on FROM items WHERE project_id = ?1 ORDER BY id",
                 values([id.to_string()]),
             ),
             (ItemScope::Project(_), Some(id), false) => (
-                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until FROM items WHERE project_id = ?1 AND state NOT IN ('done', 'canceled') ORDER BY id",
+                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until, scheduled_on FROM items WHERE project_id = ?1 AND state NOT IN ('done', 'canceled') ORDER BY id",
                 values([id.to_string()]),
             ),
             (ItemScope::Unscoped, None, true) => (
-                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until FROM items WHERE project_id IS NULL ORDER BY id",
+                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until, scheduled_on FROM items WHERE project_id IS NULL ORDER BY id",
                 Vec::<Value>::new(),
             ),
             (ItemScope::Unscoped, None, false) => (
-                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until FROM items WHERE project_id IS NULL AND state NOT IN ('done', 'canceled') ORDER BY id",
+                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until, scheduled_on FROM items WHERE project_id IS NULL AND state NOT IN ('done', 'canceled') ORDER BY id",
                 Vec::<Value>::new(),
             ),
             (ItemScope::All, None, true) => (
-                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until FROM items ORDER BY id",
+                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until, scheduled_on FROM items ORDER BY id",
                 Vec::<Value>::new(),
             ),
             (ItemScope::All, None, false) => (
-                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until FROM items WHERE state NOT IN ('done', 'canceled') ORDER BY id",
+                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until, scheduled_on FROM items WHERE state NOT IN ('done', 'canceled') ORDER BY id",
                 Vec::<Value>::new(),
             ),
             _ => bail!("invalid resolved item scope"),
@@ -1113,11 +1299,13 @@ impl Ledger {
         while let Some(row) = rows.next().await? {
             let item = item_from_row(&row)?;
             let namespaces = self.item_namespaces(item.id).await?;
-            let blockers = self.item_blockers(item.id).await?;
+            let dependencies = self.item_dependencies(item.id).await?;
+            let blocked_by = self.item_active_blockers(item.id).await?;
             items.push(StoredItem {
                 item,
                 namespaces,
-                blockers,
+                dependencies,
+                blocked_by,
             });
         }
         Ok(items)
@@ -1134,7 +1322,9 @@ impl Ledger {
             if item.item.defer_until.is_some_and(|date| date > today) {
                 continue;
             }
-            if !self.has_incomplete_blocker(item.item.id).await? {
+            if !self.has_incomplete_dependency(item.item.id).await?
+                && !self.has_active_blocker(item.item.id).await?
+            {
                 ready.push(item);
             }
         }
@@ -1152,7 +1342,8 @@ impl Ledger {
             return Ok(None);
         };
         let mut reasons = vec![
-            "ready: no incomplete blockers and defer date reached".to_owned(),
+            "ready: no incomplete dependencies, no active blockers, and defer date reached"
+                .to_owned(),
             format!("state: {}", item.item.state),
             format!("priority: {}", item.item.priority),
         ];
@@ -1169,7 +1360,7 @@ impl Ledger {
         let mut rows = self
             .connection
             .query(
-                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until FROM items WHERE id = ?1 OR id LIKE ?2 ORDER BY id LIMIT 2",
+                "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until, scheduled_on FROM items WHERE id = ?1 OR id LIKE ?2 ORDER BY id LIMIT 2",
                 values([reference.to_owned(), pattern]),
             )
             .await?;
@@ -1182,11 +1373,13 @@ impl Ledger {
             bail!("item reference {reference} is ambiguous; use the full ID");
         }
         let namespaces = self.item_namespaces(item.id).await?;
-        let blockers = self.item_blockers(item.id).await?;
+        let dependencies = self.item_dependencies(item.id).await?;
+        let blocked_by = self.item_active_blockers(item.id).await?;
         Ok(StoredItem {
             item,
             namespaces,
-            blockers,
+            dependencies,
+            blocked_by,
         })
     }
 
@@ -1222,6 +1415,167 @@ impl Ledger {
             });
         }
         Ok(result)
+    }
+
+    pub async fn create_focus_sequence(&self, title: &str) -> Result<FocusSequence> {
+        let title = title.trim();
+        if title.is_empty() {
+            bail!("focus sequence title cannot be empty");
+        }
+        let id = Uuid::now_v7().to_string();
+        let event = self
+            .event(EventBuilder::new(EventKind::FocusSequenceCreated, &id).data("title", title))
+            .await?;
+        self.transaction_begin().await?;
+        let result = async {
+            self.insert_event(&event).await?;
+            self.connection
+                .execute(
+                    "INSERT INTO focus_sequences(id, title) VALUES (?1, ?2)",
+                    values([id.clone(), title.to_owned()]),
+                )
+                .await?;
+            self.set_head(&event.cid).await
+        }
+        .await;
+        self.transaction_finish(result).await?;
+        Ok(FocusSequence {
+            id,
+            title: title.to_owned(),
+            items: Vec::new(),
+        })
+    }
+
+    pub async fn add_focus_sequence_item(
+        &self,
+        sequence_id: &str,
+        item_reference: &str,
+    ) -> Result<()> {
+        let item = self.get_item(item_reference).await?;
+        let position = self.next_focus_sequence_position(sequence_id).await?;
+        let event = self
+            .event(
+                EventBuilder::new(EventKind::FocusSequenceEntryAdded, sequence_id)
+                    .data("position", position.to_string())
+                    .link("item", item.item.id.to_string()),
+            )
+            .await?;
+        self.transaction_begin().await?;
+        let result = async {
+            self.insert_event(&event).await?;
+            self.connection.execute("INSERT INTO focus_sequence_entries(sequence_id, position, item_id) VALUES (?1, ?2, ?3)", values([sequence_id.to_owned(), position.to_string(), item.item.id.to_string()])).await?;
+            self.set_head(&event.cid).await
+        }.await;
+        self.transaction_finish(result).await
+    }
+
+    pub async fn focus_sequences(&self) -> Result<Vec<FocusSequence>> {
+        let mut rows = self
+            .connection
+            .query("SELECT id, title FROM focus_sequences ORDER BY title", ())
+            .await?;
+        let mut sequences = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let id = text(&row, 0)?;
+            let title = text(&row, 1)?;
+            let mut item_rows = self.connection.query("SELECT item_id FROM focus_sequence_entries WHERE sequence_id = ?1 ORDER BY position", values([id.clone()])).await?;
+            let mut items = Vec::new();
+            while let Some(item_row) = item_rows.next().await? {
+                items.push(ItemId::parse(&text(&item_row, 0)?)?);
+            }
+            sequences.push(FocusSequence { id, title, items });
+        }
+        Ok(sequences)
+    }
+
+    pub async fn start_session(
+        &self,
+        reference: &str,
+        started_at: DateTime<Utc>,
+    ) -> Result<WorkSession> {
+        let item = self.get_item(reference).await?;
+        if self.active_session(item.item.id).await?.is_some() {
+            bail!("item already has an active session");
+        }
+        let id = Uuid::now_v7().to_string();
+        let started_at = started_at.to_rfc3339();
+        let event = self
+            .event(
+                EventBuilder::for_item(EventKind::ItemSessionStarted, item.item.id)
+                    .project(item.item.project_id)
+                    .data("session_id", &id)
+                    .data("started_at", &started_at),
+            )
+            .await?;
+        self.transaction_begin().await?;
+        let result = async {
+            self.insert_event(&event).await?;
+            self.connection.execute("INSERT INTO item_sessions(session_id, item_id, started_at, finished_at) VALUES (?1, ?2, ?3, NULL)", values([id.clone(), item.item.id.to_string(), started_at.clone()])).await?;
+            self.set_head(&event.cid).await
+        }.await;
+        self.transaction_finish(result).await?;
+        Ok(WorkSession {
+            id,
+            item_id: item.item.id,
+            started_at,
+            finished_at: None,
+        })
+    }
+
+    pub async fn finish_session(
+        &self,
+        reference: &str,
+        finished_at: DateTime<Utc>,
+    ) -> Result<WorkSession> {
+        let item = self.get_item(reference).await?;
+        let session = self
+            .active_session(item.item.id)
+            .await?
+            .ok_or_else(|| anyhow!("item has no active session"))?;
+        let started_at = DateTime::parse_from_rfc3339(&session.started_at)?.to_utc();
+        if finished_at < started_at {
+            bail!("session finish cannot precede its start");
+        }
+        let finished_at = finished_at.to_rfc3339();
+        let event = self
+            .event(
+                EventBuilder::for_item(EventKind::ItemSessionFinished, item.item.id)
+                    .project(item.item.project_id)
+                    .data("session_id", &session.id)
+                    .data("finished_at", &finished_at),
+            )
+            .await?;
+        self.transaction_begin().await?;
+        let result = async {
+            self.insert_event(&event).await?;
+            self.connection
+                .execute(
+                    "UPDATE item_sessions SET finished_at = ?1 WHERE session_id = ?2",
+                    values([finished_at.clone(), session.id.clone()]),
+                )
+                .await?;
+            self.set_head(&event.cid).await
+        }
+        .await;
+        self.transaction_finish(result).await?;
+        Ok(WorkSession {
+            finished_at: Some(finished_at),
+            ..session
+        })
+    }
+
+    pub async fn sessions(&self, item: ItemId) -> Result<Vec<WorkSession>> {
+        let mut rows = self.connection.query("SELECT session_id, started_at, finished_at FROM item_sessions WHERE item_id = ?1 ORDER BY started_at", values([item.to_string()])).await?;
+        let mut sessions = Vec::new();
+        while let Some(row) = rows.next().await? {
+            sessions.push(WorkSession {
+                id: text(&row, 0)?,
+                item_id: item,
+                started_at: text(&row, 1)?,
+                finished_at: optional_text(&row, 2)?,
+            });
+        }
+        Ok(sessions)
     }
 
     pub async fn history(&self, item: ItemId) -> Result<Vec<HistoryEntry>> {
@@ -1270,7 +1624,7 @@ impl Ledger {
             .collect())
     }
 
-    /// Admit v5 events exactly as received, then derive all views from the
+    /// Admit v5 and v6 events exactly as received, then derive all views from the
     /// canonical event order. This is the boundary used by local interchange
     /// and later transport adapters.
     pub async fn import_events(&self, records: &[EventRecord]) -> Result<usize> {
@@ -1280,10 +1634,15 @@ impl Ledger {
                 bail!("event {} is not replayable by the v5 ledger", record.cid);
             }
             let envelope = GridEnvelope::parse(&record.bytes).context("validate Grid envelope")?;
-            if envelope.protocol_cid() != &event_protocol_v5_cid() {
+            if envelope.protocol_cid() != &event_protocol_v5_cid()
+                && envelope.protocol_cid() != &event_protocol_v6_cid()
+                && envelope.protocol_cid() != &event_protocol_v7_cid()
+                && envelope.protocol_cid() != &event_protocol_v8_cid()
+                && envelope.protocol_cid() != &event_protocol_v9_cid()
+            {
                 bail!("event {} uses an unknown protocol", record.cid);
             }
-            let event = decode_envelope(&record.bytes).context("decode v5 event")?;
+            let event = decode_envelope(&record.bytes).context("decode ledger event")?;
             if event.cid != record.cid {
                 bail!("event bytes do not match declared CID {}", record.cid);
             }
@@ -1355,7 +1714,7 @@ impl Ledger {
         Ok(result)
     }
 
-    async fn item_blockers(&self, item: ItemId) -> Result<Vec<ItemId>> {
+    async fn item_dependencies(&self, item: ItemId) -> Result<Vec<ItemId>> {
         let mut rows = self
             .connection
             .query(
@@ -1368,6 +1727,49 @@ impl Ledger {
             result.push(ItemId::parse(&text(&row, 0)?)?);
         }
         Ok(result)
+    }
+
+    async fn item_active_blockers(&self, item: ItemId) -> Result<Vec<ItemId>> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT blocker_id FROM item_blocks WHERE item_id = ?1 ORDER BY blocker_id",
+                values([item.to_string()]),
+            )
+            .await?;
+        let mut result = Vec::new();
+        while let Some(row) = rows.next().await? {
+            result.push(ItemId::parse(&text(&row, 0)?)?);
+        }
+        Ok(result)
+    }
+
+    async fn next_focus_sequence_position(&self, sequence_id: &str) -> Result<i64> {
+        let mut rows = self.connection.query(
+            "SELECT COALESCE(MAX(position), -1) + 1 FROM focus_sequence_entries WHERE sequence_id = ?1",
+            values([sequence_id.to_owned()]),
+        ).await?;
+        let row = rows
+            .next()
+            .await?
+            .ok_or_else(|| anyhow!("cannot allocate focus sequence position"))?;
+        match row.get_value(0)? {
+            Value::Integer(position) => Ok(position),
+            _ => bail!("focus sequence position is not an integer"),
+        }
+    }
+
+    async fn active_session(&self, item: ItemId) -> Result<Option<WorkSession>> {
+        let mut rows = self.connection.query("SELECT session_id, started_at FROM item_sessions WHERE item_id = ?1 AND finished_at IS NULL LIMIT 1", values([item.to_string()])).await?;
+        let Some(row) = rows.next().await? else {
+            return Ok(None);
+        };
+        Ok(Some(WorkSession {
+            id: text(&row, 0)?,
+            item_id: item,
+            started_at: text(&row, 1)?,
+            finished_at: None,
+        }))
     }
 
     async fn namespace_by_path(&self, path: &NamespacePath) -> Result<Option<NamespaceEntry>> {
@@ -1431,11 +1833,22 @@ impl Ledger {
         Ok(false)
     }
 
-    async fn has_incomplete_blocker(&self, item: ItemId) -> Result<bool> {
+    async fn has_incomplete_dependency(&self, item: ItemId) -> Result<bool> {
         let mut rows = self
             .connection
             .query(
                 "SELECT 1 FROM item_dependencies d JOIN items b ON b.id = d.blocker_id WHERE d.item_id = ?1 AND b.state NOT IN ('done', 'canceled') LIMIT 1",
+                values([item.to_string()]),
+            )
+            .await?;
+        Ok(rows.next().await?.is_some())
+    }
+
+    async fn has_active_blocker(&self, item: ItemId) -> Result<bool> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT 1 FROM item_blocks WHERE item_id = ?1 LIMIT 1",
                 values([item.to_string()]),
             )
             .await?;
@@ -1457,7 +1870,7 @@ impl Ledger {
         let mut rows = self
             .connection
             .query(
-                "SELECT 1 FROM item_dependencies WHERE blocker_id = ?1 LIMIT 1",
+                "SELECT 1 FROM item_dependencies WHERE blocker_id = ?1 UNION SELECT 1 FROM item_blocks WHERE blocker_id = ?1 LIMIT 1",
                 values([item.to_string()]),
             )
             .await?;
@@ -1527,6 +1940,10 @@ impl Ledger {
             "citations",
             "item_namespaces",
             "item_dependencies",
+            "item_blocks",
+            "focus_sequence_entries",
+            "focus_sequences",
+            "item_sessions",
             "namespace_aliases",
             "items",
             "namespaces",
@@ -1654,12 +2071,55 @@ impl Ledger {
             }
             EventKind::ItemDependencyAdded => self.connection.execute(
                 "INSERT INTO item_dependencies(item_id, blocker_id) VALUES (?1, ?2)",
-                values([event.payload.subject_id.clone(), link("blocked-by")?.to_owned()]),
+                values([event.payload.subject_id.clone(), link("depends-on").or_else(|_| link("blocked-by"))?.to_owned()]),
             ).await?,
             EventKind::ItemDependencyRemoved => self.connection.execute(
                 "DELETE FROM item_dependencies WHERE item_id = ?1 AND blocker_id = ?2",
-                values([event.payload.subject_id.clone(), link("unblocked-by")?.to_owned()]),
+                values([event.payload.subject_id.clone(), link("no-longer-depends-on").or_else(|_| link("unblocked-by"))?.to_owned()]),
             ).await?,
+            EventKind::ItemBlockAdded => self.connection.execute(
+                "INSERT INTO item_blocks(item_id, blocker_id) VALUES (?1, ?2)",
+                values([event.payload.subject_id.clone(), link("blocked-by")?.to_owned()]),
+            ).await?,
+            EventKind::ItemBlockRemoved => self.connection.execute(
+                "DELETE FROM item_blocks WHERE item_id = ?1 AND blocker_id = ?2",
+                values([event.payload.subject_id.clone(), link("no-longer-blocked-by")?.to_owned()]),
+            ).await?,
+            EventKind::FocusSequenceCreated => self.connection.execute(
+                "INSERT INTO focus_sequences(id, title) VALUES (?1, ?2)",
+                values([event.payload.subject_id.clone(), value("title")?.to_owned()]),
+            ).await?,
+            EventKind::FocusSequenceEntryAdded => self.connection.execute(
+                "INSERT INTO focus_sequence_entries(sequence_id, position, item_id) VALUES (?1, ?2, ?3)",
+                values([event.payload.subject_id.clone(), value("position")?.to_owned(), link("item")?.to_owned()]),
+            ).await?,
+            EventKind::FocusSequenceEntryRemoved => self.connection.execute(
+                "DELETE FROM focus_sequence_entries WHERE sequence_id = ?1 AND position = ?2",
+                values([event.payload.subject_id.clone(), value("position")?.to_owned()]),
+            ).await?,
+            EventKind::ItemSessionStarted => self.connection.execute(
+                "INSERT INTO item_sessions(session_id, item_id, started_at, finished_at) VALUES (?1, ?2, ?3, NULL)",
+                values([value("session_id")?.to_owned(), event.payload.subject_id.clone(), value("started_at")?.to_owned()]),
+            ).await?,
+            EventKind::ItemSessionFinished => self.connection.execute(
+                "UPDATE item_sessions SET finished_at = ?1 WHERE session_id = ?2",
+                values([value("finished_at")?.to_owned(), value("session_id")?.to_owned()]),
+            ).await?,
+            EventKind::ItemPatched => {
+                let title = event.payload.data.get("title");
+                let priority = event.payload.data.get("priority");
+                let state = event.payload.data.get("state");
+                let due_on = event.payload.data.get("due_on");
+                let defer_until = event.payload.data.get("defer_until");
+                let scheduled_on = event.payload.data.get("scheduled_on");
+                if let Some(title) = title { self.connection.execute("UPDATE items SET title = ?1 WHERE id = ?2", values([title.clone(), event.payload.subject_id.clone()])).await?; }
+                if let Some(priority) = priority { self.connection.execute("UPDATE items SET priority = ?1 WHERE id = ?2", values([priority.clone(), event.payload.subject_id.clone()])).await?; }
+                if let Some(state) = state { self.connection.execute("UPDATE items SET state = ?1 WHERE id = ?2", values([state.clone(), event.payload.subject_id.clone()])).await?; }
+                for (column, date) in [("due_on", due_on), ("defer_until", defer_until), ("scheduled_on", scheduled_on)] {
+                    if let Some(date) = date { self.connection.execute(&format!("UPDATE items SET {column} = ?1 WHERE id = ?2"), vec![if date.is_empty() { Value::Null } else { Value::Text(date.clone()) }, Value::Text(event.payload.subject_id.clone())]).await?; }
+                }
+                0
+            }
             EventKind::NamespaceAssigned => self.connection.execute(
                 "INSERT INTO item_namespaces(item_id, namespace_id) VALUES (?1, ?2)",
                 values([event.payload.subject_id.clone(), link("namespace")?.to_owned()]),
@@ -1755,6 +2215,9 @@ fn item_from_row(row: &turso::Row) -> Result<Item> {
         defer_until: optional_text(row, 7)?
             .map(|value| NaiveDate::parse_from_str(&value, "%Y-%m-%d"))
             .transpose()?,
+        scheduled_on: optional_text(row, 8)?
+            .map(|value| NaiveDate::parse_from_str(&value, "%Y-%m-%d"))
+            .transpose()?,
     })
 }
 
@@ -1765,8 +2228,8 @@ fn item_from_row(row: &turso::Row) -> Result<Item> {
     reason = "test fixtures use direct setup and assertion values"
 )]
 mod tests {
-    use super::{BatchItem, ItemScope, Ledger};
-    use chrono::NaiveDate;
+    use super::{BatchItem, ItemPatch, ItemScope, Ledger};
+    use chrono::{DateTime, NaiveDate};
     use tempfile::tempdir;
     use todo_core::{ItemState, NamespacePath, Priority};
 
@@ -1867,7 +2330,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn blockers_and_defer_dates_define_readiness() {
+    async fn dependencies_active_blocks_and_defer_dates_define_readiness() {
         let ledger = ledger().await;
         let today = NaiveDate::from_ymd_opt(2026, 8, 28).unwrap();
         let blocker = ledger.add_item("Get access", None).await.unwrap();
@@ -1902,6 +2365,152 @@ mod tests {
         let ready = ledger.list_ready(ItemScope::Unscoped, today).await.unwrap();
         assert_eq!(ready.len(), 1);
         assert_eq!(ready[0].item.title, "Implement");
+    }
+
+    #[tokio::test]
+    async fn active_blocks_are_distinct_from_planned_dependencies() {
+        let ledger = ledger().await;
+        let blocker = ledger.add_item("Waiting on review", None).await.unwrap();
+        let work = ledger.add_item("Ship change", None).await.unwrap();
+        ledger
+            .add_blocker(&work.item.id.to_string(), &blocker.item.id.to_string())
+            .await
+            .unwrap();
+
+        let stored = ledger.get_item(&work.item.id.to_string()).await.unwrap();
+        assert!(stored.dependencies.is_empty());
+        assert_eq!(stored.blocked_by, vec![blocker.item.id]);
+        let today = NaiveDate::from_ymd_opt(2026, 8, 28).unwrap();
+        assert!(
+            ledger
+                .list_ready(ItemScope::Unscoped, today)
+                .await
+                .unwrap()
+                .iter()
+                .all(|item| item.item.id != work.item.id)
+        );
+
+        ledger
+            .set_state(&blocker.item.id.to_string(), ItemState::Done)
+            .await
+            .unwrap();
+        assert!(
+            ledger
+                .list_ready(ItemScope::Unscoped, today)
+                .await
+                .unwrap()
+                .iter()
+                .all(|item| item.item.id != work.item.id)
+        );
+
+        ledger
+            .remove_blocker(&work.item.id.to_string(), &blocker.item.id.to_string())
+            .await
+            .unwrap();
+        assert!(
+            ledger
+                .list_ready(ItemScope::Unscoped, today)
+                .await
+                .unwrap()
+                .iter()
+                .any(|item| item.item.id == work.item.id)
+        );
+    }
+
+    #[tokio::test]
+    async fn focus_sequence_orders_existing_tasks_without_affecting_readiness() {
+        let ledger = ledger().await;
+        let first = ledger.add_item("A1", None).await.unwrap();
+        let second = ledger.add_item("B1", None).await.unwrap();
+        let sequence = ledger.create_focus_sequence("Today").await.unwrap();
+        ledger
+            .add_focus_sequence_item(&sequence.id, &second.item.id.to_string())
+            .await
+            .unwrap();
+        ledger
+            .add_focus_sequence_item(&sequence.id, &first.item.id.to_string())
+            .await
+            .unwrap();
+        let sequences = ledger.focus_sequences().await.unwrap();
+        assert_eq!(sequences.len(), 1);
+        assert_eq!(sequences[0].items, vec![second.item.id, first.item.id]);
+        assert_eq!(
+            ledger
+                .list_ready(
+                    ItemScope::Unscoped,
+                    NaiveDate::from_ymd_opt(2026, 8, 28).unwrap()
+                )
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn sessions_are_append_only_and_have_one_active_record() {
+        let ledger = ledger().await;
+        let item = ledger.add_item("Timed work", None).await.unwrap();
+        let started = DateTime::parse_from_rfc3339("2026-08-28T09:00:00Z")
+            .unwrap()
+            .to_utc();
+        let finished = DateTime::parse_from_rfc3339("2026-08-28T10:00:00Z")
+            .unwrap()
+            .to_utc();
+        ledger
+            .start_session(&item.item.id.to_string(), started)
+            .await
+            .unwrap();
+        assert!(
+            ledger
+                .start_session(&item.item.id.to_string(), started)
+                .await
+                .is_err()
+        );
+        let session = ledger
+            .finish_session(&item.item.id.to_string(), finished)
+            .await
+            .unwrap();
+        assert_eq!(
+            session.finished_at.as_deref(),
+            Some("2026-08-28T10:00:00+00:00")
+        );
+        assert_eq!(ledger.sessions(item.item.id).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn item_patch_is_atomic_and_rejects_invalid_fields_without_partial_write() {
+        let ledger = ledger().await;
+        let item = ledger.add_item("Draft", None).await.unwrap();
+        let updated = ledger
+            .apply_patch(
+                &item.item.id.to_string(),
+                ItemPatch {
+                    title: Some("Published".to_owned()),
+                    priority: Some(Priority::High),
+                    due_on: Some(Some(NaiveDate::from_ymd_opt(2026, 9, 1).unwrap())),
+                    ..ItemPatch::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated.item.title, "Published");
+        assert_eq!(updated.item.priority, Priority::High);
+        assert_eq!(updated.item.due_on, NaiveDate::from_ymd_opt(2026, 9, 1));
+        let rejected = ledger
+            .apply_patch(
+                &item.item.id.to_string(),
+                ItemPatch {
+                    title: Some("".to_owned()),
+                    priority: Some(Priority::Critical),
+                    ..ItemPatch::default()
+                },
+            )
+            .await;
+        assert!(rejected.is_err());
+        let unchanged = ledger.get_item(&item.item.id.to_string()).await.unwrap();
+        assert_eq!(unchanged.item.title, "Published");
+        assert_eq!(unchanged.item.priority, Priority::High);
     }
 
     #[tokio::test]

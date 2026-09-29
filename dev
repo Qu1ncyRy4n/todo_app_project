@@ -11,6 +11,7 @@ Commands:
   check             Check formatting and run Clippy with warnings denied.
   fmt               Format Rust sources.
   run -- <args>     Run the todo CLI with <args>.
+  gui               Run the native Todo Ledger graph editor.
   install           Install todo into Cargo's bin directory.
 EOF
 }
@@ -38,6 +39,9 @@ case "$command" in
     fi
     shift
     nix develop --command cargo run -p todo-cli -- "$@"
+    ;;
+  gui)
+    nix develop --command cargo run -p todo-gui
     ;;
   install)
     nix develop --command cargo install --path crates/todo-cli --locked

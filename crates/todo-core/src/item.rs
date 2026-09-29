@@ -47,7 +47,7 @@ impl ItemState {
         match (self, next) {
             (current, candidate) if current == candidate => true,
             (Self::Inbox, Self::Active | Self::Done | Self::Canceled) => true,
-            (Self::Active, Self::Done | Self::Canceled) => true,
+            (Self::Active, Self::Inbox | Self::Done | Self::Canceled) => true,
             (Self::Done | Self::Canceled, Self::Active) => true,
             _ => false,
         }
@@ -94,6 +94,7 @@ pub struct Item {
     pub priority: Priority,
     pub due_on: Option<NaiveDate>,
     pub defer_until: Option<NaiveDate>,
+    pub scheduled_on: Option<NaiveDate>,
 }
 
 use crate::NamespaceId;
@@ -164,9 +165,10 @@ mod tests {
     }
 
     #[test]
-    fn completed_items_reopen_to_active_but_not_inbox() {
+    fn completed_items_reopen_to_active_but_not_inbox_and_active_can_be_parked() {
         assert!(ItemState::Done.can_transition_to(ItemState::Active));
         assert!(!ItemState::Done.can_transition_to(ItemState::Inbox));
+        assert!(ItemState::Active.can_transition_to(ItemState::Inbox));
     }
 
     #[test]
