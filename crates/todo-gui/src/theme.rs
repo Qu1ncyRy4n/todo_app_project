@@ -496,12 +496,31 @@ impl Default for TimelineTheme {
     }
 }
 
+/// How a parent's containment region is drawn.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ParentRegionStyle {
+    /// A titled rounded box, so a parent reads as a container holding a subgraph.
+    #[default]
+    Box,
+    /// A smoothed hull, matching how tag regions are drawn.
+    Hull,
+}
+
 /// Controls the region drawn around a parent task and its descendants.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ParentTheme {
     /// Whether parent containment regions are drawn at all.
     pub show_regions: bool,
+    /// Whether a parent draws as a titled box or as a hull.
+    pub region_style: ParentRegionStyle,
+    /// Height of the title strip on a box region.
+    pub header_height: f32,
+    /// Extra padding added per level of nesting, so nested boxes do not touch.
+    pub nest_padding: f32,
+    /// Corner rounding of a box region.
+    pub corner_radius: f32,
     /// How many visible descendants a parent needs before it gets a region.
     pub min_descendants: usize,
     /// Space left between a region's edge and its member nodes.
@@ -520,6 +539,10 @@ impl Default for ParentTheme {
     fn default() -> Self {
         Self {
             show_regions: true,
+            region_style: ParentRegionStyle::Box,
+            header_height: 18.0,
+            nest_padding: 14.0,
+            corner_radius: 10.0,
             min_descendants: 1,
             padding: 12.0,
             smoothing: 2,

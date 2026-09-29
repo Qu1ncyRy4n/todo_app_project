@@ -11,7 +11,9 @@ use geometry::{BandSpacing, FlowSpacing, SeparationSpacing, TimelineSpacing};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fs, path::PathBuf};
 use tags::{TagFilter, TagFilterState};
-use theme::{InspectorTheme, NodeShape, RegionShape, TagColoring, TagPalette, Theme};
+use theme::{
+    InspectorTheme, NodeShape, ParentRegionStyle, RegionShape, TagColoring, TagPalette, Theme,
+};
 use todo_core::{ItemState, NamespacePath, Priority, RelationKind, WeightInputs};
 use todo_store::{
     AppConfig, AppPaths, Citation, FocusSequence, ItemPatch, ItemScope, Ledger, NamespaceEntry,
@@ -2524,17 +2526,12 @@ fn draw_parent_regions(
             continue;
         }
         let color = node_tag_color(item, theme, palette).unwrap_or(Color32::from_gray(150));
-        regions.push((subtree.len(), points, color, item.item.title.clone()));
+        let depth = ancestor_depth(item, items);
+        regions.push((subtree.len(), depth, points, color, item.item.title.clone()));
     }
+    // Largest first, so a nested subtree stays visible inside its ancestor.
     regions.sort_by_key(|(size, ..)| std::cmp::Reverse(*size));
-    for (_, points, color, title) in regions {
-        let corners = node_corners(&points, half_size);
-        let hull = geometry::convex_hull(&corners);
-        let padded = geometry::expand_path(&hull, theme.parent.padding);
-        let outline = geometry::smooth_closed_path(&padded, theme.parent.smoothing);
-        if outline.len() < 3 {
-            continue;
-        }
+    for (_, depth, points, color, title) in regions {
         let fill = Color32::from_rgba_unmultiplied(
             color.r(),
             color.g(),
@@ -2550,21 +2547,88 @@ fn draw_parent_regions(
                 theme.parent.stroke_alpha,
             ),
         );
-        painter.add(egui::Shape::convex_polygon(outline.clone(), fill, stroke));
-        if let Some(label_anchor) = outline.iter().min_by(|left, right| {
-            (left.y, left.x)
-                .partial_cmp(&(right.y, right.x))
-                .unwrap_or(std::cmp::Ordering::Equal)
-        }) {
-            painter.text(
-                *label_anchor - Vec2::new(0.0, 4.0),
-                Align2::CENTER_BOTTOM,
-                short_title(&title),
-                FontId::proportional(11.0),
-                color,
-            );
+        // Depth widens the outer boxes, so an ancestor never hugs the box inside it.
+        let nesting = f32::from(u8::try_from(depth).unwrap_or(u8::MAX)) * theme.parent.nest_padding;
+        let padding = (theme.parent.padding + nesting) * zoom;
+        match theme.parent.region_style {
+            ParentRegionStyle::Box => {
+                let Some(bounds) = bounds_for_points(&points, half_size) else {
+                    continue;
+                };
+                let header = theme.parent.header_height * zoom;
+                let box_rect = Rect::from_min_max(
+                    bounds.left_top() - Vec2::new(padding, padding + header),
+                    bounds.right_bottom() + Vec2::new(padding, padding),
+                );
+                let rounding = theme.parent.corner_radius * zoom;
+                painter.rect_filled(box_rect, rounding, fill);
+                painter.rect_stroke(box_rect, rounding, stroke, egui::StrokeKind::Outside);
+                // The title strip makes the box read as the parent task itself
+                // holding a subgraph, rather than as an unlabeled enclosure.
+                let header_rect = Rect::from_min_max(
+                    box_rect.left_top(),
+                    egui::pos2(box_rect.right(), box_rect.top() + header),
+                );
+                painter.rect_filled(
+                    header_rect,
+                    rounding,
+                    Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 46),
+                );
+                painter.text(
+                    header_rect.left_center() + Vec2::new(8.0 * zoom, 0.0),
+                    Align2::LEFT_CENTER,
+                    short_title(&title),
+                    FontId::proportional(11.0 * zoom),
+                    color,
+                );
+            }
+            ParentRegionStyle::Hull => {
+                let corners = node_corners(&points, half_size);
+                let hull = geometry::convex_hull(&corners);
+                let padded = geometry::expand_path(&hull, padding);
+                let outline = geometry::smooth_closed_path(&padded, theme.parent.smoothing);
+                if outline.len() < 3 {
+                    continue;
+                }
+                painter.add(egui::Shape::convex_polygon(outline.clone(), fill, stroke));
+                if let Some(label_anchor) = outline.iter().min_by(|left, right| {
+                    left.y
+                        .total_cmp(&right.y)
+                        .then_with(|| left.x.total_cmp(&right.x))
+                }) {
+                    painter.text(
+                        *label_anchor - Vec2::new(0.0, 4.0),
+                        Align2::CENTER_BOTTOM,
+                        short_title(&title),
+                        FontId::proportional(11.0),
+                        color,
+                    );
+                }
+            }
         }
     }
+}
+
+/// Returns how many visible ancestors a task has above it.
+///
+/// Nested boxes use this to grow outward, so an outer box always has room for the
+/// one inside it.
+fn ancestor_depth(item: &StoredItem, items: &[StoredItem]) -> usize {
+    let mut depth = 0;
+    let mut current = item.item.parent_id;
+    while let Some(parent) = current {
+        let Some(found) = items.iter().find(|candidate| candidate.item.id == parent) else {
+            break;
+        };
+        depth += 1;
+        if depth > items.len() {
+            // A parent cycle cannot deepen forever; the ledger rejects one, but a
+            // stale view should still not spin here.
+            break;
+        }
+        current = found.item.parent_id;
+    }
+    depth
 }
 
 /// Returns the presentation weight of one task, from 0.0 to 1.0.
