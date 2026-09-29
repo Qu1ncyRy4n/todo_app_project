@@ -10,7 +10,7 @@ use geometry::{BandSpacing, FlowSpacing, SeparationSpacing, TimelineSpacing};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fs, path::PathBuf};
 use theme::{InspectorTheme, NodeShape, RegionShape, TagColoring, TagPalette, Theme};
-use todo_core::{ItemState, NamespacePath, Priority, WeightInputs};
+use todo_core::{ItemState, NamespacePath, Priority, RelationKind, WeightInputs};
 use todo_store::{
     AppConfig, AppPaths, Citation, DeletedItem, FocusSequence, ItemPatch, ItemScope, Ledger,
     NamespaceEntry, Note, StoredItem, WorkSession,
@@ -70,6 +70,9 @@ struct TodoGui {
     show_blocker_graph: bool,
     show_tag_constellation: bool,
     show_parent_regions: bool,
+    show_relations: bool,
+    relation_draft: RelationKind,
+    relation_search: String,
     show_focus_window: bool,
     show_completed: bool,
     tag_filter: String,
@@ -144,6 +147,9 @@ impl TodoGui {
             show_blocker_graph: true,
             show_tag_constellation: true,
             show_parent_regions: true,
+            show_relations: true,
+            relation_draft: RelationKind::ContributesTo,
+            relation_search: String::new(),
             show_focus_window: true,
             show_completed: false,
             tag_filter: String::new(),
@@ -184,6 +190,44 @@ impl TodoGui {
         };
         app.refresh();
         app
+    }
+
+    /// Adds a typed relation from the selected task to another task.
+    ///
+    /// A relation may cross projects, does not imply containment, and never affects
+    /// readiness, which is what separates it from a parent or a dependency.
+    fn add_relation(&mut self, target: String) {
+        let Some(id) = self.selected.clone() else {
+            return;
+        };
+        let relation = self.relation_draft;
+        match self
+            .runtime
+            .block_on(self.ledger.add_relation(&id, relation, &target))
+        {
+            Ok(_) => {
+                self.message = Some(format!("Relation {relation} added."));
+                self.refresh();
+            }
+            Err(error) => self.message = Some(format!("Relation not added: {error:#}")),
+        }
+    }
+
+    /// Withdraws a typed relation from the selected task.
+    fn remove_relation(&mut self, relation: RelationKind, target: String) {
+        let Some(id) = self.selected.clone() else {
+            return;
+        };
+        match self
+            .runtime
+            .block_on(self.ledger.remove_relation(&id, relation, &target))
+        {
+            Ok(_) => {
+                self.message = Some(format!("Relation {relation} removed."));
+                self.refresh();
+            }
+            Err(error) => self.message = Some(format!("Relation not removed: {error:#}")),
+        }
     }
 
     /// Saves the selected task's difficulty, where an empty draft clears it.
@@ -1339,6 +1383,7 @@ impl eframe::App for TodoGui {
                 ui.checkbox(&mut self.show_blocker_graph, "Blocked by");
                 ui.checkbox(&mut self.show_tag_constellation, "Tag constellation");
                 ui.checkbox(&mut self.show_parent_regions, "Parent regions");
+                ui.checkbox(&mut self.show_relations, "Typed relations");
                 ui.checkbox(&mut self.show_focus_window, "Focus Window");
                 ui.checkbox(&mut self.show_timeline_ruler, "Timeline ruler");
                 if ui.button("−").clicked() {
@@ -1440,6 +1485,7 @@ impl eframe::App for TodoGui {
                         ui.checkbox(&mut self.inspector.show_parent, "Parent task");
                         ui.checkbox(&mut self.inspector.show_dependencies, "Depends on");
                         ui.checkbox(&mut self.inspector.show_blockers, "Blocked by");
+                        ui.checkbox(&mut self.inspector.show_relations, "Typed relations");
                         ui.checkbox(&mut self.inspector.show_focus_sequence, "Focus sequence");
                         ui.checkbox(&mut self.inspector.show_dates, "Dates");
                         ui.checkbox(&mut self.inspector.show_sessions, "Work sessions");
@@ -1688,6 +1734,68 @@ impl eframe::App for TodoGui {
                             }
                         }
                     }
+                    // Typed relations hides only the view; the relations stay.
+                    if self.inspector.show_relations {
+                        ui.separator();
+                        ui.label("Typed relations (cross-project, never blocking)");
+                        for relation in &item.relations {
+                            let existing = *relation;
+                            ui.horizontal(|ui| {
+                                ui.monospace(format!(
+                                    "{} {}",
+                                    existing.relation, existing.target
+                                ));
+                                if ui.small_button("Remove").clicked() {
+                                    self.remove_relation(
+                                        existing.relation,
+                                        existing.target.to_string(),
+                                    );
+                                }
+                            });
+                        }
+                        ui.horizontal(|ui| {
+                            for relation in RelationKind::all() {
+                                if ui
+                                    .selectable_label(
+                                        self.relation_draft == relation,
+                                        relation.to_string(),
+                                    )
+                                    .clicked()
+                                {
+                                    self.relation_draft = relation;
+                                }
+                            }
+                        });
+                        ui.text_edit_singleline(&mut self.relation_search);
+                        let relation_query = self.relation_search.to_lowercase();
+                        // Candidates are not filtered by project: relating across
+                        // projects is the point of this edge.
+                        let relation_targets = self
+                            .items
+                            .iter()
+                            .filter(|candidate| candidate.item.id != item.item.id)
+                            .filter(|candidate| {
+                                relation_query.is_empty()
+                                    || candidate
+                                        .item
+                                        .title
+                                        .to_lowercase()
+                                        .contains(&relation_query)
+                            })
+                            .map(|candidate| {
+                                (candidate.item.id.to_string(), candidate.item.title.clone())
+                            })
+                            .take(5)
+                            .collect::<Vec<_>>();
+                        for (id, title) in relation_targets {
+                            if ui
+                                .small_button(format!("{} {title}", self.relation_draft))
+                                .clicked()
+                            {
+                                self.add_relation(id);
+                            }
+                        }
+                    }
                     // Focus sequence hides only the view; the underlying relationships stay.
                     if self.inspector.show_focus_sequence {
                         ui.separator();
@@ -1875,6 +1983,7 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
     let show_hierarchy = app.show_parent_graph;
     let show_dependencies = app.show_dependency_graph;
     let show_blockers = app.show_blocker_graph;
+    let show_relations = app.show_relations;
     if let Some(origin) = app.timeline_origin
         && app.show_timeline_ruler
         && app.theme.timeline.show_ruler
@@ -1953,6 +2062,22 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
                         start,
                         end,
                         Color32::from_rgb(75, 142, 210),
+                        &app.theme,
+                        app.graph_zoom,
+                    );
+                }
+            }
+        }
+        if show_relations {
+            for relation in &item.relations {
+                if let Some(to_target) = positions.get(&relation.target.to_string()) {
+                    // A relation points from the item to what it contributes to or
+                    // implements, and is drawn apart from structure and dependencies.
+                    draw_relation_edge(
+                        &painter,
+                        *to,
+                        *to_target,
+                        relation_color(relation.relation),
                         &app.theme,
                         app.graph_zoom,
                     );
@@ -2173,6 +2298,46 @@ fn draw_node_body(
             }
             painter.rect_stroke(node, rounding, outline, egui::StrokeKind::Outside);
         }
+    }
+}
+
+/// Returns the color a typed relation is drawn in.
+fn relation_color(relation: RelationKind) -> Color32 {
+    match relation {
+        RelationKind::ContributesTo => Color32::from_rgb(171, 130, 205),
+        RelationKind::Implements => Color32::from_rgb(198, 164, 92),
+    }
+}
+
+/// Draws a typed relation edge, dashed by default so it reads as a reference.
+fn draw_relation_edge(
+    painter: &egui::Painter,
+    start: Pos2,
+    end: Pos2,
+    color: Color32,
+    theme: &Theme,
+    zoom: f32,
+) {
+    let (head_length, head_width) = theme.edge.arrowhead_size(zoom);
+    let stroke = Stroke::new(theme.edge.width, color);
+    let shaft_end = geometry::shaft_end(start, end, head_length);
+    if theme.edge.dash_relations {
+        let dash = (theme.edge.relation_dash_length * zoom).max(1.0);
+        painter.add(egui::Shape::dashed_line(
+            &[start, shaft_end],
+            stroke,
+            dash,
+            dash,
+        ));
+    } else {
+        painter.line_segment([start, shaft_end], stroke);
+    }
+    if let Some(head) = geometry::arrowhead_points(start, end, head_length, head_width) {
+        painter.add(egui::Shape::convex_polygon(
+            head.to_vec(),
+            color,
+            Stroke::NONE,
+        ));
     }
 }
 

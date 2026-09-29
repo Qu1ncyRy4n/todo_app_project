@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
     process::Command as ProcessCommand,
 };
-use todo_core::{ItemId, ItemState, LogLine, NamespaceKind, NamespacePath, Priority};
+use todo_core::{ItemId, ItemState, LogLine, NamespaceKind, NamespacePath, Priority, RelationKind};
 use todo_store::{AppConfig, AppPaths, BatchItem, EventRecord, ItemScope, Ledger, StoredItem};
 
 #[derive(Parser)]
@@ -46,6 +46,21 @@ enum Command {
     Cancel { item: String },
     /// Reopen a done or canceled item as active.
     Reopen { item: String },
+    /// Relate an item to another, across projects. Relations never block readiness.
+    Relate {
+        item: String,
+        /// contributes-to or implements.
+        relation: String,
+        target: String,
+    },
+    /// Withdraw a typed relation.
+    Unrelate {
+        item: String,
+        relation: String,
+        target: String,
+    },
+    /// Show what relates to an item, the derived inverse view.
+    RelatedTo { item: String },
     /// Set or clear how hard an item is, from 1 to 5. Pass "clear" to remove it.
     Difficulty { item: String, value: String },
     /// Set or clear an effort estimate in minutes. Pass "clear" to remove it.
@@ -406,6 +421,34 @@ async fn run() -> Result<()> {
             print_state(&ledger.set_state(&item, ItemState::Canceled).await?)
         }
         Command::Reopen { item } => print_state(&ledger.set_state(&item, ItemState::Active).await?),
+        Command::Relate {
+            item,
+            relation,
+            target,
+        } => {
+            let kind: RelationKind = relation.parse()?;
+            let updated = ledger.add_relation(&item, kind, &target).await?;
+            println!("{} {kind} {target}", updated.item.id);
+            println!("A relation crosses projects and never blocks readiness.");
+        }
+        Command::Unrelate {
+            item,
+            relation,
+            target,
+        } => {
+            let kind: RelationKind = relation.parse()?;
+            let updated = ledger.remove_relation(&item, kind, &target).await?;
+            println!("{} no longer {kind} {target}", updated.item.id);
+        }
+        Command::RelatedTo { item } => {
+            let inverse = ledger.related_from(&item).await?;
+            if inverse.is_empty() {
+                println!("Nothing relates to {item}.");
+            }
+            for (relation, source) in inverse {
+                println!("{source} {relation} {item}");
+            }
+        }
         Command::Difficulty { item, value } => {
             let parsed = parse_clearable(&value, "difficulty")?;
             let updated = ledger.set_difficulty(&item, parsed).await?;
@@ -1379,6 +1422,15 @@ async fn show(ledger: &Ledger, reference: &str, include_history: bool) -> Result
     }
     for blocker in &stored.blocked_by {
         println!("blocked-by: {blocker}");
+    }
+    for relation in &stored.relations {
+        println!("{}: {}", relation.relation, relation.target);
+    }
+    if let Some(difficulty) = stored.item.difficulty {
+        println!("difficulty: {difficulty}");
+    }
+    if let Some(estimate) = stored.item.estimate_minutes {
+        println!("estimate-minutes: {estimate}");
     }
     for note in ledger.notes(stored.item.id).await? {
         println!("note [{}]: {}", note.recorded_at, note.body);

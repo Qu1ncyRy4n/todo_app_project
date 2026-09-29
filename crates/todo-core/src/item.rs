@@ -84,6 +84,51 @@ impl FromStr for ItemState {
     }
 }
 
+/// A typed relation between two items, which may cross project boundaries.
+///
+/// A typed relation is not structural parenthood and not a dependency: it does not
+/// imply containment and never affects readiness.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RelationKind {
+    /// The item advances a larger effort without being part of its structure.
+    ContributesTo,
+    /// The item realizes a specification, design, or decision.
+    Implements,
+}
+
+impl RelationKind {
+    /// Returns every relation name, for help text and completion.
+    pub fn all() -> [Self; 2] {
+        [Self::ContributesTo, Self::Implements]
+    }
+}
+
+impl fmt::Display for RelationKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::ContributesTo => "contributes-to",
+            Self::Implements => "implements",
+        })
+    }
+}
+
+#[derive(Debug, Error, Eq, PartialEq)]
+#[error("unknown relation {0:?}; expected contributes-to or implements")]
+pub struct ParseRelationKindError(String);
+
+impl FromStr for RelationKind {
+    type Err = ParseRelationKindError;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        match text.trim().to_lowercase().replace('_', "-").as_str() {
+            "contributes-to" | "contributes" => Ok(Self::ContributesTo),
+            "implements" | "implement" => Ok(Self::Implements),
+            other => Err(ParseRelationKindError(other.to_owned())),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Item {
     pub id: ItemId,
@@ -180,5 +225,28 @@ mod tests {
         assert_eq!("p0".parse(), Ok(Priority::Critical));
         assert!(Priority::Critical.rank() > Priority::High.rank());
         assert!(Priority::High.rank() > Priority::Normal.rank());
+    }
+}
+
+#[cfg(test)]
+mod relation_tests {
+    use super::RelationKind;
+
+    #[test]
+    fn relation_names_round_trip() {
+        for relation in RelationKind::all() {
+            assert_eq!(relation.to_string().parse(), Ok(relation));
+        }
+    }
+
+    #[test]
+    fn underscores_and_short_forms_parse() {
+        assert_eq!("contributes_to".parse(), Ok(RelationKind::ContributesTo));
+        assert_eq!("Implement".parse(), Ok(RelationKind::Implements));
+    }
+
+    #[test]
+    fn an_unknown_relation_is_rejected() {
+        assert!("blocks".parse::<RelationKind>().is_err());
     }
 }

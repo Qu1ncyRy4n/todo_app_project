@@ -5,9 +5,9 @@ use serde::Serialize;
 use std::{cmp::Ordering, collections::HashSet, path::Path, str::FromStr};
 use todo_core::{
     Event, EventBuilder, EventKind, GRID_CBOR_CODEC, GridEnvelope, Item, ItemId, ItemState,
-    NamespaceId, NamespaceKind, NamespacePath, Priority, decode_envelope, event_protocol_v5_cid,
-    event_protocol_v6_cid, event_protocol_v7_cid, event_protocol_v8_cid, event_protocol_v9_cid,
-    event_protocol_v10_cid, event_protocol_v11_cid,
+    NamespaceId, NamespaceKind, NamespacePath, Priority, RelationKind, decode_envelope,
+    event_protocol_v5_cid, event_protocol_v6_cid, event_protocol_v7_cid, event_protocol_v8_cid,
+    event_protocol_v9_cid, event_protocol_v10_cid, event_protocol_v11_cid, event_protocol_v12_cid,
 };
 use turso::{Builder, Connection, Value};
 use uuid::Uuid;
@@ -85,6 +85,13 @@ CREATE TABLE IF NOT EXISTS item_blocks (
   PRIMARY KEY(item_id, blocker_id)
 );
 CREATE INDEX IF NOT EXISTS blocks_blocker ON item_blocks(blocker_id);
+CREATE TABLE IF NOT EXISTS item_relations (
+  item_id TEXT NOT NULL,
+  relation TEXT NOT NULL,
+  target_id TEXT NOT NULL,
+  PRIMARY KEY(item_id, relation, target_id)
+);
+CREATE INDEX IF NOT EXISTS relations_target ON item_relations(target_id);
 CREATE TABLE IF NOT EXISTS focus_sequences (
   id TEXT PRIMARY KEY,
   title TEXT NOT NULL
@@ -111,6 +118,15 @@ pub struct StoredItem {
     pub dependencies: Vec<ItemId>,
     /// Current impediments. The inverse `blocks` view is derived from this edge.
     pub blocked_by: Vec<ItemId>,
+    /// Typed relations that may cross projects and never affect readiness.
+    pub relations: Vec<ItemRelation>,
+}
+
+/// One typed relation from an item to another item.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct ItemRelation {
+    pub relation: RelationKind,
+    pub target: ItemId,
 }
 
 /// A task hidden by deletion, as reported by [`Ledger::deleted_items`].
@@ -497,6 +513,7 @@ impl Ledger {
                 difficulty: None,
                 estimate_minutes: None,
             },
+            relations: Vec::new(),
             namespaces: namespace_entries
                 .into_iter()
                 .map(|entry| entry.path)
@@ -1526,11 +1543,13 @@ impl Ledger {
             let namespaces = self.item_namespaces(item.id).await?;
             let dependencies = self.item_dependencies(item.id).await?;
             let blocked_by = self.item_active_blockers(item.id).await?;
+            let relations = self.item_relations(item.id).await?;
             items.push(StoredItem {
                 item,
                 namespaces,
                 dependencies,
                 blocked_by,
+                relations,
             });
         }
         Ok(items)
@@ -1600,11 +1619,13 @@ impl Ledger {
         let namespaces = self.item_namespaces(item.id).await?;
         let dependencies = self.item_dependencies(item.id).await?;
         let blocked_by = self.item_active_blockers(item.id).await?;
+        let relations = self.item_relations(item.id).await?;
         Ok(StoredItem {
             item,
             namespaces,
             dependencies,
             blocked_by,
+            relations,
         })
     }
 
@@ -1866,6 +1887,7 @@ impl Ledger {
                 && envelope.protocol_cid() != &event_protocol_v9_cid()
                 && envelope.protocol_cid() != &event_protocol_v10_cid()
                 && envelope.protocol_cid() != &event_protocol_v11_cid()
+                && envelope.protocol_cid() != &event_protocol_v12_cid()
             {
                 bail!("event {} uses an unknown protocol", record.cid);
             }
@@ -1954,6 +1976,144 @@ impl Ledger {
             result.push(ItemId::parse(&text(&row, 0)?)?);
         }
         Ok(result)
+    }
+
+    /// Returns an item's typed relations, ordered for stable output.
+    async fn item_relations(&self, item: ItemId) -> Result<Vec<ItemRelation>> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT relation, target_id FROM item_relations WHERE item_id = ?1 ORDER BY relation, target_id",
+                values([item.to_string()]),
+            )
+            .await?;
+        let mut result = Vec::new();
+        while let Some(row) = rows.next().await? {
+            result.push(ItemRelation {
+                relation: text(&row, 0)?.parse()?,
+                target: ItemId::parse(&text(&row, 1)?)?,
+            });
+        }
+        Ok(result)
+    }
+
+    /// Returns the items that hold a typed relation pointing at this one.
+    ///
+    /// The inverse direction is derived on read rather than stored twice, exactly as
+    /// the dependency and blocker views are.
+    pub async fn related_from(&self, reference: &str) -> Result<Vec<(RelationKind, ItemId)>> {
+        let target = self.get_item(reference).await?;
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT relation, item_id FROM item_relations WHERE target_id = ?1 ORDER BY relation, item_id",
+                values([target.item.id.to_string()]),
+            )
+            .await?;
+        let mut result = Vec::new();
+        while let Some(row) = rows.next().await? {
+            result.push((text(&row, 0)?.parse()?, ItemId::parse(&text(&row, 1)?)?));
+        }
+        Ok(result)
+    }
+
+    /// Adds a typed relation from one item to another, across projects if needed.
+    ///
+    /// Relations are deliberately unconstrained by project: an item in one project
+    /// may contribute to or implement work in another. Nothing about readiness
+    /// changes, and a duplicate relation is a no-op rather than an error.
+    pub async fn add_relation(
+        &self,
+        reference: &str,
+        relation: RelationKind,
+        target_reference: &str,
+    ) -> Result<StoredItem> {
+        let item = self.get_item(reference).await?;
+        let target = self.get_item(target_reference).await?;
+        if item.item.id == target.item.id {
+            bail!("an item cannot relate to itself");
+        }
+        if item
+            .relations
+            .iter()
+            .any(|existing| existing.relation == relation && existing.target == target.item.id)
+        {
+            return Ok(item);
+        }
+        let event = self
+            .event(
+                EventBuilder::for_item(EventKind::ItemRelationAdded, item.item.id)
+                    .project(item.item.project_id)
+                    .data("relation", relation.to_string())
+                    .link("target", target.item.id.to_string()),
+            )
+            .await?;
+        self.transaction_begin().await?;
+        let result = async {
+            self.insert_event(&event).await?;
+            self.connection
+                .execute(
+                    "INSERT OR IGNORE INTO item_relations(item_id, relation, target_id) VALUES (?1, ?2, ?3)",
+                    values([
+                        item.item.id.to_string(),
+                        relation.to_string(),
+                        target.item.id.to_string(),
+                    ]),
+                )
+                .await?;
+            self.set_head(&event.cid).await
+        }
+        .await;
+        self.transaction_finish(result).await?;
+        self.get_item(&item.item.id.to_string()).await
+    }
+
+    /// Withdraws a typed relation.
+    pub async fn remove_relation(
+        &self,
+        reference: &str,
+        relation: RelationKind,
+        target_reference: &str,
+    ) -> Result<StoredItem> {
+        let item = self.get_item(reference).await?;
+        let target = self.get_item(target_reference).await?;
+        if !item
+            .relations
+            .iter()
+            .any(|existing| existing.relation == relation && existing.target == target.item.id)
+        {
+            bail!(
+                "item {} does not {relation} {}",
+                item.item.id,
+                target.item.id
+            );
+        }
+        let event = self
+            .event(
+                EventBuilder::for_item(EventKind::ItemRelationRemoved, item.item.id)
+                    .project(item.item.project_id)
+                    .data("relation", relation.to_string())
+                    .link("target", target.item.id.to_string()),
+            )
+            .await?;
+        self.transaction_begin().await?;
+        let result = async {
+            self.insert_event(&event).await?;
+            self.connection
+                .execute(
+                    "DELETE FROM item_relations WHERE item_id = ?1 AND relation = ?2 AND target_id = ?3",
+                    values([
+                        item.item.id.to_string(),
+                        relation.to_string(),
+                        target.item.id.to_string(),
+                    ]),
+                )
+                .await?;
+            self.set_head(&event.cid).await
+        }
+        .await;
+        self.transaction_finish(result).await?;
+        self.get_item(&item.item.id.to_string()).await
     }
 
     async fn item_active_blockers(&self, item: ItemId) -> Result<Vec<ItemId>> {
@@ -2256,6 +2416,14 @@ impl Ledger {
                 "UPDATE items SET deleted_at = ?1 WHERE id = ?2",
                 values([value("deleted_at")?.to_owned(), event.payload.subject_id.clone()]),
             ).await?,
+            EventKind::ItemRelationAdded => self.connection.execute(
+                "INSERT OR IGNORE INTO item_relations(item_id, relation, target_id) VALUES (?1, ?2, ?3)",
+                values([event.payload.subject_id.clone(), value("relation")?.to_owned(), link("target")?.to_owned()]),
+            ).await?,
+            EventKind::ItemRelationRemoved => self.connection.execute(
+                "DELETE FROM item_relations WHERE item_id = ?1 AND relation = ?2 AND target_id = ?3",
+                values([event.payload.subject_id.clone(), value("relation")?.to_owned(), link("target")?.to_owned()]),
+            ).await?,
             EventKind::ItemDifficultyChanged => self.connection.execute(
                 "UPDATE items SET difficulty = ?1 WHERE id = ?2",
                 vec![
@@ -2506,11 +2674,94 @@ mod tests {
     use super::{BatchItem, ItemPatch, ItemScope, Ledger};
     use chrono::{DateTime, NaiveDate};
     use tempfile::tempdir;
+    use todo_core::RelationKind;
     use todo_core::{ItemState, NamespacePath, Priority};
 
     async fn ledger() -> Ledger {
         let directory = tempdir().unwrap().keep();
         Ledger::open(&directory.join("ledger.db")).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_typed_relation_crosses_projects_without_implying_containment() {
+        let ledger = ledger().await;
+        let design: NamespacePath = "project/design".parse().unwrap();
+        let build: NamespacePath = "project/build".parse().unwrap();
+        let spec = ledger.add_item("Graph spec", Some(&design)).await.unwrap();
+        let work = ledger
+            .add_item("Draw the graph", Some(&build))
+            .await
+            .unwrap();
+        let related = ledger
+            .add_relation(
+                &work.item.id.to_string(),
+                RelationKind::Implements,
+                &spec.item.id.to_string(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(related.relations.len(), 1);
+        // A relation is not parenthood and does not block readiness.
+        assert!(related.item.parent_id.is_none());
+        assert!(related.blocked_by.is_empty());
+
+        let inverse = ledger
+            .related_from(&spec.item.id.to_string())
+            .await
+            .unwrap();
+        assert_eq!(inverse, vec![(RelationKind::Implements, work.item.id)]);
+
+        let repeated = ledger
+            .add_relation(
+                &work.item.id.to_string(),
+                RelationKind::Implements,
+                &spec.item.id.to_string(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(repeated.relations.len(), 1);
+
+        let removed = ledger
+            .remove_relation(
+                &work.item.id.to_string(),
+                RelationKind::Implements,
+                &spec.item.id.to_string(),
+            )
+            .await
+            .unwrap();
+        assert!(removed.relations.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_item_cannot_relate_to_itself() {
+        let ledger = ledger().await;
+        let item = ledger.add_item("Only one", None).await.unwrap();
+        let id = item.item.id.to_string();
+        assert!(
+            ledger
+                .add_relation(&id, RelationKind::ContributesTo, &id)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn relations_survive_a_view_rebuild() {
+        let ledger = ledger().await;
+        let goal = ledger.add_item("Ship the editor", None).await.unwrap();
+        let task = ledger.add_item("Tune the colors", None).await.unwrap();
+        ledger
+            .add_relation(
+                &task.item.id.to_string(),
+                RelationKind::ContributesTo,
+                &goal.item.id.to_string(),
+            )
+            .await
+            .unwrap();
+        ledger.rebuild_views().await.unwrap();
+        let reloaded = ledger.get_item(&task.item.id.to_string()).await.unwrap();
+        assert_eq!(reloaded.relations.len(), 1);
+        assert_eq!(reloaded.relations[0].target, goal.item.id);
     }
 
     #[tokio::test]

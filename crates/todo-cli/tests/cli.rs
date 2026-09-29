@@ -571,3 +571,37 @@ fn deleting_an_item_is_confirmed_then_reversible() {
     assert!(harness.ok(&["ls"]).contains("Accidental duplicate"));
     assert!(harness.ok(&["deleted"]).contains("No deleted items."));
 }
+
+#[test]
+fn typed_relations_are_set_shown_and_withdrawn() {
+    let harness = Harness::new();
+    harness.ok(&["init"]);
+    harness.ok(&["add", "Graph specification"]);
+    harness.ok(&["add", "Draw the graph"]);
+    let listed = harness.ok(&["ls"]);
+    let id_for = |title: &str| {
+        listed
+            .lines()
+            .find(|line| line.contains(title))
+            .and_then(|line| {
+                line.split_whitespace()
+                    .find(|token| token.len() >= 6 && token.chars().all(|c| c.is_ascii_hexdigit()))
+            })
+            .unwrap()
+            .to_owned()
+    };
+    let spec = id_for("Graph specification");
+    let work = id_for("Draw the graph");
+
+    harness.ok(&["relate", &work, "implements", &spec]);
+    let shown = harness.ok(&["show", &work]);
+    assert!(shown.contains("implements"));
+    // A relation is not parenthood, so the item keeps no parent.
+    assert!(!shown.contains("parent:"));
+
+    let inverse = harness.ok(&["related-to", &spec]);
+    assert!(inverse.contains("implements"));
+
+    harness.ok(&["unrelate", &work, "implements", &spec]);
+    assert!(!harness.ok(&["show", &work]).contains("implements"));
+}

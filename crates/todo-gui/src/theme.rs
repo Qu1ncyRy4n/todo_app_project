@@ -214,6 +214,13 @@ pub struct EdgeTheme {
     pub arrowhead_length: f32,
     /// Width of an arrowhead across its base, in points.
     pub arrowhead_width: f32,
+    /// Whether typed relation edges are drawn dashed rather than solid.
+    ///
+    /// Dashed by default, so a relation reads as a reference rather than as
+    /// structure or a dependency.
+    pub dash_relations: bool,
+    /// Dash length used for typed relation edges.
+    pub relation_dash_length: f32,
     /// Whether arrowheads grow and shrink with the graph zoom.
     ///
     /// Off by default: a head that keeps one size stays readable when the graph
@@ -227,6 +234,8 @@ impl Default for EdgeTheme {
             width: 2.0,
             arrowhead_length: 11.0,
             arrowhead_width: 9.0,
+            dash_relations: true,
+            relation_dash_length: 9.0,
             scale_arrowheads_with_zoom: false,
         }
     }
@@ -418,6 +427,7 @@ pub struct InspectorTheme {
     pub show_parent: bool,
     pub show_dependencies: bool,
     pub show_blockers: bool,
+    pub show_relations: bool,
     pub show_focus_sequence: bool,
     pub show_dates: bool,
     pub show_sessions: bool,
@@ -432,6 +442,7 @@ impl Default for InspectorTheme {
             show_parent: true,
             show_dependencies: true,
             show_blockers: true,
+            show_relations: true,
             show_focus_sequence: true,
             show_dates: true,
             show_sessions: true,
