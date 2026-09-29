@@ -4,7 +4,10 @@
 //! opinionated default and can be overridden without touching code. Values that
 //! encode protocol or data meaning never belong here.
 
-use crate::{geometry::FlowDirection, palette::Colormap};
+use crate::{
+    geometry::{FlowDirection, TimelineAxis, TimelineScale},
+    palette::Colormap,
+};
 use anyhow::{Context, Result};
 use eframe::egui::{Color32, ecolor::Hsva};
 use serde::{Deserialize, Serialize};
@@ -624,7 +627,18 @@ impl Default for InspectorTheme {
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TimelineTheme {
-    /// Horizontal distance between one day and the next.
+    /// Which way the timeline runs.
+    ///
+    /// Left to right by default, which is the shape of a calendar; top down reads
+    /// as a log and suits a long sparse schedule.
+    pub axis: TimelineAxis,
+    /// Whether days are spaced by elapsed time or by sequence.
+    pub scale: TimelineScale,
+    /// Whether a task's estimate is drawn as a block along the time axis.
+    pub show_durations: bool,
+    /// Hours of work counted as a full day, when drawing durations.
+    pub hours_per_day: f32,
+    /// Distance between one day and the next along the time axis.
     pub day_width: f32,
     /// Vertical distance between tasks stacked on the same day.
     pub lane_height: f32,
@@ -649,6 +663,10 @@ pub struct TimelineTheme {
 impl Default for TimelineTheme {
     fn default() -> Self {
         Self {
+            axis: TimelineAxis::default(),
+            scale: TimelineScale::default(),
+            show_durations: true,
+            hours_per_day: 8.0,
             day_width: 120.0,
             lane_height: 82.0,
             show_ruler: true,

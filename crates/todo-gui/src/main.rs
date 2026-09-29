@@ -1116,6 +1116,8 @@ impl TodoGui {
         let spacing = TimelineSpacing {
             day_width: self.theme.timeline.day_width,
             lane_height: self.theme.timeline.lane_height,
+            axis: self.theme.timeline.axis,
+            scale: self.theme.timeline.scale,
         };
         let arranged = geometry::timeline_positions(&scheduled, spacing);
         let origin = Pos2::new(rect.center().x, rect.top() + 140.0);
@@ -2735,6 +2737,7 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
     if let Some(origin) = app.timeline_origin
         && app.show_timeline_ruler
         && app.theme.timeline.show_ruler
+        && app.theme.timeline.axis == geometry::TimelineAxis::LeftRight
     {
         draw_timeline_ruler(&painter, rect, origin, app);
     }
@@ -3016,6 +3019,37 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
             },
             if selected { Color32::GOLD } else { border },
         );
+        // An estimate is drawn as a block along the time axis, so a long task reads
+        // as occupying time rather than as another card of the same size.
+        if app.timeline_origin.is_some() && app.theme.timeline.show_durations {
+            let length = geometry::duration_length(
+                item.item.estimate_minutes,
+                app.theme.timeline.day_width * app.graph_zoom,
+                app.theme.timeline.hours_per_day,
+            );
+            if length > 1.0 {
+                let block = match app.theme.timeline.axis {
+                    geometry::TimelineAxis::LeftRight => Rect::from_min_max(
+                        node.left_bottom() + Vec2::new(0.0, 3.0),
+                        node.left_bottom() + Vec2::new(length, 9.0),
+                    ),
+                    geometry::TimelineAxis::TopDown => Rect::from_min_max(
+                        node.right_top() + Vec2::new(3.0, 0.0),
+                        node.right_top() + Vec2::new(9.0, length),
+                    ),
+                };
+                painter.rect_filled(
+                    block,
+                    2.0,
+                    Color32::from_rgba_unmultiplied(
+                        accent.unwrap_or(Color32::GRAY).r(),
+                        accent.unwrap_or(Color32::GRAY).g(),
+                        accent.unwrap_or(Color32::GRAY).b(),
+                        150,
+                    ),
+                );
+            }
+        }
         draw_node_body(
             &painter,
             node,

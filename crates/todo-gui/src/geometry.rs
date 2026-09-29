@@ -393,49 +393,118 @@ fn group_centroids(
         .collect()
 }
 
+/// Which way a timeline runs.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimelineAxis {
+    /// Days run left to right, tasks stack downward: the shape of a calendar.
+    #[default]
+    LeftRight,
+    /// Days run top to bottom, tasks spread sideways: the shape of a log.
+    TopDown,
+}
+
+/// How a timeline spaces the days it shows.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimelineScale {
+    /// Space by real elapsed time, so empty days leave visible gaps.
+    #[default]
+    Elapsed,
+    /// Space by sequence, so days with work are evenly spaced whatever the gaps.
+    Sequence,
+}
+
 /// Spacing for a scheduled-date timeline.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TimelineSpacing {
-    /// Horizontal distance between one day and the next.
+    /// Distance between one day and the next along the time axis.
     pub day_width: f32,
-    /// Vertical distance between tasks sharing a day.
+    /// Distance between tasks sharing a day, across the time axis.
     pub lane_height: f32,
+    /// Which way the timeline runs.
+    pub axis: TimelineAxis,
+    /// How days are spaced.
+    pub scale: TimelineScale,
 }
 
-/// Places tasks along a horizontal day axis, stacking those that share a day.
+impl TimelineSpacing {
+    /// Places a point given its distance along and across the time axis.
+    pub fn place(&self, along: f32, across: f32) -> Vec2 {
+        match self.axis {
+            TimelineAxis::LeftRight => Vec2::new(along, across),
+            TimelineAxis::TopDown => Vec2::new(across, along),
+        }
+    }
+}
+
+/// Places tasks along a day axis, stacking those that share a day.
 ///
 /// The input pairs each task with its day offset from the timeline's origin day;
-/// `None` means the task has no scheduled day and is parked in a lane below the
-/// axis, to the left of the first scheduled column. Tasks sharing a day stack
-/// downward in the order given, so the caller controls the reading order.
+/// `None` means the task has no scheduled day and is parked before the first
+/// column. Tasks sharing a day stack in the order given, so the caller controls the
+/// reading order.
+///
+/// Under `Elapsed` the column is the day offset itself, so a fortnight's gap looks
+/// like a fortnight. Under `Sequence` the column is the rank of that day among the
+/// days actually used, so a sparse schedule reads as an ordered list.
 pub fn timeline_positions(
     scheduled: &[(String, Option<i64>)],
     spacing: TimelineSpacing,
 ) -> HashMap<String, Vec2> {
+    let used = scheduled
+        .iter()
+        .filter_map(|(_, day)| *day)
+        .collect::<BTreeSet<_>>();
+    let column_of = |day: i64| -> f32 {
+        match spacing.scale {
+            TimelineScale::Elapsed => {
+                let clamped = i32::try_from(day).unwrap_or(i32::MAX);
+                f32::from(i16::try_from(clamped).unwrap_or(i16::MAX))
+            }
+            TimelineScale::Sequence => {
+                let rank = used.iter().position(|candidate| *candidate == day);
+                let rank = rank.unwrap_or(0);
+                f32::from(u16::try_from(rank).unwrap_or(u16::MAX))
+            }
+        }
+    };
     let mut lanes: BTreeMap<i64, usize> = BTreeMap::new();
     let mut parked = 0_usize;
     let mut positions = HashMap::new();
     for (id, day) in scheduled {
-        match day {
+        let (along, across) = match day {
             Some(day) => {
                 let lane = lanes.entry(*day).or_insert(0);
                 let row = f32::from(u16::try_from(*lane).unwrap_or(u16::MAX));
                 *lane += 1;
-                let column = i32::try_from(*day).unwrap_or(i32::MAX);
-                let x = f32::from(i16::try_from(column).unwrap_or(i16::MAX)) * spacing.day_width;
-                positions.insert(id.clone(), Vec2::new(x, row * spacing.lane_height));
+                (
+                    column_of(*day) * spacing.day_width,
+                    row * spacing.lane_height,
+                )
             }
             None => {
                 let row = f32::from(u16::try_from(parked).unwrap_or(u16::MAX));
                 parked += 1;
-                positions.insert(
-                    id.clone(),
-                    Vec2::new(-spacing.day_width * 1.6, row * spacing.lane_height),
-                );
+                (-spacing.day_width * 1.6, row * spacing.lane_height)
             }
-        }
+        };
+        positions.insert(id.clone(), spacing.place(along, across));
     }
     positions
+}
+
+/// Returns the length a task of `minutes` occupies along a timeline.
+///
+/// Zero when durations are not being drawn or nothing is estimated, so a caller
+/// can draw unconditionally and get nothing for a task that says nothing.
+pub fn duration_length(minutes: Option<u32>, day_width: f32, hours_per_day: f32) -> f32 {
+    let Some(minutes) = minutes else {
+        return 0.0;
+    };
+    let hours = f32::from(u16::try_from(minutes / 60).unwrap_or(u16::MAX));
+    let fraction = hours / hours_per_day.max(0.5);
+    (fraction * day_width).max(0.0)
 }
 
 /// Groups points into clusters where each point is within `max_distance` of another.
@@ -746,10 +815,11 @@ pub fn grouped_positions(
 mod tests {
     use super::{
         BandSpacing, FlowDirection, FlowSpacing, GroupSpacing, OverlapSpacing, SeparationSpacing,
-        TimelineSpacing, TreeSpacing, arrowhead_points, banded_positions, centroid, cluster_points,
-        convex_hull, ease_toward, expand_path, fit_view, grouped_positions, is_settled,
-        layered_positions, relax_overlaps, ruler_ticks, separate_groups, shaft_end,
-        smooth_closed_path, timeline_positions, tree_positions,
+        TimelineAxis, TimelineScale, TimelineSpacing, TreeSpacing, arrowhead_points,
+        banded_positions, centroid, cluster_points, convex_hull, duration_length, ease_toward,
+        expand_path, fit_view, grouped_positions, is_settled, layered_positions, relax_overlaps,
+        ruler_ticks, separate_groups, shaft_end, smooth_closed_path, timeline_positions,
+        tree_positions,
     };
     use eframe::egui::{Rect, Vec2, pos2};
 
@@ -808,7 +878,61 @@ mod tests {
         TimelineSpacing {
             day_width: 100.0,
             lane_height: 50.0,
+            axis: TimelineAxis::LeftRight,
+            scale: TimelineScale::Elapsed,
         }
+    }
+
+    #[test]
+    fn a_top_down_timeline_swaps_the_axes() {
+        let spacing = TimelineSpacing {
+            axis: TimelineAxis::TopDown,
+            ..timeline()
+        };
+        let positions = timeline_positions(
+            &[("soon".to_owned(), Some(0)), ("later".to_owned(), Some(3))],
+            spacing,
+        );
+        assert!(matches!(
+            (positions.get("soon"), positions.get("later")),
+            (Some(soon), Some(later))
+                if later.y > soon.y && (later.x - soon.x).abs() < 0.001
+        ));
+    }
+
+    #[test]
+    fn sequence_scale_closes_the_gaps_elapsed_scale_keeps() {
+        let entries = [("near".to_owned(), Some(0)), ("far".to_owned(), Some(40))];
+        let elapsed = timeline_positions(&entries, timeline());
+        let sequenced = timeline_positions(
+            &entries,
+            TimelineSpacing {
+                scale: TimelineScale::Sequence,
+                ..timeline()
+            },
+        );
+        let span = |placed: &std::collections::HashMap<String, Vec2>| match (
+            placed.get("near"),
+            placed.get("far"),
+        ) {
+            (Some(near), Some(far)) => (far.x - near.x).abs(),
+            _ => 0.0,
+        };
+        assert!(span(&elapsed) > span(&sequenced));
+        assert!((span(&sequenced) - 100.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn a_longer_estimate_occupies_more_of_the_day() {
+        let short = duration_length(Some(60), 120.0, 8.0);
+        let long = duration_length(Some(60 * 6), 120.0, 8.0);
+        assert!(long > short);
+        assert!(short > 0.0);
+    }
+
+    #[test]
+    fn an_unestimated_task_occupies_nothing() {
+        assert!(duration_length(None, 120.0, 8.0).abs() < f32::EPSILON);
     }
 
     #[test]
