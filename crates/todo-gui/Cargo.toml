@@ -17,6 +17,7 @@ chrono.workspace = true
 eframe.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+toml.workspace = true
 todo-core = { path = "../todo-core" }
 todo-store = { path = "../todo-store" }
 tokio.workspace = true

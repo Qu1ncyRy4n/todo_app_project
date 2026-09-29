@@ -8,7 +8,7 @@ use chrono::{Local, NaiveDate};
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fs, path::PathBuf};
-use theme::Theme;
+use theme::{NodeShape, Theme};
 use todo_core::{ItemState, NamespacePath, Priority};
 use todo_store::{
     AppConfig, AppPaths, Citation, FocusSequence, ItemPatch, ItemScope, Ledger, NamespaceEntry,
@@ -33,10 +33,18 @@ fn main() -> Result<()> {
     let runtime = Runtime::new().context("create GUI async runtime")?;
     let ledger = runtime.block_on(Ledger::open_with_actor(&paths.database(), actor_id))?;
     let layout_path = paths.config_dir.join("gui-layout.json");
+    let theme_path = paths.config_dir.join("theme.toml");
     eframe::run_native(
         "Todo Ledger",
         eframe::NativeOptions::default(),
-        Box::new(move |_| Ok(Box::new(TodoGui::new(runtime, ledger, layout_path)))),
+        Box::new(move |_| {
+            Ok(Box::new(TodoGui::new(
+                runtime,
+                ledger,
+                layout_path,
+                theme_path,
+            )))
+        }),
     )
     .context("run native Todo Ledger window")
 }
@@ -79,6 +87,7 @@ struct TodoGui {
     graph_pan: Vec2,
     graph_zoom: f32,
     theme: Theme,
+    theme_path: PathBuf,
     new_task_open: bool,
     new_task_title: String,
     note_draft: String,
@@ -92,8 +101,15 @@ struct LocalGraphLayout {
 }
 
 impl TodoGui {
-    fn new(runtime: Runtime, ledger: Ledger, layout_path: PathBuf) -> Self {
+    fn new(runtime: Runtime, ledger: Ledger, layout_path: PathBuf, theme_path: PathBuf) -> Self {
         let node_offsets = load_layout(&layout_path);
+        let (theme, theme_message) = match Theme::load(&theme_path) {
+            Ok(theme) => (theme, None),
+            Err(error) => (
+                Theme::default(),
+                Some(format!("Theme not loaded: {error:#}")),
+            ),
+        };
         let mut app = Self {
             runtime,
             ledger,
@@ -116,7 +132,7 @@ impl TodoGui {
             show_focus_window: true,
             show_completed: false,
             tag_filter: String::new(),
-            message: None,
+            message: theme_message,
             raw_json: String::new(),
             tag_draft: String::new(),
             parent_draft: None,
@@ -131,7 +147,8 @@ impl TodoGui {
             scheduled_draft: String::new(),
             graph_pan: Vec2::ZERO,
             graph_zoom: 1.0,
-            theme: Theme::default(),
+            theme,
+            theme_path,
             new_task_open: false,
             new_task_title: String::new(),
             note_draft: String::new(),
@@ -140,6 +157,43 @@ impl TodoGui {
         };
         app.refresh();
         app
+    }
+
+    /// Re-reads `theme.toml`, so visual tuning does not need a restart.
+    ///
+    /// Writes the current defaults when no file exists yet, giving the developer a
+    /// complete starting point to edit rather than a blank file.
+    fn reload_theme(&mut self) {
+        if !self.theme_path.exists() {
+            match self.write_default_theme() {
+                Ok(()) => {
+                    self.message = Some(format!("Theme written to {}", self.theme_path.display()));
+                }
+                Err(error) => {
+                    self.message = Some(format!("Theme not written: {error:#}"));
+                    return;
+                }
+            }
+        }
+        match Theme::load(&self.theme_path) {
+            Ok(theme) => {
+                self.theme = theme;
+                if self.message.is_none() {
+                    self.message = Some("Theme reloaded.".to_owned());
+                }
+            }
+            Err(error) => self.message = Some(format!("Theme not loaded: {error:#}")),
+        }
+    }
+
+    /// Writes the current theme to disk as an editable starting point.
+    fn write_default_theme(&self) -> Result<()> {
+        if let Some(parent) = self.theme_path.parent() {
+            fs::create_dir_all(parent).context("create theme directory")?;
+        }
+        let contents = self.theme.to_toml()?;
+        fs::write(&self.theme_path, contents)
+            .with_context(|| format!("write {}", self.theme_path.display()))
     }
 
     fn refresh(&mut self) {
@@ -771,6 +825,9 @@ impl eframe::App for TodoGui {
                 if ui.button("+").clicked() {
                     self.graph_zoom = (self.graph_zoom * 1.2).min(2.5);
                 }
+                if ui.button("Reload theme").clicked() {
+                    self.reload_theme();
+                }
                 if ui.button("Reset view").clicked() {
                     self.graph_zoom = 1.0;
                     self.graph_pan = Vec2::ZERO;
@@ -1243,7 +1300,9 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
         let Some(center) = positions.get(&id) else {
             continue;
         };
-        let node = Rect::from_center_size(*center, Vec2::new(150.0, 58.0) * app.graph_zoom);
+        let (node_width, node_height) = app.theme.node.size();
+        let node =
+            Rect::from_center_size(*center, Vec2::new(node_width, node_height) * app.graph_zoom);
         let response = ui.interact(node, ui.make_persistent_id(&id), Sense::click_and_drag());
         let selected = app.selected.as_deref() == Some(id.as_str());
         let fill = if !item.blocked_by.is_empty() {
@@ -1256,45 +1315,49 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
                 ItemState::Inbox => Color32::from_rgb(59, 79, 94),
             }
         };
-        painter.rect_filled(node, 7.0, fill);
-        if let Some(accent) = node_tag_color(item, &app.theme) {
-            let stripe = app.theme.tag.node_stripe_width * app.graph_zoom;
-            painter.rect_filled(
-                Rect::from_min_max(
-                    node.left_top(),
-                    egui::pos2(node.left() + stripe, node.bottom()),
-                ),
-                7.0,
-                accent,
+        let accent = node_tag_color(item, &app.theme);
+        let outline = Stroke::new(
+            if selected { 3.0 } else { 1.0 },
+            if selected {
+                Color32::GOLD
+            } else {
+                Color32::LIGHT_GRAY
+            },
+        );
+        draw_node_body(
+            &painter,
+            node,
+            fill,
+            outline,
+            accent,
+            &app.theme,
+            app.graph_zoom,
+        );
+        let title_font = FontId::proportional(app.theme.node.title_font_size * app.graph_zoom);
+        if app.theme.node.show_meta_line {
+            painter.text(
+                node.center_top() + Vec2::new(0.0, 12.0 * app.graph_zoom),
+                Align2::CENTER_TOP,
+                short_title(&item.item.title),
+                title_font,
+                Color32::WHITE,
+            );
+            painter.text(
+                node.center_bottom() - Vec2::new(0.0, 10.0 * app.graph_zoom),
+                Align2::CENTER_BOTTOM,
+                format!("{} · {}", item.item.state, item.item.priority),
+                FontId::proportional(app.theme.node.meta_font_size * app.graph_zoom),
+                Color32::LIGHT_GRAY,
+            );
+        } else {
+            painter.text(
+                node.center(),
+                Align2::CENTER_CENTER,
+                short_title(&item.item.title),
+                title_font,
+                Color32::WHITE,
             );
         }
-        painter.rect_stroke(
-            node,
-            7.0,
-            Stroke::new(
-                if selected { 3.0 } else { 1.0 },
-                if selected {
-                    Color32::GOLD
-                } else {
-                    Color32::LIGHT_GRAY
-                },
-            ),
-            egui::StrokeKind::Outside,
-        );
-        painter.text(
-            node.center_top() + Vec2::new(0.0, 12.0),
-            Align2::CENTER_TOP,
-            short_title(&item.item.title),
-            FontId::proportional(14.0),
-            Color32::WHITE,
-        );
-        painter.text(
-            node.center_bottom() - Vec2::new(0.0, 10.0),
-            Align2::CENTER_BOTTOM,
-            format!("{} · {}", item.item.state, item.item.priority),
-            FontId::proportional(11.0),
-            Color32::LIGHT_GRAY,
-        );
         if response.drag_started()
             && let Some(pointer) = response.interact_pointer_pos()
         {
@@ -1370,6 +1433,51 @@ fn edge_points(from: Pos2, to: Pos2, zoom: f32) -> (Pos2, Pos2) {
     let start = from + direction * from_scale;
     let end = to - direction * (to_scale + 5.0);
     (start, end)
+}
+
+/// Draws a node's body in the configured shape, with its tag accent.
+///
+/// A rectangular node carries the accent as a stripe on its leading edge; a
+/// circular node carries it as a ring, since a stripe reads poorly on a curve.
+fn draw_node_body(
+    painter: &egui::Painter,
+    node: Rect,
+    fill: Color32,
+    outline: Stroke,
+    accent: Option<Color32>,
+    theme: &Theme,
+    zoom: f32,
+) {
+    let rounding = theme.node.rounding() * zoom;
+    match theme.node.shape {
+        NodeShape::Circle => {
+            let radius = node.width().min(node.height()) / 2.0;
+            painter.circle_filled(node.center(), radius, fill);
+            if let Some(accent) = accent {
+                painter.circle_stroke(
+                    node.center(),
+                    radius - theme.tag.node_stripe_width * zoom / 2.0,
+                    Stroke::new(theme.tag.node_stripe_width * zoom, accent),
+                );
+            }
+            painter.circle_stroke(node.center(), radius, outline);
+        }
+        NodeShape::RoundedRect | NodeShape::Capsule => {
+            painter.rect_filled(node, rounding, fill);
+            if let Some(accent) = accent {
+                let stripe = theme.tag.node_stripe_width * zoom;
+                painter.rect_filled(
+                    Rect::from_min_max(
+                        node.left_top(),
+                        egui::pos2(node.left() + stripe, node.bottom()),
+                    ),
+                    rounding,
+                    accent,
+                );
+            }
+            painter.rect_stroke(node, rounding, outline, egui::StrokeKind::Outside);
+        }
+    }
 }
 
 /// Draws one relationship edge with an arrowhead of theme-controlled size.

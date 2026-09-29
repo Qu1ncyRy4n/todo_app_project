@@ -4,15 +4,111 @@
 //! opinionated default and can be overridden without touching code. Values that
 //! encode protocol or data meaning never belong here.
 
+use anyhow::{Context, Result};
 use eframe::egui::{Color32, ecolor::Hsva};
 use serde::{Deserialize, Serialize};
+use std::{fs, path::Path};
 
 /// Presentation settings for the whole graph editor.
 #[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Theme {
+    pub node: NodeTheme,
     pub tag: TagTheme,
     pub edge: EdgeTheme,
+}
+
+impl Theme {
+    /// Loads a theme from `path`, falling back to the defaults when absent.
+    ///
+    /// A missing file is normal and not an error, so a fresh install renders with
+    /// the opinionated defaults. A malformed file is an error rather than a silent
+    /// fallback, so a typo in a knob name is visible instead of ignored.
+    pub fn load(path: &Path) -> Result<Self> {
+        let contents = match fs::read_to_string(path) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self::default());
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("read {}", path.display()));
+            }
+        };
+        toml::from_str(&contents).with_context(|| format!("parse {}", path.display()))
+    }
+
+    /// Renders the theme as TOML, for writing a starting point a developer can edit.
+    pub fn to_toml(&self) -> Result<String> {
+        toml::to_string_pretty(self).context("serialize theme")
+    }
+}
+
+/// The outline a task node is drawn with.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeShape {
+    /// A rectangle with rounded corners, holding a title and a status line.
+    #[default]
+    RoundedRect,
+    /// A fully rounded rectangle, wider than it is tall.
+    Capsule,
+    /// A circle, for a more organic constellation reading.
+    Circle,
+}
+
+/// Controls the size and outline of task nodes.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct NodeTheme {
+    pub shape: NodeShape,
+    /// Node width for rectangular shapes.
+    pub width: f32,
+    /// Node height for rectangular shapes.
+    pub height: f32,
+    /// Node radius for the circle shape.
+    pub radius: f32,
+    /// Corner rounding for the rounded rectangle shape.
+    pub corner_radius: f32,
+    /// Font size of the task title.
+    pub title_font_size: f32,
+    /// Font size of the state and priority line.
+    pub meta_font_size: f32,
+    /// Whether the state and priority line is drawn at all.
+    pub show_meta_line: bool,
+}
+
+impl Default for NodeTheme {
+    fn default() -> Self {
+        Self {
+            shape: NodeShape::RoundedRect,
+            width: 150.0,
+            height: 58.0,
+            radius: 34.0,
+            corner_radius: 7.0,
+            title_font_size: 14.0,
+            meta_font_size: 11.0,
+            show_meta_line: true,
+        }
+    }
+}
+
+impl NodeTheme {
+    /// Returns the unzoomed size of a node for the configured shape.
+    pub fn size(&self) -> (f32, f32) {
+        match self.shape {
+            NodeShape::Circle => (self.radius * 2.0, self.radius * 2.0),
+            NodeShape::RoundedRect | NodeShape::Capsule => (self.width, self.height),
+        }
+    }
+
+    /// Returns the corner rounding to draw for the configured shape.
+    pub fn rounding(&self) -> f32 {
+        match self.shape {
+            NodeShape::RoundedRect => self.corner_radius,
+            NodeShape::Capsule => self.height / 2.0,
+            NodeShape::Circle => self.radius,
+        }
+    }
 }
 
 /// Controls how relationship edges and their arrowheads are drawn.
@@ -124,7 +220,58 @@ impl TagTheme {
 
 #[cfg(test)]
 mod tests {
-    use super::{EdgeTheme, TagTheme};
+    use super::{EdgeTheme, NodeShape, NodeTheme, TagTheme, Theme};
+    use std::path::Path;
+
+    #[test]
+    fn a_missing_theme_file_yields_the_defaults() {
+        let theme = Theme::load(Path::new("/nonexistent/todo-ledger/theme.toml"));
+        assert!(matches!(theme, Ok(theme) if theme == Theme::default()));
+    }
+
+    #[test]
+    fn a_theme_round_trips_through_toml() {
+        let theme = Theme::default();
+        let restored = theme
+            .to_toml()
+            .and_then(|text| toml::from_str::<Theme>(&text).map_err(anyhow::Error::from));
+        assert!(matches!(restored, Ok(restored) if restored == theme));
+    }
+
+    #[test]
+    fn a_partial_theme_file_keeps_the_other_defaults() {
+        let parsed: Result<Theme, _> = toml::from_str("[node]\nshape = \"circle\"\n");
+        assert!(matches!(
+            parsed,
+            Ok(theme) if theme.node.shape == NodeShape::Circle
+                && theme.edge == EdgeTheme::default()
+        ));
+    }
+
+    #[test]
+    fn an_unknown_knob_is_rejected_rather_than_ignored() {
+        let parsed: Result<Theme, _> = toml::from_str("[node]\nwidht = 10.0\n");
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn a_capsule_rounds_to_half_its_height() {
+        let theme = NodeTheme {
+            shape: NodeShape::Capsule,
+            ..NodeTheme::default()
+        };
+        assert!((theme.rounding() - theme.height / 2.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn a_circle_is_as_wide_as_it_is_tall() {
+        let theme = NodeTheme {
+            shape: NodeShape::Circle,
+            ..NodeTheme::default()
+        };
+        let (width, height) = theme.size();
+        assert!((width - height).abs() < 0.001);
+    }
 
     #[test]
     fn arrowheads_ignore_zoom_by_default() {
