@@ -222,6 +222,10 @@ struct TodoGui {
     note_draft: String,
     link_target_draft: String,
     link_label_draft: String,
+    search: String,
+    search_focus: bool,
+    show_filters: bool,
+    show_inspector: bool,
 }
 
 #[derive(Default, Deserialize, Serialize)]
@@ -310,6 +314,10 @@ impl TodoGui {
             note_draft: String::new(),
             link_target_draft: String::new(),
             link_label_draft: String::new(),
+            search: String::new(),
+            search_focus: false,
+            show_filters: true,
+            show_inspector: true,
         };
         app.refresh();
         app
@@ -2023,6 +2031,31 @@ impl TodoGui {
     }
 
     /// Returns the items the graph is currently drawing, after state and tag filters.
+    /// Searches what a person can actually see or say: the title, either
+    /// rendering of the identifier, and the effective (inherited) tags.
+    fn search_matches(&self, item: &StoredItem) -> bool {
+        let id = item.item.id;
+        matches_query(
+            &self.search,
+            &item.item.title,
+            &[id.to_string(), id.proquint()],
+            &self.effective_tags(item),
+        )
+    }
+
+    /// Selects the first match so Enter jumps rather than only highlighting.
+    fn jump_to_first_match(&mut self) {
+        if let Some(found) = self
+            .visible_items()
+            .into_iter()
+            .find(|item| self.search_matches(item))
+        {
+            let id = found.item.id.to_string();
+            self.selected = Some(id.clone());
+            self.select(id);
+        }
+    }
+
     fn visible_items(&self) -> Vec<StoredItem> {
         self.items
             .iter()
@@ -2856,8 +2889,32 @@ fn parse_date(value: &str) -> std::result::Result<Option<NaiveDate>, String> {
         .map_err(|_| "Date must use YYYY-MM-DD, or be empty to clear it.".to_owned())
 }
 
+/// Case-insensitive substring match across a task's searchable text.
+///
+/// An empty query matches everything, so "search off" and "search cleared" are
+/// the same state and need no separate flag.
+fn matches_query(query: &str, title: &str, ids: &[String], tags: &[String]) -> bool {
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() {
+        return true;
+    }
+    title.to_lowercase().contains(&needle)
+        || ids.iter().any(|id| id.to_lowercase().contains(&needle))
+        || tags.iter().any(|tag| tag.to_lowercase().contains(&needle))
+}
+
 impl eframe::App for TodoGui {
     fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
+        // `/` reaches the search box from anywhere on the canvas; Escape leaves it.
+        // Both are gated on the canvas having focus so typing a title is unaffected.
+        if !ui.ctx().egui_wants_keyboard_input()
+            && ui.input(|input| input.key_pressed(egui::Key::Slash))
+        {
+            self.search_focus = true;
+        }
+        if ui.input(|input| input.key_pressed(egui::Key::Escape)) && !self.search.is_empty() {
+            self.search.clear();
+        }
         if !ui.ctx().egui_wants_keyboard_input() {
             let step = if ui.input(|input| input.modifiers.shift) {
                 80.0
@@ -2905,6 +2962,34 @@ impl eframe::App for TodoGui {
                 if ui.button("Refresh").clicked() {
                     self.refresh();
                 }
+                ui.separator();
+                ui.toggle_value(&mut self.show_filters, "Filters");
+                ui.toggle_value(&mut self.show_inspector, "Inspector");
+                ui.separator();
+                ui.label("Search");
+                let search = ui.add(
+                    egui::TextEdit::singleline(&mut self.search)
+                        .desired_width(180.0)
+                        .hint_text("/ to search"),
+                );
+                if self.search_focus {
+                    search.request_focus();
+                    self.search_focus = false;
+                }
+                if search.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
+                    self.jump_to_first_match();
+                }
+                if !self.search.is_empty() {
+                    let hits = self
+                        .visible_items()
+                        .iter()
+                        .filter(|item| self.search_matches(item))
+                        .count();
+                    ui.weak(format!("{hits} match"));
+                    if ui.button("Clear").clicked() {
+                        self.search.clear();
+                    }
+                }
             });
         });
         if self.new_task_open {
@@ -2937,14 +3022,18 @@ impl eframe::App for TodoGui {
                     });
                 });
         }
-        egui::Panel::left("filters")
-            .default_size(230.0)
-            .resizable(true)
-            .show(ui, |ui| self.draw_filters(ui));
-        egui::Panel::right("inspector")
-            .default_size(300.0)
-            .resizable(true)
-            .show(ui, |ui| self.draw_inspector(ui));
+        if self.show_filters {
+            egui::Panel::left("filters")
+                .default_size(230.0)
+                .resizable(true)
+                .show(ui, |ui| self.draw_filters(ui));
+        }
+        if self.show_inspector {
+            egui::Panel::right("inspector")
+                .default_size(300.0)
+                .resizable(true)
+                .show(ui, |ui| self.draw_inspector(ui));
+        }
         egui::CentralPanel::default().show(ui, |ui| draw_graph(ui, self));
     }
 }
@@ -3232,7 +3321,9 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
         .unwrap_or(status);
         // While focus mode is on, work that is not active stays drawn but quiet, so
         // it reads as context rather than as part of what is being worked on.
-        let exiled = app.focus_mode && !reads_active;
+        // A search result reuses the focus-mode treatment: non-matches stay drawn
+        // but quiet, so edges and structure survive the query instead of vanishing.
+        let exiled = (app.focus_mode && !reads_active) || !app.search_matches(item);
         let dim = |color: Color32| {
             if exiled {
                 Color32::from_rgba_unmultiplied(
@@ -4305,7 +4396,7 @@ fn short_title(title: &str) -> String {
     reason = "test fixtures use direct setup and assertion values"
 )]
 mod tests {
-    use super::collect_subtree;
+    use super::{collect_subtree, matches_query};
     use std::collections::HashMap;
     use todo_core::{ItemState, Priority};
     use todo_store::StoredItem;
@@ -4421,5 +4512,21 @@ mod tests {
         let mut found = collect_subtree("a", &children);
         found.sort();
         assert_eq!(found, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn empty_query_matches_everything() {
+        assert!(matches_query("   ", "anything", &[], &[]));
+    }
+
+    #[test]
+    fn query_matches_title_id_and_tag_case_insensitively() {
+        let ids = vec!["0a1b-2c3d".to_owned(), "lusab-babad".to_owned()];
+        let tags = vec!["tag/work/cdint".to_owned()];
+        assert!(matches_query("WRITE", "Write the report", &ids, &tags));
+        assert!(matches_query("2c3d", "Write the report", &ids, &tags));
+        assert!(matches_query("BABAD", "Write the report", &ids, &tags));
+        assert!(matches_query("cdint", "Write the report", &ids, &tags));
+        assert!(!matches_query("missing", "Write the report", &ids, &tags));
     }
 }
