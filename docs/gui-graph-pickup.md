@@ -80,6 +80,11 @@ dogfooding notes. Every slice below landed as its own commit with tests.
     within them.
 40. The timeline has an orientation, a scale, and duration blocks.
 41. A void state for items created in error, distinct from canceled.
+42. Dragging a container follows the pointer instead of accelerating away, and
+    arrows are aimed at the rectangles cards actually occupy.
+43. View and force settings sit above the filters, with the forces as live
+    sliders that can be written back to `theme.toml`. A hierarchy grows down or
+    right, and dragging empty canvas moves the view.
 
 ## Configuration
 
