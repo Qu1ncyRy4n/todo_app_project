@@ -35,6 +35,33 @@ git diff --check
 The v9 raw-patch projection and GUI parser compile. The store regression test
 covers successful multi-field application and rejection without partial writes.
 
+## Current goal: implement 1–7
+
+The active goal is to implement the following seven roadmap slices. This is the
+full scope to preserve when work resumes; the milestone commit is a stopping
+point, not a redefinition of the goal:
+
+1. Split planned `depends_on` from active `blocked_by`, derive inverse views,
+   and keep readiness semantics explicit. Implemented and tested.
+2. Add hierarchical tag constellation coloring. The current nested overlay is
+   implemented; the color-wheel palette described below remains to do.
+3. Add ordered focus sequences over existing tasks. Implemented through the
+   event-backed store, CLI, and inspector.
+4. Build the Focus Window: active work centered, completed work above, and
+   future/deferred work below, with local sequence/parent/dependency context.
+   The current implementation is a frame around active nodes; layout refinement
+   remains.
+5. Add time-oriented views and tracking: scheduled dates, calendar/Today input,
+   start/finish sessions, and linked resources. Scheduled dates, Today buttons,
+   sessions, and links are implemented; the timeline and native calendar picker
+   remain.
+6. Provide safe raw editing and graph presentation state: atomic validated
+   scalar JSON patches and persistent local node layout. Implemented; focused
+   regression coverage exists for atomic patch success/rejection.
+7. Add cross-project typed `contributes_to` / `implements` relationships.
+   The distinction from structural parenthood is documented, but the durable
+   relation and UI are intentionally not implemented yet.
+
 ## Remaining work for the active "implement 1-7" goal
 
 1. Add a timeline view using `scheduled_on`; do not overload due or defer: due
