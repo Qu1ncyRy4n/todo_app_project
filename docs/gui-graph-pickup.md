@@ -9,10 +9,14 @@ Updated: 2026-09-28
   machine-local dragged-card positions.
 - Separate structural-parent, planned `depends_on`, and active `blocked_by`
   relationships. Inverse views are derived rather than stored twice.
-- Relationship overlays: green parent arrows, blue dependency arrows, and red
-  active-blocker arrows. Tags render as nested color-constellation regions.
-- Tag/search/filter controls, Today date shortcuts, citations with explicit
-  Open controls, notes, and a Focus Window frame around active work.
+- Relationship overlays: green parent arrows, blue dependency arrows, red
+  active-blocker arrows, and dashed typed-relation arrows, all with fixed-size
+  arrowheads. Tags render as nested organic hull regions.
+- Layout commands: Normalize, Focus layout, Timeline, and Separate tags, each
+  undoable through Undo layout.
+- Reversible deletion with confirmation, plus a Deleted list with Restore.
+- Tag/search/filter controls, Today date shortcuts, calendar pickers, citations
+  with explicit Open controls, notes, and a Focus Window around active work.
 - Event-backed focus sequences: `todo focus create|add|ls` and inspector
   controls append existing tasks in cognitive order without changing readiness.
 - Event-backed sessions: `todo session start|stop|ls` and inspector Start/Stop
@@ -21,10 +25,47 @@ Updated: 2026-09-28
   defer, and scheduled dates validate then apply in one transaction.
   Relationship and note changes deliberately remain explicit.
 
-## Current verification state
+## Completed goal: slices 1-7 and the follow-on slices 8-17
 
-The v9 protocol fixture is now corrected. The latest full test run passes all
-workspace tests and formatting checks:
+The original seven-slice goal is complete, followed by a second batch drawn from
+dogfooding notes. Every slice below landed as its own commit with tests.
+
+1. Planned `depends_on` split from active `blocked_by`, inverse views derived.
+2. Hierarchical tag coloring: the hue wheel is divided between visible top-level
+   groups, each group's sector subdivided between its visible children, and depth
+   darkens. The previous hash mapping remains as the `group_hash` mode.
+3. Ordered focus sequences over existing tasks.
+4. Focus Window layout: completed above, active centered, future below, bands
+   centered on one axis and wrapping away from the center.
+5. Time views: scheduled dates, Today shortcuts, sessions, links, a scheduled-date
+   timeline with a day ruler, and a calendar picker on every date field.
+6. Atomic validated scalar patches and persistent local node layout.
+7. Typed cross-project `contributes-to` and `implements` relations.
+8. Tag color exclusion: a node's accent comes from its own deepest tag, never from
+   a region it merely sits inside.
+9. Arrowheads keep one size at any zoom and any edge length.
+10. Normalize: layered longest-path layout flowing down or right.
+11. Organic tag regions: smoothed convex hulls instead of bounding rectangles.
+12. Configurable presentation through `theme.toml`, including node shape.
+13. Parent containment regions around a parent and its whole subtree.
+14. Separation pass pushing nodes out of foreign tag regions.
+15. Reversible deletion behind a confirmation, with restore.
+16. Task weight from priority, urgency, difficulty, estimate, and subtree size.
+17. Individually hideable inspector sections.
+
+## Configuration
+
+Presentation lives in `theme.toml` beside `config.toml` in the config directory.
+A missing file keeps the defaults; a malformed file or an unknown key is reported
+rather than ignored. Reload theme re-reads it in place, and writes the current
+defaults the first time as an editable starting point.
+
+Sections: `[node]`, `[edge]`, `[tag]`, `[layout]`, `[focus]`, `[timeline]`,
+`[parent]`, `[weight]`, `[safety]`, `[inspector]`.
+
+Values that carry data or protocol meaning are deliberately not configurable.
+
+## Current verification state
 
 ```sh
 ./dev fmt
@@ -32,46 +73,19 @@ workspace tests and formatting checks:
 git diff --check
 ```
 
-The v9 raw-patch projection and GUI parser compile. The store regression test
-covers successful multi-field application and rejection without partial writes.
+All workspace tests pass, including protocol round trips, view rebuilds from the
+log, and the CLI integration suite.
 
-## Current goal: implement 1–7
+## Remaining work
 
-The active goal is to implement the following seven roadmap slices. This is the
-full scope to preserve when work resumes; the milestone commit is a stopping
-point, not a redefinition of the goal:
-
-1. Split planned `depends_on` from active `blocked_by`, derive inverse views,
-   and keep readiness semantics explicit. Implemented and tested.
-2. Add hierarchical tag constellation coloring. The current nested overlay is
-   implemented; the color-wheel palette described below remains to do.
-3. Add ordered focus sequences over existing tasks. Implemented through the
-   event-backed store, CLI, and inspector.
-4. Build the Focus Window: active work centered, completed work above, and
-   future/deferred work below, with local sequence/parent/dependency context.
-   The current implementation is a frame around active nodes; layout refinement
-   remains.
-5. Add time-oriented views and tracking: scheduled dates, calendar/Today input,
-   start/finish sessions, and linked resources. Scheduled dates, Today buttons,
-   sessions, and links are implemented; the timeline and native calendar picker
-   remain.
-6. Provide safe raw editing and graph presentation state: atomic validated
-   scalar JSON patches and persistent local node layout. Implemented; focused
-   regression coverage exists for atomic patch success/rejection.
-7. Add cross-project typed `contributes_to` / `implements` relationships.
-   The distinction from structural parenthood is documented, but the durable
-   relation and UI are intentionally not implemented yet.
-
-## Remaining work for the active "implement 1-7" goal
-
-1. Add a timeline view using `scheduled_on`; do not overload due or defer: due
-   is a commitment and defer controls readiness.
-2. Improve Focus Window layout from a frame to done-above, active-center,
-   future-below, with selected focus-sequence neighbors.
-3. Keep cross-project `contributes_to` / `implements` as future typed edges;
-   do not model them as a second structural parent.
-4. Add an inspector display-settings tab if still desired, so relationship
-   sections can be individually hidden without affecting graph data.
+1. Order nodes within a normalized layer by predecessor barycenter to cut edge
+   crossings. Today the order is alphabetical and deterministic.
+2. Approximate tag regions by their drawn hull during separation, rather than by
+   their centroid.
+3. Break cycles deliberately in the layered layout instead of parking cyclic nodes
+   in a trailing layer.
+4. Decide whether the spore-galaxy reading wants more than the `circle` node shape
+   already available, such as size-by-weight tuned against real data.
 
 ## Protocol sequence
 
@@ -79,25 +93,20 @@ point, not a redefinition of the goal:
 - v7: focus sequence events.
 - v8: session events.
 - v9: atomic scalar item patch event.
+- v10: reversible item deletion (`item.deleted`, `item.restored`).
+- v11: difficulty and effort estimate fields.
+- v12: typed cross-project relations.
 
-Each protocol document is in `docs/protocols/`. New ledger writes use the
-latest protocol; import accepts historical v5 through v9 events.
+Each protocol document is in `docs/protocols/`. New ledger writes use the latest
+protocol; import accepts historical v5 through v12 events. Deletion is a
+projection state, not ledger truth: the log stays append-only and no historical
+event is removed or rewritten.
 
-## Future tag color-wheel design
+## Weight, and what it is not
 
-The current constellation uses a deterministic hash color per visible prefix.
-The desired replacement is a hierarchy-aware color wheel:
-
-1. Count visible top-level tag groups and divide the hue wheel into that many
-   evenly spaced sectors.
-2. Assign each top-level group one sector, with deterministic alphabetical
-   ordering.
-3. For children, divide the parent sector by visible sibling count. The first
-   or largest sibling stays closest to the parent hue; later/smaller siblings
-   receive progressively greater hue or lightness deviation, with the final
-   sibling furthest from the base color.
-4. Reuse the mapping for region fills, outlines, and tag chips.
-
-Implement this as a pure deterministic `TagPalette` over the visible tag tree;
-never derive colors from database IDs or random state. Add tests for zero, one,
-and many sibling groups.
+Weight is computed in the presentation layer from priority, days until due,
+difficulty, estimate, and visible descendant count, as a weighted mean of
+normalized inputs. It stays between 0 and 1 whatever the coefficients are, a
+missing input contributes nothing rather than reading as low weight, and a
+coefficient of zero removes its input. Nothing in the ledger derives readiness,
+ordering, or state from it, so the weighting can change without a protocol change.
