@@ -18,6 +18,7 @@ use std::{
 #[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Theme {
+    pub inspector: InspectorTheme,
     pub focus: FocusTheme,
     pub timeline: TimelineTheme,
     pub parent: ParentTheme,
@@ -343,6 +344,40 @@ fn assign_sector(
             theme,
             colors,
         );
+    }
+}
+
+/// Controls which inspector sections are shown.
+///
+/// Hiding a section only stops it being drawn. Nothing about the task changes, so
+/// a hidden relationship still exists and still draws in the graph.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct InspectorTheme {
+    pub show_parent: bool,
+    pub show_dependencies: bool,
+    pub show_blockers: bool,
+    pub show_focus_sequence: bool,
+    pub show_dates: bool,
+    pub show_sessions: bool,
+    pub show_notes: bool,
+    pub show_links: bool,
+    pub show_raw_json: bool,
+}
+
+impl Default for InspectorTheme {
+    fn default() -> Self {
+        Self {
+            show_parent: true,
+            show_dependencies: true,
+            show_blockers: true,
+            show_focus_sequence: true,
+            show_dates: true,
+            show_sessions: true,
+            show_notes: true,
+            show_links: true,
+            show_raw_json: true,
+        }
     }
 }
 
