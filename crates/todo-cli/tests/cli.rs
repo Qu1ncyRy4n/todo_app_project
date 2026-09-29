@@ -540,21 +540,36 @@ fn explicit_git_sync_converges_two_independent_ledgers() {
     );
 }
 
+/// Returns the proquint identifier a listing prints for a task.
+///
+/// Identifiers are printed as hyphenated quints such as `lusab-babad`, and every
+/// command takes one back, so the tests reference tasks the way a person reading
+/// the terminal would.
+fn spoken_id(listing: &str, title: &str) -> String {
+    listing
+        .lines()
+        .find(|line| line.contains(title))
+        .and_then(|line| {
+            line.split_whitespace()
+                .find(|token| {
+                    let parts: Vec<&str> = token.split('-').collect();
+                    parts.len() >= 2
+                        && parts.iter().all(|part| {
+                            part.len() == 5 && part.chars().all(|c| c.is_ascii_lowercase())
+                        })
+                })
+                .map(str::to_owned)
+        })
+        .unwrap()
+}
+
 #[test]
 fn deleting_an_item_is_confirmed_then_reversible() {
     let harness = Harness::new();
     harness.ok(&["init"]);
     harness.ok(&["add", "Accidental duplicate"]);
     let listed = harness.ok(&["ls"]);
-    let id = listed
-        .lines()
-        .find(|line| line.contains("Accidental duplicate"))
-        .and_then(|line| {
-            line.split_whitespace()
-                .find(|token| token.len() >= 6 && token.chars().all(|c| c.is_ascii_hexdigit()))
-        })
-        .unwrap()
-        .to_owned();
+    let id = spoken_id(&listed, "Accidental duplicate");
 
     // Without --force nothing is removed, so a mistyped delete is harmless.
     let dry_run = harness.ok(&["rm", &id]);
@@ -579,19 +594,8 @@ fn typed_relations_are_set_shown_and_withdrawn() {
     harness.ok(&["add", "Graph specification"]);
     harness.ok(&["add", "Draw the graph"]);
     let listed = harness.ok(&["ls"]);
-    let id_for = |title: &str| {
-        listed
-            .lines()
-            .find(|line| line.contains(title))
-            .and_then(|line| {
-                line.split_whitespace()
-                    .find(|token| token.len() >= 6 && token.chars().all(|c| c.is_ascii_hexdigit()))
-            })
-            .unwrap()
-            .to_owned()
-    };
-    let spec = id_for("Graph specification");
-    let work = id_for("Draw the graph");
+    let spec = spoken_id(&listed, "Graph specification");
+    let work = spoken_id(&listed, "Draw the graph");
 
     harness.ok(&["relate", &work, "implements", &spec]);
     let shown = harness.ok(&["show", &work]);

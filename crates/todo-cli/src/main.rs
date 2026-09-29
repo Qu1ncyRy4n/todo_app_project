@@ -1137,15 +1137,12 @@ fn selected_scope<'a>(global: bool, project: Option<&'a NamespacePath>) -> ItemS
     }
 }
 
+/// Returns the short spoken identifier for a task.
+///
+/// Proquints rather than trailing hexadecimal: the same distinguishing bits, but
+/// readable aloud and typable from memory.
 fn short_id(id: ItemId) -> String {
-    id.to_string()
-        .chars()
-        .rev()
-        .take(8)
-        .collect::<String>()
-        .chars()
-        .rev()
-        .collect()
+    id.short()
 }
 
 fn state_mark(state: ItemState) -> &'static str {
@@ -1391,10 +1388,22 @@ fn print_state(item: &StoredItem) {
     );
 }
 
+/// Names another task by title and spoken id, for the references in `show`.
+///
+/// A bare UUID makes a reader look the task up; the title is the answer they were
+/// going to look up, and the proquint is short enough to repeat back.
+async fn describe(ledger: &Ledger, id: ItemId) -> String {
+    match ledger.get_item(&id.to_string()).await {
+        Ok(found) => format!("{} {}", id.short(), found.item.title),
+        // A referenced task may be deleted or out of scope; the id still names it.
+        Err(_) => id.short(),
+    }
+}
+
 async fn show(ledger: &Ledger, reference: &str, include_history: bool) -> Result<()> {
     let stored = ledger.get_item(reference).await?;
     println!("{} {}", state_mark(stored.item.state), stored.item.title);
-    println!("id: {}", stored.item.id);
+    println!("id: {} ({})", stored.item.id.short(), stored.item.id);
     println!("state: {}", stored.item.state);
     println!("priority: {}", stored.item.priority);
     if let Some(due) = stored.item.due_on {
@@ -1404,7 +1413,7 @@ async fn show(ledger: &Ledger, reference: &str, include_history: bool) -> Result
         println!("defer: {defer}");
     }
     if let Some(parent) = stored.item.parent_id {
-        println!("parent: {parent}");
+        println!("parent: {}", describe(ledger, parent).await);
     }
     if !stored.namespaces.is_empty() {
         println!(
@@ -1417,14 +1426,18 @@ async fn show(ledger: &Ledger, reference: &str, include_history: bool) -> Result
                 .join(", ")
         );
     }
-    for blocker in &stored.dependencies {
-        println!("depends-on: {blocker}");
+    for dependency in &stored.dependencies {
+        println!("depends-on: {}", describe(ledger, *dependency).await);
     }
     for blocker in &stored.blocked_by {
-        println!("blocked-by: {blocker}");
+        println!("blocked-by: {}", describe(ledger, *blocker).await);
     }
     for relation in &stored.relations {
-        println!("{}: {}", relation.relation, relation.target);
+        println!(
+            "{}: {}",
+            relation.relation,
+            describe(ledger, relation.target).await
+        );
     }
     if let Some(difficulty) = stored.item.difficulty {
         println!("difficulty: {difficulty}");

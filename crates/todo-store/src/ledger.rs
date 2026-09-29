@@ -809,11 +809,15 @@ impl Ledger {
     pub async fn restore_item(&self, reference: &str) -> Result<StoredItem> {
         let deleted = self.deleted_items().await?;
         let reference = reference.trim();
+        // Compared without hyphens so a full identifier, a trailing fragment, and a
+        // decoded proquint all match the same stored id.
+        let matched =
+            todo_core::proquint_to_hex(reference).unwrap_or_else(|| reference.replace('-', ""));
         let matches = deleted
             .into_iter()
             .filter(|entry| {
-                let id = entry.id.to_string();
-                id == reference || id.ends_with(reference)
+                let id = entry.id.to_string().replace('-', "");
+                id == matched || id.ends_with(&matched)
             })
             .collect::<Vec<_>>();
         let found = match matches.len() {
@@ -1600,12 +1604,17 @@ impl Ledger {
 
     pub async fn get_item(&self, reference: &str) -> Result<StoredItem> {
         let reference = reference.trim();
-        let pattern = format!("%{reference}");
+        // An identifier printed as proquints must be accepted back: it is decoded to
+        // the hexadecimal it stands for, and anything that is not a valid quint is
+        // matched as given.
+        let decoded = todo_core::proquint_to_hex(reference);
+        let matched = decoded.as_deref().unwrap_or(reference);
+        let pattern = format!("%{matched}");
         let mut rows = self
             .connection
             .query(
                 "SELECT id, title, state, project_id, parent_id, priority, due_on, defer_until, scheduled_on, difficulty, estimate_minutes FROM items WHERE deleted_at IS NULL AND (id = ?1 OR id LIKE ?2) ORDER BY id LIMIT 2",
-                values([reference.to_owned(), pattern]),
+                values([matched.to_owned(), pattern]),
             )
             .await?;
         let first = rows

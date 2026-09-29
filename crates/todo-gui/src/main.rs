@@ -14,7 +14,7 @@ use tags::{TagFilter, TagFilterState};
 use theme::{
     InspectorTheme, NodeShape, ParentRegionStyle, RegionShape, TagColoring, TagPalette, Theme,
 };
-use todo_core::{ItemState, NamespacePath, Priority, RelationKind, WeightInputs};
+use todo_core::{ItemId, ItemState, NamespacePath, Priority, RelationKind, WeightInputs};
 use todo_store::{
     AppConfig, AppPaths, Citation, FocusSequence, ItemPatch, ItemScope, Ledger, NamespaceEntry,
     Note, StoredItem, WorkSession,
@@ -381,6 +381,26 @@ impl TodoGui {
         }
     }
 
+    /// Names another task the way a person would: its title, then a spoken id.
+    ///
+    /// A raw UUID says nothing about which task it is; the title does, and the
+    /// proquint gives something short enough to say out loud when two titles match.
+    fn describe(&self, id: &str) -> String {
+        let found = self
+            .items
+            .iter()
+            .find(|candidate| candidate.item.id.to_string() == id);
+        match found {
+            Some(item) => format!("{} · {}", item.item.title, item.item.id.short()),
+            None => match ItemId::parse(id) {
+                // A referenced task can sit outside the current filter, so fall
+                // back to the spoken id rather than showing nothing.
+                Ok(parsed) => format!("(not in view) · {}", parsed.short()),
+                Err(_) => id.to_owned(),
+            },
+        }
+    }
+
     /// Draws the inspector as five collapsible sections over the selected task.
     ///
     /// Grouping keeps the panel navigable: status, then how the task relates to
@@ -397,7 +417,8 @@ impl TodoGui {
                 }
                 return;
             };
-            ui.label(format!("{} · {}", item.item.state, item.item.id));
+            ui.label(format!("{} · {}", item.item.state, item.item.id.short()))
+                .on_hover_text(item.item.id.to_string());
             egui::CollapsingHeader::new("Status")
                 .default_open(self.inspector.open_status)
                 .show(ui, |ui| self.section_status(ui, &item));
@@ -502,8 +523,9 @@ impl TodoGui {
         if self.inspector.show_parent {
             ui.label("Parent task");
             if let Some(parent) = self.parent_draft.clone() {
+                let described = self.describe(&parent);
                 ui.horizontal(|ui| {
-                    ui.monospace(parent);
+                    ui.label(described);
                     if ui.small_button("Remove").clicked() {
                         self.parent_draft = None;
                         self.save_parent();
@@ -535,8 +557,9 @@ impl TodoGui {
             ui.separator();
             ui.label("Depends on (planned prerequisite)");
             for dependency in &item.dependencies {
+                let described = self.describe(&dependency.to_string());
                 ui.horizontal(|ui| {
-                    ui.monospace(dependency.to_string());
+                    ui.label(described);
                     if ui.small_button("Remove").clicked() {
                         self.toggle_dependency(dependency.to_string(), false);
                     }
@@ -574,8 +597,9 @@ impl TodoGui {
                 );
             }
             for blocker in &item.blocked_by {
+                let described = self.describe(&blocker.to_string());
                 ui.horizontal(|ui| {
-                    ui.monospace(blocker.to_string());
+                    ui.label(described);
                     if ui.small_button("Remove").clicked() {
                         self.toggle_blocker(blocker.to_string(), false);
                     }
@@ -608,8 +632,9 @@ impl TodoGui {
             ui.label("Typed relations (cross-project, never blocking)");
             for relation in &item.relations {
                 let existing = *relation;
+                let described = self.describe(&existing.target.to_string());
                 ui.horizontal(|ui| {
-                    ui.monospace(format!("{} {}", existing.relation, existing.target));
+                    ui.label(format!("{} {described}", existing.relation));
                     if ui.small_button("Remove").clicked() {
                         self.remove_relation(existing.relation, existing.target.to_string());
                     }

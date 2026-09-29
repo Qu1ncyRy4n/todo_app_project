@@ -17,6 +17,19 @@ impl ItemId {
     pub fn parse(value: &str) -> Result<Self, uuid::Error> {
         Uuid::parse_str(value).map(Self)
     }
+
+    /// Returns the whole identifier as hyphenated proquints.
+    pub fn proquint(self) -> String {
+        crate::proquint::encode_bytes(self.0.as_bytes())
+    }
+
+    /// Returns a short spoken identifier, from the distinguishing tail.
+    ///
+    /// Two quints, such as `lusab-babad`, in place of eight hexadecimal characters:
+    /// the same information, readable aloud and typable from memory.
+    pub fn short(self) -> String {
+        crate::proquint::short(self.0.as_bytes())
+    }
 }
 
 impl Default for ItemId {

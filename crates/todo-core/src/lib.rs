@@ -5,6 +5,7 @@ mod grid;
 mod item;
 mod log;
 mod namespace;
+mod proquint;
 mod weight;
 
 pub use event::{
@@ -20,4 +21,8 @@ pub use grid::{
 pub use item::{Item, ItemId, ItemState, ParseRelationKindError, Priority, RelationKind};
 pub use log::LogLine;
 pub use namespace::{NamespaceId, NamespaceKind, NamespacePath};
+pub use proquint::{
+    decode_to_hex as proquint_to_hex, decode_u16 as proquint_decode, encode_bytes as proquint,
+    short as proquint_short,
+};
 pub use weight::{WeightFactors, WeightInputs, weight};
