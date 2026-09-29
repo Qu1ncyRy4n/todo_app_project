@@ -6,7 +6,7 @@ mod theme;
 use anyhow::{Context, Result, bail};
 use chrono::{Local, NaiveDate};
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
-use geometry::FlowSpacing;
+use geometry::{BandSpacing, FlowSpacing};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fs, path::PathBuf};
 use theme::{NodeShape, Theme};
@@ -91,6 +91,7 @@ struct TodoGui {
     theme_path: PathBuf,
     layout_undo: Option<HashMap<String, Vec2>>,
     normalize_requested: bool,
+    focus_layout_requested: bool,
     new_task_open: bool,
     new_task_title: String,
     note_draft: String,
@@ -154,6 +155,7 @@ impl TodoGui {
             theme_path,
             layout_undo: None,
             normalize_requested: false,
+            focus_layout_requested: false,
             new_task_open: false,
             new_task_title: String::new(),
             note_draft: String::new(),
@@ -162,6 +164,50 @@ impl TodoGui {
         };
         app.refresh();
         app
+    }
+
+    /// Arranges visible nodes into Focus Window bands around the active work.
+    ///
+    /// Completed work goes above, active work stays centered, and future or
+    /// deferred work goes below, so the present moment reads as the middle of the
+    /// graph. Like normalize, the previous arrangement is kept for undo.
+    fn focus_layout(&mut self, rect: Rect) {
+        let today = Local::now().date_naive();
+        let items = self.visible_items();
+        let mut completed = Vec::new();
+        let mut active = Vec::new();
+        let mut future = Vec::new();
+        for item in &items {
+            let id = item.item.id.to_string();
+            let deferred = self.theme.focus.future_includes_deferred
+                && (item.item.defer_until.is_some_and(|date| date > today)
+                    || item.item.scheduled_on.is_some_and(|date| date > today));
+            match item.item.state {
+                ItemState::Done | ItemState::Canceled => completed.push(id),
+                ItemState::Active if !deferred => active.push(id),
+                _ => future.push(id),
+            }
+        }
+        let spacing = BandSpacing {
+            band_gap: self.theme.focus.band_gap,
+            node_gap: self.theme.focus.node_gap,
+            row_gap: self.theme.focus.row_gap,
+            band_width: self.theme.focus.band_width,
+        };
+        let arranged = geometry::banded_positions(&completed, &active, &future, spacing);
+        let center = rect.center();
+        self.layout_undo = Some(self.node_offsets.clone());
+        for (index, item) in items.iter().enumerate() {
+            let id = item.item.id.to_string();
+            let Some(target) = arranged.get(&id) else {
+                continue;
+            };
+            let slot = grid_slot(index, rect);
+            self.node_offsets.insert(id, (center + *target) - slot);
+        }
+        self.save_layout();
+        self.message =
+            Some("Focus Window arranged: done above, active centered, future below.".to_owned());
     }
 
     /// Rearranges visible nodes so relationships flow one way, down or right.
@@ -915,6 +961,9 @@ impl eframe::App for TodoGui {
                     // deferred one frame rather than guessed at here.
                     self.normalize_requested = true;
                 }
+                if ui.button("Focus layout").clicked() {
+                    self.focus_layout_requested = true;
+                }
                 if ui.button("Undo layout").clicked() {
                     self.undo_layout();
                 }
@@ -1290,6 +1339,10 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
         app.normalize_requested = false;
         app.normalize_layout(rect);
     }
+    if app.focus_layout_requested {
+        app.focus_layout_requested = false;
+        app.focus_layout(rect);
+    }
     let items = app.visible_items();
     let positions = graph_positions(
         &items,
@@ -1304,7 +1357,7 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
     if app.show_tag_constellation {
         draw_tag_constellation(&painter, &items, &positions, app.graph_zoom, &app.theme);
     }
-    if app.show_focus_window {
+    if app.show_focus_window && app.theme.focus.show_frame {
         let active = items
             .iter()
             .filter(|item| item.item.state == ItemState::Active)

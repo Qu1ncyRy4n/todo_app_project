@@ -14,6 +14,7 @@ use std::{fs, path::Path};
 #[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Theme {
+    pub focus: FocusTheme,
     pub layout: LayoutTheme,
     pub node: NodeTheme,
     pub tag: TagTheme,
@@ -75,6 +76,37 @@ impl Default for LayoutTheme {
             follow_parents: true,
             follow_dependencies: true,
             follow_blockers: false,
+        }
+    }
+}
+
+/// Controls the banded Focus Window arrangement.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct FocusTheme {
+    /// Distance from the active band to the completed and future bands.
+    pub band_gap: f32,
+    /// Distance between neighbors inside a band.
+    pub node_gap: f32,
+    /// Distance between wrapped rows of the same band.
+    pub row_gap: f32,
+    /// How many nodes a band holds before it wraps.
+    pub band_width: usize,
+    /// Whether the frame and its label are drawn around the active band.
+    pub show_frame: bool,
+    /// Whether tasks deferred or scheduled ahead of today join the future band.
+    pub future_includes_deferred: bool,
+}
+
+impl Default for FocusTheme {
+    fn default() -> Self {
+        Self {
+            band_gap: 235.0,
+            node_gap: 185.0,
+            row_gap: 95.0,
+            band_width: 4,
+            show_frame: true,
+            future_includes_deferred: true,
         }
     }
 }

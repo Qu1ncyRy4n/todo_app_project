@@ -142,9 +142,69 @@ pub fn layered_positions(
     positions
 }
 
+/// Spacing for a banded focus layout.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BandSpacing {
+    /// Distance between the completed, active, and future bands.
+    pub band_gap: f32,
+    /// Distance between neighbors inside one band.
+    pub node_gap: f32,
+    /// Distance between rows when a band wraps.
+    pub row_gap: f32,
+    /// How many nodes a band holds before it wraps to another row.
+    pub band_width: usize,
+}
+
+/// Arranges nodes into three bands: completed above, active centered, future below.
+///
+/// Each band is centered on the same vertical axis so the active band reads as the
+/// present moment, with finished work behind it and upcoming work ahead. A band
+/// wider than `band_width` wraps into extra rows that grow away from the center,
+/// so a long list of finished work never pushes into the active band.
+pub fn banded_positions(
+    completed: &[String],
+    active: &[String],
+    future: &[String],
+    spacing: BandSpacing,
+) -> HashMap<String, Vec2> {
+    let mut positions = HashMap::new();
+    place_band(completed, -1.0, spacing, &mut positions);
+    place_band(active, 0.0, spacing, &mut positions);
+    place_band(future, 1.0, spacing, &mut positions);
+    positions
+}
+
+/// Places one band of nodes, growing away from the center as it wraps.
+fn place_band(
+    ids: &[String],
+    direction: f32,
+    spacing: BandSpacing,
+    positions: &mut HashMap<String, Vec2>,
+) {
+    let width = spacing.band_width.max(1);
+    for (index, id) in ids.iter().enumerate() {
+        let column = index % width;
+        let row = index / width;
+        let row_count = ids.len().div_ceil(width);
+        let in_row = if row + 1 == row_count && !ids.len().is_multiple_of(width) {
+            ids.len() % width
+        } else {
+            width
+        };
+        let centered = f32::from(u16::try_from(column).unwrap_or(u16::MAX))
+            - f32::from(u16::try_from(in_row.saturating_sub(1)).unwrap_or(u16::MAX)) / 2.0;
+        let row_step = f32::from(u16::try_from(row).unwrap_or(u16::MAX)) * spacing.row_gap;
+        let band = direction * (spacing.band_gap + row_step);
+        positions.insert(id.clone(), Vec2::new(centered * spacing.node_gap, band));
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{FlowDirection, FlowSpacing, arrowhead_points, layered_positions, shaft_end};
+    use super::{
+        BandSpacing, FlowDirection, FlowSpacing, arrowhead_points, banded_positions,
+        layered_positions, shaft_end,
+    };
     use eframe::egui::pos2;
 
     fn spacing(direction: FlowDirection) -> FlowSpacing {
@@ -164,6 +224,53 @@ mod tests {
             .iter()
             .map(|(from, to)| ((*from).to_owned(), (*to).to_owned()))
             .collect()
+    }
+
+    fn band_spacing() -> BandSpacing {
+        BandSpacing {
+            band_gap: 200.0,
+            node_gap: 180.0,
+            row_gap: 90.0,
+            band_width: 4,
+        }
+    }
+
+    #[test]
+    fn completed_work_sits_above_active_work_and_future_below() {
+        let positions = banded_positions(
+            &ids(&["done"]),
+            &ids(&["now"]),
+            &ids(&["later"]),
+            band_spacing(),
+        );
+        assert!(matches!(
+            (positions.get("done"), positions.get("now"), positions.get("later")),
+            (Some(done), Some(now), Some(later))
+                if done.y < now.y && now.y < later.y
+        ));
+    }
+
+    #[test]
+    fn the_active_band_is_centered_on_the_axis() {
+        let positions = banded_positions(&[], &ids(&["a", "b"]), &[], band_spacing());
+        let sum = positions.values().map(|position| position.x).sum::<f32>();
+        assert!(sum.abs() < 0.001);
+    }
+
+    #[test]
+    fn a_wide_band_wraps_away_from_the_center() {
+        let wide = ids(&["a", "b", "c", "d", "e"]);
+        let positions = banded_positions(&wide, &[], &[], band_spacing());
+        assert!(matches!(
+            (positions.get("a"), positions.get("e")),
+            (Some(first), Some(fifth)) if fifth.y < first.y
+        ));
+    }
+
+    #[test]
+    fn an_empty_band_places_nothing() {
+        let positions = banded_positions(&[], &[], &[], band_spacing());
+        assert!(positions.is_empty());
     }
 
     #[test]
