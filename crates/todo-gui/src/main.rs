@@ -950,6 +950,9 @@ impl TodoGui {
         }
         self.save_layout();
         if record_undo {
+            // Separation invoked on its own moves nodes off the day axis, so the
+            // ruler retires with it; running as a layout's follow-up leaves it be.
+            self.timeline_origin = None;
             self.message =
                 Some("Tag groups separated. Undo layout restores the previous one.".to_owned());
         }
@@ -998,6 +1001,7 @@ impl TodoGui {
         if self.theme.layout.separate_after_layout {
             self.separate_tag_groups(rect, false);
         }
+        self.timeline_origin = None;
         self.message =
             Some("Focus Window arranged: done above, active centered, future below.".to_owned());
     }
@@ -1051,6 +1055,9 @@ impl TodoGui {
         if self.theme.layout.separate_after_layout {
             self.separate_tag_groups(rect, false);
         }
+        // The ruler belongs to the timeline arrangement alone, so another layout
+        // taking over retires it rather than leaving a scale nothing follows.
+        self.timeline_origin = None;
         self.message = Some("Layout normalized. Undo layout restores the previous one.".to_owned());
     }
 
@@ -1059,6 +1066,7 @@ impl TodoGui {
         match self.layout_undo.take() {
             Some(offsets) => {
                 self.node_offsets = offsets;
+                self.timeline_origin = None;
                 self.save_layout();
                 self.message = Some("Previous layout restored.".to_owned());
             }
