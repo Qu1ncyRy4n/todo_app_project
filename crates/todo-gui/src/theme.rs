@@ -300,6 +300,25 @@ impl EdgeTheme {
     }
 }
 
+/// Whether a task carries the tags of the tasks above it.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TagInheritance {
+    /// A task carries only what was assigned to it.
+    Off,
+    /// A task carries its ancestors' tags, derived when read and never stored.
+    ///
+    /// Untagging a parent untags the subtree at once, and a task's own tags stay
+    /// distinguishable from what it inherits.
+    #[default]
+    Implicit,
+    /// Ancestors' tags are offered for assignment, and only applied when asked.
+    ///
+    /// The tags then belong to the task and outlive its parent, which is sometimes
+    /// what is wanted and always a decision rather than a side effect.
+    Explicit,
+}
+
 /// How tag paths are assigned hues.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -649,6 +668,8 @@ pub struct TagTheme {
     pub region_smoothing: u8,
     /// How tag hues are assigned.
     pub coloring: TagColoring,
+    /// Whether a task carries the tags of the tasks above it.
+    pub inherit: TagInheritance,
     /// How far apart two tagged tasks can sit and still share one region.
     ///
     /// Without a limit, one tag draws a single region spanning everything it
@@ -680,6 +701,7 @@ impl Default for TagTheme {
             region_padding: 24.0,
             region_smoothing: 2,
             coloring: TagColoring::default(),
+            inherit: TagInheritance::default(),
             cluster_distance: 420.0,
             min_region_members: 2,
             label_full_path: false,

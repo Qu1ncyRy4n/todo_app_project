@@ -11,6 +11,7 @@ use geometry::{BandSpacing, FlowSpacing, OverlapSpacing, SeparationSpacing, Time
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fs, path::PathBuf};
 use tags::{TagFilter, TagFilterState};
+use theme::TagInheritance;
 use theme::{
     InspectorTheme, NodeShape, ParentRegionStyle, RegionShape, TagColoring, TagPalette, Theme,
 };
@@ -383,6 +384,66 @@ impl TodoGui {
         }
     }
 
+    /// Returns the tags a task carries in its own right.
+    fn own_tags(item: &StoredItem) -> Vec<String> {
+        item.namespaces
+            .iter()
+            .map(|tag| tag.as_str().to_owned())
+            .collect()
+    }
+
+    /// Returns the tags a task inherits from the tasks above it.
+    ///
+    /// Walks the whole ancestor chain, so a tag set at the top of a tree reaches
+    /// every task beneath it. Returns nothing when inheritance is off, and in
+    /// explicit mode the tags are offered rather than applied, so the caller shows
+    /// them as available instead of carried.
+    fn inherited_tags(&self, item: &StoredItem) -> Vec<String> {
+        if self.theme.tag.inherit == TagInheritance::Off {
+            return Vec::new();
+        }
+        let mut ancestors = Vec::new();
+        let mut current = item.item.parent_id;
+        let mut guard = 0;
+        while let Some(parent) = current {
+            let Some(found) = self
+                .items
+                .iter()
+                .find(|candidate| candidate.item.id == parent)
+            else {
+                break;
+            };
+            ancestors.extend(Self::own_tags(found));
+            guard += 1;
+            if guard > self.items.len() {
+                // The ledger rejects parent cycles; a stale view should still stop.
+                break;
+            }
+            current = found.item.parent_id;
+        }
+        tags::inherited_tags(&Self::own_tags(item), &ancestors)
+    }
+
+    /// Returns every tag a task counts as carrying, for filtering and coloring.
+    ///
+    /// Under implicit inheritance this includes what it inherits; under explicit
+    /// inheritance it does not, because there the tags are only on offer.
+    fn effective_tags(&self, item: &StoredItem) -> Vec<String> {
+        let mut effective = Self::own_tags(item);
+        if self.theme.tag.inherit == TagInheritance::Implicit {
+            effective.extend(self.inherited_tags(item));
+        }
+        effective
+    }
+
+    /// Returns the effective tags of every visible task, keyed by id.
+    fn effective_tag_index(&self, items: &[StoredItem]) -> HashMap<String, Vec<String>> {
+        items
+            .iter()
+            .map(|item| (item.item.id.to_string(), self.effective_tags(item)))
+            .collect()
+    }
+
     /// Names another task the way a person would: its title, then a spoken id.
     ///
     /// A raw UUID says nothing about which task it is; the title does, and the
@@ -727,6 +788,26 @@ impl TodoGui {
         }
         if item.namespaces.is_empty() {
             ui.weak("No tags");
+        }
+        // Inherited tags are shown apart from assigned ones, so it is always clear
+        // which tags the task holds in its own right.
+        let inherited = self.inherited_tags(&item.clone());
+        if !inherited.is_empty() {
+            let explicit = self.theme.tag.inherit == TagInheritance::Explicit;
+            ui.weak(if explicit {
+                "From parent tasks, not yet assigned:"
+            } else {
+                "From parent tasks:"
+            });
+            for tag in inherited {
+                ui.horizontal(|ui| {
+                    ui.weak(format!("({tag})"));
+                    if explicit && ui.small_button("Assign").clicked() {
+                        self.tag_draft = tag.clone();
+                        self.add_tag();
+                    }
+                });
+            }
         }
         ui.horizontal(|ui| {
             ui.text_edit_singleline(&mut self.tag_draft);
@@ -1261,7 +1342,7 @@ impl TodoGui {
                     && (!self.focus_only || item.item.state == ItemState::Active)
                     && self
                         .tag_states
-                        .accepts(item.namespaces.iter().map(NamespacePath::as_str))
+                        .accepts(self.effective_tags(item).iter().map(String::as_str))
             })
             .cloned()
             .collect()
@@ -2224,11 +2305,10 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
     let items = app.visible_items();
     // The wheel divides hues between the tags actually on screen, so the palette is
     // rebuilt whenever the visible set changes.
+    let effective = app.effective_tag_index(&items);
     let palette = match app.theme.tag.coloring {
         TagColoring::Wheel => TagPalette::build(
-            items
-                .iter()
-                .flat_map(|item| item.namespaces.iter().map(NamespacePath::as_str)),
+            effective.values().flatten().map(String::as_str),
             &app.theme.tag,
         ),
         TagColoring::GroupHash => TagPalette::default(),
@@ -2262,6 +2342,7 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
             app.graph_zoom,
             &app.theme,
             &palette,
+            &effective,
         );
     }
     if app.show_tag_constellation {
@@ -2272,6 +2353,7 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
             app.graph_zoom,
             &app.theme,
             &palette,
+            &effective,
         );
     }
     if app.show_focus_window && app.theme.focus.show_frame {
@@ -2426,7 +2508,7 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
             }
         };
         let fill = dim(fill);
-        let accent = node_tag_color(item, &app.theme, &palette).map(dim);
+        let accent = node_tag_color(item, &app.theme, &palette, &effective).map(dim);
         let outline = Stroke::new(
             if selected { 3.0 } else { 1.0 },
             if selected {
@@ -2750,6 +2832,7 @@ fn draw_parent_regions(
     zoom: f32,
     theme: &Theme,
     palette: &TagPalette,
+    effective: &HashMap<String, Vec<String>>,
 ) {
     let children = child_index(items);
     let half_size = {
@@ -2770,7 +2853,8 @@ fn draw_parent_regions(
         if points.len() < 2 {
             continue;
         }
-        let color = node_tag_color(item, theme, palette).unwrap_or(Color32::from_gray(150));
+        let color =
+            node_tag_color(item, theme, palette, effective).unwrap_or(Color32::from_gray(150));
         let depth = ancestor_depth(item, items);
         regions.push((subtree.len(), depth, points, color, item.item.title.clone()));
     }
@@ -2922,14 +3006,18 @@ fn draw_tag_constellation(
     zoom: f32,
     theme: &Theme,
     palette: &TagPalette,
+    effective: &HashMap<String, Vec<String>>,
 ) {
     let mut groups: HashMap<String, Vec<Pos2>> = HashMap::new();
     for item in items {
-        let Some(position) = positions.get(&item.item.id.to_string()).copied() else {
+        let id = item.item.id.to_string();
+        let Some(position) = positions.get(&id).copied() else {
             continue;
         };
-        for tag in &item.namespaces {
-            let segments = tag.as_str().split('/').collect::<Vec<_>>();
+        let empty = Vec::new();
+        let carried = effective.get(&id).unwrap_or(&empty);
+        for tag in carried {
+            let segments = tag.split('/').collect::<Vec<_>>();
             for depth in 2..=segments.len() {
                 if let Some(prefix) = segments.get(..depth) {
                     groups.entry(prefix.join("/")).or_default().push(position);
@@ -3077,12 +3165,21 @@ fn bounds_for_points(points: &[Pos2], half_size: Vec2) -> Option<Rect> {
 /// The accent never comes from a region the node merely sits inside, so an item
 /// tagged only `work` keeps the plain `work` color while drawn within a
 /// `work/cdint` region. Ties break alphabetically to stay deterministic.
-fn node_tag_color(item: &StoredItem, theme: &Theme, palette: &TagPalette) -> Option<Color32> {
-    let mut tags = item
-        .namespaces
-        .iter()
-        .map(NamespacePath::as_str)
-        .collect::<Vec<_>>();
+fn node_tag_color(
+    item: &StoredItem,
+    theme: &Theme,
+    palette: &TagPalette,
+    effective: &HashMap<String, Vec<String>>,
+) -> Option<Color32> {
+    let carried = effective.get(&item.item.id.to_string());
+    let mut tags = match carried {
+        Some(tags) => tags.iter().map(String::as_str).collect::<Vec<_>>(),
+        None => item
+            .namespaces
+            .iter()
+            .map(NamespacePath::as_str)
+            .collect::<Vec<_>>(),
+    };
     tags.sort_unstable();
     let deepest = tags
         .into_iter()

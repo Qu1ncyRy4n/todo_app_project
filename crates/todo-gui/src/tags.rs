@@ -37,6 +37,26 @@ impl TagFilterState {
     }
 }
 
+/// Returns the ancestor tags a task should carry that it does not already.
+///
+/// A tag is dropped when the task holds it outright, and when the task holds
+/// something beneath it: a task tagged `work/cdint` is already within `work`, so
+/// inheriting `work` as well would say nothing and clutter the card. Results come
+/// back sorted and deduplicated, so display is stable.
+pub fn inherited_tags(own: &[String], ancestors: &[String]) -> Vec<String> {
+    let mut inherited = ancestors
+        .iter()
+        .filter(|candidate| {
+            !own.iter()
+                .any(|held| held == *candidate || held.starts_with(&format!("{candidate}/")))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    inherited.sort();
+    inherited.dedup();
+    inherited
+}
+
 /// One row of the tag tree, already positioned in the hierarchy.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TagRow {
@@ -152,7 +172,41 @@ pub fn tag_rows<'a>(paths: impl IntoIterator<Item = &'a str>) -> Vec<TagRow> {
 
 #[cfg(test)]
 mod tests {
-    use super::{TagFilter, TagFilterState, tag_rows};
+    use super::{TagFilter, TagFilterState, inherited_tags, tag_rows};
+
+    fn owned(paths: &[&str]) -> Vec<String> {
+        paths.iter().map(|path| (*path).to_owned()).collect()
+    }
+
+    #[test]
+    fn an_ancestor_tag_is_inherited() {
+        let inherited = inherited_tags(&owned(&["tag/home"]), &owned(&["tag/work"]));
+        assert_eq!(inherited, owned(&["tag/work"]));
+    }
+
+    #[test]
+    fn a_tag_already_held_is_not_inherited_twice() {
+        let inherited = inherited_tags(&owned(&["tag/work"]), &owned(&["tag/work"]));
+        assert!(inherited.is_empty());
+    }
+
+    #[test]
+    fn a_deeper_tag_makes_its_ancestor_redundant() {
+        let inherited = inherited_tags(&owned(&["tag/work/cdint"]), &owned(&["tag/work"]));
+        assert!(inherited.is_empty());
+    }
+
+    #[test]
+    fn a_sibling_tag_is_still_inherited() {
+        let inherited = inherited_tags(&owned(&["tag/work/cdint"]), &owned(&["tag/home"]));
+        assert_eq!(inherited, owned(&["tag/home"]));
+    }
+
+    #[test]
+    fn inherited_tags_come_back_sorted_and_deduplicated() {
+        let inherited = inherited_tags(&[], &owned(&["tag/work", "tag/home", "tag/work"]));
+        assert_eq!(inherited, owned(&["tag/home", "tag/work"]));
+    }
 
     #[test]
     fn an_empty_filter_accepts_everything() {
