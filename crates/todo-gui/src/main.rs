@@ -60,10 +60,12 @@ fn main() -> Result<()> {
     .context("run native Todo Ledger window")
 }
 
-/// What the graph is grouped into columns by.
+/// What the graph is grouped by at one level.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum GroupBy {
+    /// This level is unused, which is how grouping is narrowed to fewer levels.
     #[default]
+    None,
     Tag,
     Sequence,
     Time,
@@ -73,12 +75,13 @@ enum GroupBy {
 
 impl GroupBy {
     /// Returns every grouping, for the sidebar control.
-    fn all() -> [Self; 5] {
+    fn all() -> [Self; 6] {
         [
-            Self::Tag,
+            Self::None,
             Self::Sequence,
-            Self::Time,
             Self::Priority,
+            Self::Tag,
+            Self::Time,
             Self::State,
         ]
     }
@@ -86,6 +89,7 @@ impl GroupBy {
     /// Returns the label shown for this grouping.
     fn label(self) -> &'static str {
         match self {
+            Self::None => "—",
             Self::Tag => "Tag",
             Self::Sequence => "Sequence",
             Self::Time => "Time",
@@ -98,22 +102,29 @@ impl GroupBy {
 /// What members of a group are ordered by.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum SortBy {
+    /// Most urgent first, which is the order work is usually scanned in.
     #[default]
-    Title,
     Priority,
+    Title,
     Due,
     Weight,
     State,
+    /// Position in the selected focus sequence, then everything else.
+    Sequence,
+    /// Oldest first; identifiers are time-ordered, so this is capture order.
+    Created,
 }
 
 impl SortBy {
-    fn all() -> [Self; 5] {
+    fn all() -> [Self; 7] {
         [
-            Self::Title,
             Self::Priority,
+            Self::Sequence,
             Self::Due,
             Self::Weight,
+            Self::Title,
             Self::State,
+            Self::Created,
         ]
     }
 
@@ -124,6 +135,8 @@ impl SortBy {
             Self::Due => "Due date",
             Self::Weight => "Weight",
             Self::State => "State",
+            Self::Sequence => "Sequence position",
+            Self::Created => "Capture order",
         }
     }
 }
@@ -195,7 +208,7 @@ struct TodoGui {
     relax_overlaps: bool,
     focus_mode: bool,
     focus_only: bool,
-    group_by: GroupBy,
+    group_by: [GroupBy; 3],
     sort_by: SortBy,
     group_requested: bool,
     group_labels: Vec<(String, Pos2)>,
@@ -282,7 +295,8 @@ impl TodoGui {
             relax_overlaps: relax_after_layout,
             focus_mode: false,
             focus_only: false,
-            group_by: GroupBy::default(),
+            // Sequence, then priority, then tag: the order asked for most often.
+            group_by: [GroupBy::Sequence, GroupBy::Priority, GroupBy::Tag],
             sort_by: SortBy::default(),
             group_requested: false,
             group_labels: Vec::new(),
@@ -394,6 +408,9 @@ impl TodoGui {
             egui::CollapsingHeader::new("View")
                 .default_open(true)
                 .show(ui, |ui| self.view_settings(ui));
+            egui::CollapsingHeader::new("Arrangements")
+                .default_open(true)
+                .show(ui, |ui| self.arrangement_buttons(ui));
             egui::CollapsingHeader::new("Forces")
                 .default_open(false)
                 .show(ui, |ui| self.force_settings(ui));
@@ -425,6 +442,37 @@ impl TodoGui {
             egui::CollapsingHeader::new("Tags")
                 .default_open(true)
                 .show(ui, |ui| self.draw_tag_filters(ui));
+        });
+    }
+
+    /// The commands that rearrange the graph, beside the settings they obey.
+    fn arrangement_buttons(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Normalize").clicked() {
+                // The graph rect is only known while drawing, so the request is
+                // deferred one frame rather than guessed at here.
+                self.normalize_requested = true;
+            }
+            if ui.button("Focus layout").clicked() {
+                self.focus_layout_requested = true;
+            }
+            if ui.button("Group").clicked() {
+                self.group_requested = true;
+            }
+            if ui.button("Timeline").clicked() {
+                self.timeline_requested = true;
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Unstack").clicked() {
+                self.relax_requested = true;
+            }
+            if ui.button("Separate tags").clicked() {
+                self.separate_requested = true;
+            }
+            if ui.button("Undo layout").clicked() {
+                self.undo_layout();
+            }
         });
     }
 
@@ -469,15 +517,21 @@ impl TodoGui {
             );
         });
         ui.separator();
-        ui.label("Group by");
-        egui::ComboBox::from_id_salt("group-by")
-            .selected_text(self.group_by.label())
-            .show_ui(ui, |ui| {
-                for grouping in GroupBy::all() {
-                    ui.selectable_value(&mut self.group_by, grouping, grouping.label());
-                }
-            });
-        ui.label("Sort by");
+        ui.label("Group by, in order");
+        for level in 0..3 {
+            let Some(slot) = self.group_by.get_mut(level) else {
+                continue;
+            };
+            egui::ComboBox::from_id_salt(("group-by", level))
+                .selected_text(slot.label())
+                .show_ui(ui, |ui| {
+                    for grouping in GroupBy::all() {
+                        ui.selectable_value(slot, grouping, grouping.label());
+                    }
+                });
+        }
+        ui.weak("First makes the columns; the rest divide them into blocks.");
+        ui.label("Order within a group");
         egui::ComboBox::from_id_salt("sort-by")
             .selected_text(self.sort_by.label())
             .show_ui(ui, |ui| {
@@ -485,6 +539,7 @@ impl TodoGui {
                     ui.selectable_value(&mut self.sort_by, sort, sort.label());
                 }
             });
+        ui.weak("The order tasks are placed in on the graph.");
         ui.separator();
         ui.checkbox(&mut self.theme.layout.animate, "Glide to new positions");
         ui.checkbox(&mut self.theme.node.wrap_titles, "Wrap long titles");
@@ -1391,6 +1446,29 @@ impl TodoGui {
                 _ => future.push(id),
             }
         }
+        // Each band is placed in the chosen order, so the sort reaches the Focus
+        // Window and not only the grouped view.
+        let weights = self.weight_index(&items);
+        let sequence_rank = self.sequence_ranks();
+        let sort = self.sort_by;
+        let order = |band: &mut Vec<String>| {
+            band.sort_by(|left, right| {
+                let find = |id: &String| {
+                    items
+                        .iter()
+                        .find(|candidate| candidate.item.id.to_string() == *id)
+                };
+                match (find(left), find(right)) {
+                    (Some(first), Some(second)) => {
+                        sort_items(sort, first, second, &weights, &sequence_rank)
+                    }
+                    _ => left.cmp(right),
+                }
+            });
+        };
+        order(&mut completed);
+        order(&mut active);
+        order(&mut future);
         let spacing = BandSpacing {
             // Exiled work sits a multiple of the band gap away, which puts it
             // outside the frame the active band is zoomed to.
@@ -1525,47 +1603,87 @@ impl TodoGui {
             Some("Hierarchy arranged. Undo layout restores the previous one.".to_owned());
     }
 
-    /// Arranges the graph into labeled columns by the chosen grouping.
+    /// Arranges the graph into labeled columns by the chosen groupings.
     ///
-    /// Grouping answers a different question from the hierarchy: not what work
-    /// belongs to what, but what work shares a property. Tasks holding none of the
-    /// property land in their own column rather than being dropped, which is how
-    /// untagged work becomes findable instead of merely absent.
+    /// The first grouping makes the columns; the second and third divide each
+    /// column into blocks separated by space, so three levels read on one canvas
+    /// without a column per combination. Within the deepest block, the sort order
+    /// decides the order tasks appear in.
+    ///
+    /// Tasks holding none of a grouped property land in their own column or block
+    /// rather than being dropped, which is how untagged or unsequenced work becomes
+    /// findable instead of merely absent.
     fn group_layout(&mut self, rect: Rect) {
         let items = self.visible_items();
         if items.is_empty() {
             self.message = Some("Nothing to group.".to_owned());
             return;
         }
+        let weights = self.weight_index(&items);
+        let levels = self
+            .group_by
+            .iter()
+            .copied()
+            .filter(|level| *level != GroupBy::None)
+            .collect::<Vec<_>>();
+        let sort = self.sort_by;
+        let sequence_rank = self.sequence_ranks();
         let mut columns: std::collections::BTreeMap<String, Vec<&StoredItem>> =
             std::collections::BTreeMap::new();
         for item in &items {
-            columns.entry(self.group_key(item)).or_default().push(item);
+            let key = levels.first().map_or_else(
+                || "all tasks".to_owned(),
+                |level| self.group_key(item, *level),
+            );
+            columns.entry(key).or_default().push(item);
         }
-        let sort = self.sort_by;
-        let weights = {
-            let children = child_index(&items);
-            items
-                .iter()
-                .map(|item| {
-                    (
-                        item.item.id.to_string(),
-                        item_weight(item, &children, &self.theme),
-                    )
-                })
-                .collect::<HashMap<_, _>>()
-        };
-        let ordered = columns
-            .into_iter()
-            .map(|(name, mut members)| {
-                members.sort_by(|left, right| sort_items(sort, left, right, &weights));
-                let ids = members
-                    .into_iter()
-                    .map(|item| item.item.id.to_string())
+        let mut ordered = Vec::new();
+        let mut labels = Vec::new();
+        for (column_index, (name, mut members)) in columns.into_iter().enumerate() {
+            // Sorting by the deeper group keys first keeps each block together;
+            // the chosen sort then orders tasks inside a block.
+            members.sort_by(|left, right| {
+                for level in levels.iter().skip(1) {
+                    let ordering = self
+                        .group_key(left, *level)
+                        .cmp(&self.group_key(right, *level));
+                    if ordering != std::cmp::Ordering::Equal {
+                        return ordering;
+                    }
+                }
+                sort_items(sort, left, right, &weights, &sequence_rank)
+            });
+            let mut rows = Vec::new();
+            let mut previous: Option<Vec<String>> = None;
+            for item in members {
+                let keys = levels
+                    .iter()
+                    .skip(1)
+                    .map(|level| self.group_key(item, *level))
                     .collect::<Vec<_>>();
-                (name, ids)
-            })
-            .collect::<Vec<_>>();
+                // A change at a shallower level leaves more space than a change at
+                // a deeper one, so the nesting is visible in the spacing itself.
+                let break_before = match &previous {
+                    None => 0,
+                    Some(before) => keys
+                        .iter()
+                        .zip(before.iter())
+                        .position(|(now, then)| now != then)
+                        .map_or(0, |depth| if depth == 0 { 2 } else { 1 }),
+                };
+                if break_before > 0
+                    && let Some(sub) = keys.first()
+                {
+                    labels.push((sub.clone(), column_index, rows.len(), break_before));
+                }
+                rows.push(geometry::GroupMember {
+                    id: item.item.id.to_string(),
+                    break_before,
+                });
+                previous = Some(keys);
+            }
+            ordered.push((name, rows));
+        }
         let spacing = GroupSpacing {
             column_gap: self.theme.layout.group_column_gap,
             row_gap: self.theme.layout.group_row_gap,
@@ -1573,8 +1691,8 @@ impl TodoGui {
         let arranged = geometry::grouped_positions(&ordered, spacing);
         let origin = Pos2::new(rect.left() + 220.0, rect.top() + 190.0);
         self.apply_arrangement(rect, &items, &arranged, origin);
-        // Column headings are remembered in graph space, so they follow the pan and
-        // zoom exactly as the columns they name do.
+        // Headings are remembered in graph space, so they follow the pan and zoom
+        // exactly as the columns they name do.
         self.group_labels = ordered
             .iter()
             .enumerate()
@@ -1583,19 +1701,69 @@ impl TodoGui {
                 (name.clone(), origin + Vec2::new(x, -70.0))
             })
             .collect();
+        for (name, column, row, _) in labels {
+            let x = f32::from(u16::try_from(column).unwrap_or(u16::MAX)) * spacing.column_gap;
+            let y = f32::from(u16::try_from(row).unwrap_or(u16::MAX)) * spacing.row_gap;
+            self.group_labels
+                .push((name, origin + Vec2::new(x, y - spacing.row_gap / 2.0)));
+        }
         self.relax_if_enabled(rect);
         self.timeline_origin = None;
         self.focus_mode = false;
         self.message = Some(format!(
-            "Grouped by {}, sorted by {}.",
-            self.group_by.label().to_lowercase(),
+            "Grouped by {}, ordered by {}.",
+            self.grouping_description(),
             self.sort_by.label().to_lowercase()
         ));
     }
 
+    /// Returns the groupings in force, for the message after arranging.
+    fn grouping_description(&self) -> String {
+        let named = self
+            .group_by
+            .iter()
+            .filter(|level| **level != GroupBy::None)
+            .map(|level| level.label().to_lowercase())
+            .collect::<Vec<_>>();
+        if named.is_empty() {
+            "nothing".to_owned()
+        } else {
+            named.join(", then ")
+        }
+    }
+
+    /// Returns each task's position in the focus sequence it belongs to.
+    ///
+    /// Tasks outside every sequence sort after those inside one, so ordering by
+    /// sequence puts the planned run first and the rest behind it.
+    fn sequence_ranks(&self) -> HashMap<String, usize> {
+        let mut ranks = HashMap::new();
+        for sequence in &self.focus_sequences {
+            for (position, member) in sequence.items.iter().enumerate() {
+                ranks.entry(member.to_string()).or_insert(position);
+            }
+        }
+        ranks
+    }
+
+    /// Returns the computed weight of each task, keyed by id.
+    fn weight_index(&self, items: &[StoredItem]) -> HashMap<String, f32> {
+        let children = child_index(items);
+        items
+            .iter()
+            .map(|item| {
+                (
+                    item.item.id.to_string(),
+                    item_weight(item, &children, &self.theme),
+                )
+            })
+            .collect()
+    }
+
     /// Returns the column a task belongs in under the current grouping.
-    fn group_key(&self, item: &StoredItem) -> String {
-        match self.group_by {
+    fn group_key(&self, item: &StoredItem, level: GroupBy) -> String {
+        match level {
+            GroupBy::None => String::new(),
             GroupBy::Tag => {
                 let mut tags = self.effective_tags(item);
                 tags.sort();
@@ -2729,30 +2897,6 @@ impl eframe::App for TodoGui {
                 if ui.button("Reset view").clicked() {
                     self.graph_zoom = 1.0;
                     self.graph_pan = Vec2::ZERO;
-                }
-                ui.separator();
-                if ui.button("Normalize").clicked() {
-                    // The graph rect is only known while drawing, so the request is
-                    // deferred one frame rather than guessed at here.
-                    self.normalize_requested = true;
-                }
-                if ui.button("Focus layout").clicked() {
-                    self.focus_layout_requested = true;
-                }
-                if ui.button("Group").clicked() {
-                    self.group_requested = true;
-                }
-                if ui.button("Timeline").clicked() {
-                    self.timeline_requested = true;
-                }
-                if ui.button("Unstack").clicked() {
-                    self.relax_requested = true;
-                }
-                if ui.button("Separate tags").clicked() {
-                    self.separate_requested = true;
-                }
-                if ui.button("Undo layout").clicked() {
-                    self.undo_layout();
                 }
                 ui.separator();
                 if ui.button("Reload theme").clicked() {
@@ -3989,6 +4133,7 @@ fn sort_items(
     left: &StoredItem,
     right: &StoredItem,
     weights: &HashMap<String, f32>,
+    sequence_rank: &HashMap<String, usize>,
 ) -> std::cmp::Ordering {
     let title = || left.item.title.cmp(&right.item.title);
     match sort {
@@ -4022,6 +4167,18 @@ fn sort_items(
             .to_string()
             .cmp(&right.item.state.to_string())
             .then_with(title),
+        SortBy::Sequence => {
+            let rank = |item: &StoredItem| {
+                sequence_rank
+                    .get(&item.item.id.to_string())
+                    .copied()
+                    // Work outside every sequence follows the planned run.
+                    .unwrap_or(usize::MAX)
+            };
+            rank(left).cmp(&rank(right)).then_with(title)
+        }
+        // Identifiers are time-ordered, so comparing them is capture order.
+        SortBy::Created => left.item.id.to_string().cmp(&right.item.id.to_string()),
     }
 }
 

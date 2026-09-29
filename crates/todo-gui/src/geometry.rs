@@ -814,21 +814,35 @@ pub struct GroupSpacing {
     pub row_gap: f32,
 }
 
+/// One member of a column, with the space left above it.
+///
+/// The gap is what makes nested grouping readable: members of the same subgroup
+/// sit together, and a wider gap marks where one subgroup ends and the next
+/// begins, without needing a separate column for every level.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GroupMember {
+    pub id: String,
+    /// Extra rows of space before this member, beyond the usual row gap.
+    pub break_before: u8,
+}
+
 /// Arranges named groups into columns, each member stacked beneath the last.
 ///
 /// Columns keep the order given, and members keep the order within their group, so
 /// the caller decides both what leads and how a column reads top to bottom.
 /// Returns positions relative to the first column's first member.
 pub fn grouped_positions(
-    groups: &[(String, Vec<String>)],
+    groups: &[(String, Vec<GroupMember>)],
     spacing: GroupSpacing,
 ) -> HashMap<String, Vec2> {
     let mut positions = HashMap::new();
     for (column, (_, members)) in groups.iter().enumerate() {
         let x = f32::from(u16::try_from(column).unwrap_or(u16::MAX)) * spacing.column_gap;
-        for (row, id) in members.iter().enumerate() {
-            let y = f32::from(u16::try_from(row).unwrap_or(u16::MAX)) * spacing.row_gap;
-            positions.insert(id.clone(), Vec2::new(x, y));
+        let mut row = 0.0_f32;
+        for member in members {
+            row += f32::from(member.break_before) * spacing.row_gap / 2.0;
+            positions.insert(member.id.clone(), Vec2::new(x, row));
+            row += spacing.row_gap;
         }
     }
     positions
@@ -881,11 +895,11 @@ pub fn edge_between(from: Rect, to: Rect, gap: f32) -> (Pos2, Pos2) {
 #[cfg(test)]
 mod tests {
     use super::{
-        BandSpacing, FlowDirection, FlowSpacing, GroupSpacing, OverlapSpacing, SeparationSpacing,
-        TimelineAxis, TimelineScale, TimelineSpacing, TreeAxis, TreeSpacing, arrowhead_points,
-        banded_positions, boundary_point, centroid, cluster_points, convex_hull, duration_length,
-        ease_toward, edge_between, expand_path, fit_view, grouped_positions, is_settled,
-        layered_positions, relax_overlaps, ruler_ticks, separate_groups, shaft_end,
+        BandSpacing, FlowDirection, FlowSpacing, GroupMember, GroupSpacing, OverlapSpacing,
+        SeparationSpacing, TimelineAxis, TimelineScale, TimelineSpacing, TreeAxis, TreeSpacing,
+        arrowhead_points, banded_positions, boundary_point, centroid, cluster_points, convex_hull,
+        duration_length, ease_toward, edge_between, expand_path, fit_view, grouped_positions,
+        is_settled, layered_positions, relax_overlaps, ruler_ticks, separate_groups, shaft_end,
         smooth_closed_path, timeline_positions, tree_positions,
     };
     use eframe::egui::{Rect, Vec2, pos2};
@@ -1427,13 +1441,19 @@ mod tests {
         }
     }
 
-    fn groups(pairs: &[(&str, &[&str])]) -> Vec<(String, Vec<String>)> {
+    fn groups(pairs: &[(&str, &[&str])]) -> Vec<(String, Vec<GroupMember>)> {
         pairs
             .iter()
             .map(|(name, members)| {
                 (
                     (*name).to_owned(),
-                    members.iter().map(|id| (*id).to_owned()).collect(),
+                    members
+                        .iter()
+                        .map(|id| GroupMember {
+                            id: (*id).to_owned(),
+                            break_before: 0,
+                        })
+                        .collect(),
                 )
             })
             .collect()
@@ -1468,6 +1488,28 @@ mod tests {
         assert!(matches!(
             (positions.get("a"), positions.get("b")),
             (Some(first), Some(second)) if first.x < second.x
+        ));
+    }
+
+    #[test]
+    fn a_break_leaves_room_between_subgroups() {
+        let column = vec![(
+            "work".to_owned(),
+            vec![
+                GroupMember {
+                    id: "a".to_owned(),
+                    break_before: 0,
+                },
+                GroupMember {
+                    id: "b".to_owned(),
+                    break_before: 2,
+                },
+            ],
+        )];
+        let positions = grouped_positions(&column, group_spacing());
+        assert!(matches!(
+            (positions.get("a"), positions.get("b")),
+            (Some(first), Some(second)) if second.y - first.y > 90.0
         ));
     }
 
