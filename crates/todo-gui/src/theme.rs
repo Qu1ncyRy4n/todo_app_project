@@ -81,6 +81,10 @@ pub struct LayoutTheme {
     pub separation_radius: f32,
     /// Whether normalize and focus layouts run the separation pass afterwards.
     pub separate_after_layout: bool,
+    /// Whether nodes glide to new positions instead of jumping there.
+    pub animate: bool,
+    /// Time a node takes to cover a move, in milliseconds.
+    pub transition_ms: f32,
     /// Whether layouts finish by pushing overlapping nodes apart.
     pub relax_overlaps_after_layout: bool,
     /// Clear space left between two node boxes when overlaps are relaxed.
@@ -107,6 +111,8 @@ impl Default for LayoutTheme {
             separation_repulsion: 14.0,
             separation_radius: 420.0,
             separate_after_layout: true,
+            animate: true,
+            transition_ms: 420.0,
             relax_overlaps_after_layout: true,
             overlap_gap: 26.0,
             overlap_iterations: 60,

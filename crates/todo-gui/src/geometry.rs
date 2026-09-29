@@ -581,13 +581,36 @@ pub fn fit_view(bounds: Rect, viewport: Rect, zoom_range: (f32, f32), margin: f3
     (zoom, pan)
 }
 
+/// Moves `current` toward `target` by one frame's worth of easing.
+///
+/// Exponential smoothing rather than a fixed-length tween: the step depends on the
+/// elapsed time, so motion looks the same at any frame rate and a target that moves
+/// mid-flight is followed without restarting. `duration` is the time to cover most
+/// of the remaining distance; zero or less snaps, which is how animation is turned
+/// off without a second code path.
+pub fn ease_toward(current: Vec2, target: Vec2, elapsed: f32, duration: f32) -> Vec2 {
+    if duration <= 0.0 || elapsed <= 0.0 {
+        return target;
+    }
+    // Three time constants covers about 95% of the distance, which reads as
+    // arrived while leaving the motion smooth.
+    let tau = duration / 3.0;
+    let alpha = 1.0 - (-elapsed / tau).exp();
+    current + (target - current) * alpha.clamp(0.0, 1.0)
+}
+
+/// Returns whether two positions are close enough to treat as settled.
+pub fn is_settled(current: Vec2, target: Vec2, tolerance: f32) -> bool {
+    (target - current).length() <= tolerance
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         BandSpacing, FlowDirection, FlowSpacing, OverlapSpacing, SeparationSpacing,
         TimelineSpacing, arrowhead_points, banded_positions, centroid, cluster_points, convex_hull,
-        expand_path, fit_view, layered_positions, relax_overlaps, separate_groups, shaft_end,
-        smooth_closed_path, timeline_positions,
+        ease_toward, expand_path, fit_view, is_settled, layered_positions, relax_overlaps,
+        separate_groups, shaft_end, smooth_closed_path, timeline_positions,
     };
     use eframe::egui::{Rect, Vec2, pos2};
 
@@ -705,6 +728,40 @@ mod tests {
 
     fn node_size() -> Vec2 {
         Vec2::new(150.0, 58.0)
+    }
+
+    #[test]
+    fn easing_moves_toward_the_target_without_overshooting() {
+        let stepped = ease_toward(Vec2::ZERO, Vec2::new(100.0, 0.0), 0.016, 0.4);
+        assert!(stepped.x > 0.0);
+        assert!(stepped.x < 100.0);
+    }
+
+    #[test]
+    fn easing_arrives_within_its_duration() {
+        let mut current = Vec2::ZERO;
+        let target = Vec2::new(100.0, 50.0);
+        for _ in 0..25 {
+            current = ease_toward(current, target, 0.016, 0.4);
+        }
+        assert!(is_settled(current, target, 6.0));
+    }
+
+    #[test]
+    fn a_zero_duration_snaps() {
+        let target = Vec2::new(12.0, -4.0);
+        assert_eq!(ease_toward(Vec2::ZERO, target, 0.016, 0.0), target);
+    }
+
+    #[test]
+    fn a_dropped_frame_still_moves_the_same_share_of_the_way() {
+        let target = Vec2::new(100.0, 0.0);
+        let one_long = ease_toward(Vec2::ZERO, target, 0.1, 0.4);
+        let mut stepped = Vec2::ZERO;
+        for _ in 0..5 {
+            stepped = ease_toward(stepped, target, 0.02, 0.4);
+        }
+        assert!((one_long.x - stepped.x).abs() < 1.0);
     }
 
     #[test]

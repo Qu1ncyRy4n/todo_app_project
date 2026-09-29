@@ -109,6 +109,7 @@ struct TodoGui {
     relax_overlaps: bool,
     focus_mode: bool,
     focus_only: bool,
+    drawn_offsets: HashMap<String, Vec2>,
     timeline_requested: bool,
     show_timeline_ruler: bool,
     timeline_origin: Option<Pos2>,
@@ -190,6 +191,7 @@ impl TodoGui {
             relax_overlaps: relax_after_layout,
             focus_mode: false,
             focus_only: false,
+            drawn_offsets: HashMap::new(),
             timeline_requested: false,
             show_timeline_ruler: true,
             timeline_origin: None,
@@ -1129,6 +1131,40 @@ impl TodoGui {
         self.timeline_origin = None;
         self.focus_mode = false;
         self.message = Some("Layout normalized. Undo layout restores the previous one.".to_owned());
+    }
+
+    /// Eases the drawn positions toward the saved ones by one frame.
+    ///
+    /// Layout commands write the saved offsets outright; drawing follows them a
+    /// frame at a time, so a rearrangement reads as movement rather than as the
+    /// graph replacing itself. Returns whether anything is still moving, so the
+    /// caller can keep repainting only while it is.
+    fn advance_motion(&mut self, elapsed: f32) -> bool {
+        let duration = if self.theme.layout.animate {
+            self.theme.layout.transition_ms / 1000.0
+        } else {
+            0.0
+        };
+        self.drawn_offsets
+            .retain(|id, _| self.node_offsets.contains_key(id));
+        let mut moving = false;
+        for (id, target) in &self.node_offsets {
+            let current = self.drawn_offsets.get(id).copied();
+            let Some(current) = current else {
+                // A node seen for the first time starts where it belongs rather
+                // than flying in from the origin.
+                self.drawn_offsets.insert(id.clone(), *target);
+                continue;
+            };
+            let next = geometry::ease_toward(current, *target, elapsed, duration);
+            if !geometry::is_settled(next, *target, 0.5) {
+                moving = true;
+                self.drawn_offsets.insert(id.clone(), next);
+            } else {
+                self.drawn_offsets.insert(id.clone(), *target);
+            }
+        }
+        moving
     }
 
     /// Frames the active band in the viewport, so focus fills the canvas.
@@ -2127,10 +2163,14 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
         ),
         TagColoring::GroupHash => TagPalette::default(),
     };
+    let elapsed = ui.input(|input| input.stable_dt);
+    if app.advance_motion(elapsed) {
+        ui.ctx().request_repaint();
+    }
     let positions = graph_positions(
         &items,
         rect,
-        &app.node_offsets,
+        &app.drawn_offsets,
         app.graph_pan,
         app.graph_zoom,
     );
@@ -2351,8 +2391,11 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
             && let Some(pointer) = response.interact_pointer_pos()
         {
             let dragged_distance = (pointer - pointer_start) / app.graph_zoom.max(f32::EPSILON);
-            app.node_offsets
-                .insert(id.clone(), offset_start + dragged_distance);
+            let dragged_to = offset_start + dragged_distance;
+            app.node_offsets.insert(id.clone(), dragged_to);
+            // A dragged node follows the pointer exactly; easing it would feel like
+            // lag rather than like motion.
+            app.drawn_offsets.insert(id.clone(), dragged_to);
         }
         if response.drag_stopped() {
             app.drag_anchor = None;
