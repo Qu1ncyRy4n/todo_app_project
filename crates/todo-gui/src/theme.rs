@@ -20,6 +20,7 @@ use todo_core::WeightFactors;
 #[serde(default, deny_unknown_fields)]
 pub struct Theme {
     pub weight: WeightTheme,
+    #[serde(skip_serializing)]
     pub safety: SafetyTheme,
     pub inspector: InspectorTheme,
     pub focus: FocusTheme,
@@ -395,16 +396,15 @@ impl WeightTheme {
     }
 }
 
-/// Controls the guards on destructive actions.
+/// Retained so existing theme files keep loading after deletion left the editor.
+///
+/// The graph editor no longer deletes tasks; `todo rm` and `todo restore` do that
+/// from the terminal, where a delete is a deliberate, typed act. The section is
+/// accepted but no longer written back out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SafetyTheme {
-    /// Whether deleting a task asks for confirmation first.
-    ///
-    /// On by default: a delete is easy to hit by accident and the confirmation is
-    /// the only thing standing between a click and a disappeared task.
     pub confirm_delete: bool,
-    /// Whether the Deleted list is offered in the inspector.
     pub show_deleted_list: bool,
 }
 
@@ -424,6 +424,13 @@ impl Default for SafetyTheme {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct InspectorTheme {
+    /// Whether each group starts expanded.
+    pub open_status: bool,
+    pub open_relationships: bool,
+    pub open_details: bool,
+    pub open_schedule: bool,
+    /// Advanced starts closed: raw editing is not an everyday control.
+    pub open_advanced: bool,
     pub show_parent: bool,
     pub show_dependencies: bool,
     pub show_blockers: bool,
@@ -439,6 +446,11 @@ pub struct InspectorTheme {
 impl Default for InspectorTheme {
     fn default() -> Self {
         Self {
+            open_status: true,
+            open_relationships: true,
+            open_details: true,
+            open_schedule: false,
+            open_advanced: false,
             show_parent: true,
             show_dependencies: true,
             show_blockers: true,

@@ -12,8 +12,8 @@ use std::{collections::HashMap, fs, path::PathBuf};
 use theme::{InspectorTheme, NodeShape, RegionShape, TagColoring, TagPalette, Theme};
 use todo_core::{ItemState, NamespacePath, Priority, RelationKind, WeightInputs};
 use todo_store::{
-    AppConfig, AppPaths, Citation, DeletedItem, FocusSequence, ItemPatch, ItemScope, Ledger,
-    NamespaceEntry, Note, StoredItem, WorkSession,
+    AppConfig, AppPaths, Citation, FocusSequence, ItemPatch, ItemScope, Ledger, NamespaceEntry,
+    Note, StoredItem, WorkSession,
 };
 use tokio::runtime::Runtime;
 
@@ -96,8 +96,6 @@ struct TodoGui {
     theme: Theme,
     theme_path: PathBuf,
     inspector: InspectorTheme,
-    delete_confirm: Option<String>,
-    deleted: Vec<DeletedItem>,
     layout_undo: Option<HashMap<String, Vec2>>,
     normalize_requested: bool,
     focus_layout_requested: bool,
@@ -171,8 +169,6 @@ impl TodoGui {
             graph_pan: Vec2::ZERO,
             graph_zoom: 1.0,
             inspector: theme.inspector,
-            delete_confirm: None,
-            deleted: Vec::new(),
             theme,
             theme_path,
             layout_undo: None,
@@ -275,57 +271,503 @@ impl TodoGui {
         }
     }
 
-    /// Deletes the selected task, hiding it from every view.
+    /// Draws the inspector as five collapsible sections over the selected task.
     ///
-    /// The deletion is reversible: the task is listed under Deleted and can be
-    /// restored. A task still referenced as a parent, dependency, or blocker is
-    /// refused by the ledger rather than silently orphaning that work.
-    fn delete_selected(&mut self) {
-        let Some(id) = self.selected.clone() else {
-            return;
-        };
-        match self.runtime.block_on(self.ledger.delete_item(&id)) {
-            Ok(deleted) => {
-                self.selected = None;
-                self.delete_confirm = None;
-                self.node_offsets.remove(&id);
-                self.save_layout();
-                self.message = Some(format!(
-                    "Deleted {}. Restore it from the Deleted list.",
-                    deleted.title
+    /// Grouping keeps the panel navigable: status, then how the task relates to
+    /// other work, then its content, then its timing, with the raw editing surface
+    /// tucked away last. Each group's open state starts from the theme.
+    fn draw_inspector(&mut self, ui: &mut egui::Ui) {
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.heading("Inspector");
+            let Some(item) = self.selected_item().cloned() else {
+                ui.weak("Select a task node to inspect it.");
+                if let Some(message) = self.message.clone() {
+                    ui.separator();
+                    ui.label(message);
+                }
+                return;
+            };
+            ui.label(format!("{} · {}", item.item.state, item.item.id));
+            egui::CollapsingHeader::new("Status")
+                .default_open(self.inspector.open_status)
+                .show(ui, |ui| self.section_status(ui, &item));
+            egui::CollapsingHeader::new("Relationships")
+                .default_open(self.inspector.open_relationships)
+                .show(ui, |ui| self.section_relationships(ui, &item));
+            egui::CollapsingHeader::new("Details")
+                .default_open(self.inspector.open_details)
+                .show(ui, |ui| self.section_details(ui, &item));
+            egui::CollapsingHeader::new("Schedule")
+                .default_open(self.inspector.open_schedule)
+                .show(ui, |ui| self.section_schedule(ui, &item));
+            egui::CollapsingHeader::new("Advanced")
+                .default_open(self.inspector.open_advanced)
+                .show(ui, |ui| self.section_advanced(ui));
+            egui::CollapsingHeader::new("Section display")
+                .default_open(false)
+                .show(ui, |ui| self.section_display_settings(ui));
+            if let Some(message) = self.message.clone() {
+                ui.separator();
+                ui.label(message);
+            }
+        });
+    }
+
+    /// Title, priority, and state: what the task is and where it stands.
+    fn section_status(&mut self, ui: &mut egui::Ui, item: &StoredItem) {
+        ui.label("Title");
+        ui.text_edit_singleline(&mut self.title_draft);
+        let title_valid = !self.title_draft.trim().is_empty();
+        if !title_valid {
+            ui.colored_label(Color32::RED, "Title cannot be empty.");
+        }
+        if ui
+            .add_enabled(title_valid, egui::Button::new("Save title"))
+            .clicked()
+        {
+            self.save_title();
+        }
+        ui.separator();
+        ui.label("Priority");
+        egui::ComboBox::from_id_salt("priority")
+            .selected_text(self.priority_draft.to_string())
+            .show_ui(ui, |ui| {
+                for priority in [
+                    Priority::Low,
+                    Priority::Normal,
+                    Priority::High,
+                    Priority::Critical,
+                ] {
+                    ui.selectable_value(&mut self.priority_draft, priority, priority.to_string());
+                }
+            });
+        if ui.button("Save priority").clicked() {
+            self.save_priority();
+        }
+        ui.separator();
+        ui.label("Status");
+        egui::ComboBox::from_id_salt("state")
+            .selected_text(self.state_draft.to_string())
+            .show_ui(ui, |ui| {
+                for state in [
+                    ItemState::Inbox,
+                    ItemState::Active,
+                    ItemState::Done,
+                    ItemState::Canceled,
+                ]
+                .into_iter()
+                .filter(|state| item.item.state.can_transition_to(*state))
+                {
+                    ui.selectable_value(&mut self.state_draft, state, state.to_string());
+                }
+            });
+        if ui.button("Save status").clicked() {
+            self.save_state();
+        }
+        if ui
+            .button(if item.item.state == ItemState::Done {
+                "Reopen task"
+            } else {
+                "Complete task"
+            })
+            .clicked()
+        {
+            self.toggle_complete();
+        }
+    }
+
+    /// Parent, dependencies, blockers, typed relations, and focus sequences.
+    fn section_relationships(&mut self, ui: &mut egui::Ui, item: &StoredItem) {
+        // Shared by the dependency and blocker subsections, so either can be hidden
+        // without taking the candidate list away from the other.
+        let relation_candidates = self
+            .items
+            .iter()
+            .filter(|candidate| {
+                candidate.item.id != item.item.id
+                    && candidate.item.project_id == item.item.project_id
+            })
+            .map(|candidate| (candidate.item.id.to_string(), candidate.item.title.clone()))
+            .collect::<Vec<_>>();
+        if self.inspector.show_parent {
+            ui.label("Parent task");
+            if let Some(parent) = self.parent_draft.clone() {
+                ui.horizontal(|ui| {
+                    ui.monospace(parent);
+                    if ui.small_button("Remove").clicked() {
+                        self.parent_draft = None;
+                        self.save_parent();
+                    }
+                });
+            }
+            ui.horizontal(|ui| {
+                ui.text_edit_singleline(&mut self.parent_search);
+                if ui.button("Clear parent").clicked() {
+                    self.parent_draft = None;
+                    self.save_parent();
+                }
+            });
+            let parent_query = self.parent_search.to_lowercase();
+            for (id, title) in relation_candidates
+                .iter()
+                .filter(|(_, title)| {
+                    parent_query.is_empty() || title.to_lowercase().contains(&parent_query)
+                })
+                .take(5)
+            {
+                if ui.small_button(format!("Set parent: {title}")).clicked() {
+                    self.parent_draft = Some(id.clone());
+                    self.save_parent();
+                }
+            }
+        }
+        if self.inspector.show_dependencies {
+            ui.separator();
+            ui.label("Depends on (planned prerequisite)");
+            for dependency in &item.dependencies {
+                ui.horizontal(|ui| {
+                    ui.monospace(dependency.to_string());
+                    if ui.small_button("Remove").clicked() {
+                        self.toggle_dependency(dependency.to_string(), false);
+                    }
+                });
+            }
+            ui.text_edit_singleline(&mut self.dependency_search);
+            let dependency_query = self.dependency_search.to_lowercase();
+            for (id, title) in relation_candidates
+                .iter()
+                .filter(|(id, title)| {
+                    !item
+                        .dependencies
+                        .iter()
+                        .any(|dependency| dependency.to_string() == *id)
+                        && (dependency_query.is_empty()
+                            || title.to_lowercase().contains(&dependency_query))
+                })
+                .take(5)
+            {
+                if ui
+                    .small_button(format!("Add dependency: {title}"))
+                    .clicked()
+                {
+                    self.toggle_dependency(id.clone(), true);
+                }
+            }
+        }
+        if self.inspector.show_blockers {
+            ui.separator();
+            ui.label("Blocked by (active impediment)");
+            if !item.blocked_by.is_empty() {
+                ui.colored_label(
+                    Color32::from_rgb(228, 126, 94),
+                    "This task is currently blocked.",
+                );
+            }
+            for blocker in &item.blocked_by {
+                ui.horizontal(|ui| {
+                    ui.monospace(blocker.to_string());
+                    if ui.small_button("Remove").clicked() {
+                        self.toggle_blocker(blocker.to_string(), false);
+                    }
+                });
+            }
+            ui.text_edit_singleline(&mut self.blocker_search);
+            let blocker_query = self.blocker_search.to_lowercase();
+            for (id, title) in relation_candidates
+                .iter()
+                .filter(|(id, title)| {
+                    !item
+                        .blocked_by
+                        .iter()
+                        .any(|blocker| blocker.to_string() == *id)
+                        && (blocker_query.is_empty()
+                            || title.to_lowercase().contains(&blocker_query))
+                })
+                .take(5)
+            {
+                if ui
+                    .small_button(format!("Add active blocker: {title}"))
+                    .clicked()
+                {
+                    self.toggle_blocker(id.clone(), true);
+                }
+            }
+        }
+        if self.inspector.show_relations {
+            ui.separator();
+            ui.label("Typed relations (cross-project, never blocking)");
+            for relation in &item.relations {
+                let existing = *relation;
+                ui.horizontal(|ui| {
+                    ui.monospace(format!("{} {}", existing.relation, existing.target));
+                    if ui.small_button("Remove").clicked() {
+                        self.remove_relation(existing.relation, existing.target.to_string());
+                    }
+                });
+            }
+            ui.horizontal(|ui| {
+                for relation in RelationKind::all() {
+                    if ui
+                        .selectable_label(self.relation_draft == relation, relation.to_string())
+                        .clicked()
+                    {
+                        self.relation_draft = relation;
+                    }
+                }
+            });
+            ui.text_edit_singleline(&mut self.relation_search);
+            let relation_query = self.relation_search.to_lowercase();
+            // Candidates are deliberately not filtered by project: relating across
+            // projects is the point of this edge.
+            let relation_targets = self
+                .items
+                .iter()
+                .filter(|candidate| candidate.item.id != item.item.id)
+                .filter(|candidate| {
+                    relation_query.is_empty()
+                        || candidate
+                            .item
+                            .title
+                            .to_lowercase()
+                            .contains(&relation_query)
+                })
+                .map(|candidate| (candidate.item.id.to_string(), candidate.item.title.clone()))
+                .take(5)
+                .collect::<Vec<_>>();
+            for (id, title) in relation_targets {
+                if ui
+                    .small_button(format!("{} {title}", self.relation_draft))
+                    .clicked()
+                {
+                    self.add_relation(id);
+                }
+            }
+        }
+        if self.inspector.show_focus_sequence {
+            ui.separator();
+            ui.label("Focus sequence");
+            ui.horizontal(|ui| {
+                ui.text_edit_singleline(&mut self.focus_title_draft);
+                if ui.button("New sequence").clicked() {
+                    self.create_focus_sequence();
+                }
+            });
+            for sequence in &self.focus_sequences {
+                if ui
+                    .selectable_label(
+                        self.selected_focus_sequence.as_deref() == Some(sequence.id.as_str()),
+                        format!("{} ({})", sequence.title, sequence.items.len()),
+                    )
+                    .clicked()
+                {
+                    self.selected_focus_sequence = Some(sequence.id.clone());
+                }
+            }
+            if self.selected_focus_sequence.is_some()
+                && ui.button("Add this task to selected sequence").clicked()
+            {
+                self.add_selected_to_focus_sequence();
+            }
+        }
+    }
+
+    /// Tags, notes, and linked resources: what the task is about.
+    fn section_details(&mut self, ui: &mut egui::Ui, item: &StoredItem) {
+        ui.label("Tags");
+        for tag in &item.namespaces {
+            ui.horizontal(|ui| {
+                ui.monospace(tag.as_str());
+                if ui.small_button("Remove").clicked() {
+                    self.remove_tag(tag);
+                }
+            });
+        }
+        if item.namespaces.is_empty() {
+            ui.weak("No tags");
+        }
+        ui.horizontal(|ui| {
+            ui.text_edit_singleline(&mut self.tag_draft);
+            if ui.button("Add tag").clicked() {
+                self.add_tag();
+            }
+        });
+        let tag_query = self.tag_draft.to_lowercase();
+        let tag_matches = self
+            .assigned_tag_paths()
+            .into_iter()
+            .filter(|path| {
+                !item.namespaces.iter().any(|tag| tag.as_str() == path)
+                    && (tag_query.is_empty() || path.to_lowercase().contains(&tag_query))
+            })
+            .take(5)
+            .collect::<Vec<_>>();
+        for namespace in tag_matches {
+            if ui.small_button(format!("Add {namespace}")).clicked() {
+                self.tag_draft = namespace;
+                self.add_tag();
+            }
+        }
+        if self.inspector.show_notes {
+            ui.separator();
+            ui.label("Notes / description");
+            for note in &self.notes {
+                ui.group(|ui| {
+                    ui.label(&note.body);
+                });
+            }
+            ui.add(egui::TextEdit::multiline(&mut self.note_draft).desired_rows(4));
+            if ui.button("Add note").clicked() {
+                self.add_note();
+            }
+        }
+        if self.inspector.show_links {
+            ui.separator();
+            ui.label("Linked resources");
+            for citation in &self.citations {
+                ui.horizontal(|ui| {
+                    ui.label(citation.label.as_deref().unwrap_or(&citation.target));
+                    if ui.small_button("Open").clicked() {
+                        ui.ctx().open_url(egui::OpenUrl::new_tab(&citation.target));
+                    }
+                });
+            }
+            ui.text_edit_singleline(&mut self.link_target_draft);
+            ui.text_edit_singleline(&mut self.link_label_draft);
+            if ui.button("Add link").clicked() {
+                self.add_link();
+            }
+        }
+    }
+
+    /// Dates, sessions, effort, and the weight they feed.
+    fn section_schedule(&mut self, ui: &mut egui::Ui, item: &StoredItem) {
+        if self.inspector.show_dates {
+            ui.horizontal(|ui| {
+                ui.label("Due");
+                ui.text_edit_singleline(&mut self.due_draft);
+                if ui.small_button("Today").clicked() {
+                    self.due_draft = Local::now().date_naive().to_string();
+                }
+                calendar_picker(ui, "due", &mut self.due_draft);
+                if ui.button("Save due").clicked() {
+                    self.save_date(true);
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Defer");
+                ui.text_edit_singleline(&mut self.defer_draft);
+                if ui.small_button("Today").clicked() {
+                    self.defer_draft = Local::now().date_naive().to_string();
+                }
+                calendar_picker(ui, "defer", &mut self.defer_draft);
+                if ui.button("Save defer").clicked() {
+                    self.save_date(false);
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Scheduled");
+                ui.text_edit_singleline(&mut self.scheduled_draft);
+                if ui.small_button("Today").clicked() {
+                    self.scheduled_draft = Local::now().date_naive().to_string();
+                }
+                calendar_picker(ui, "scheduled", &mut self.scheduled_draft);
+                if ui.button("Save scheduled").clicked() {
+                    self.save_scheduled();
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Difficulty 1-5");
+                ui.text_edit_singleline(&mut self.difficulty_draft);
+                if ui.button("Save difficulty").clicked() {
+                    self.save_difficulty();
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Estimate minutes");
+                ui.text_edit_singleline(&mut self.estimate_draft);
+                if ui.button("Save estimate").clicked() {
+                    self.save_estimate();
+                }
+            });
+            // Weight is computed for display; nothing is stored for it.
+            let children = child_index(&self.items);
+            ui.weak(format!(
+                "Weight {:.2} · size by weight is {}",
+                item_weight(item, &children, &self.theme),
+                if self.theme.weight.size_nodes_by_weight {
+                    "on"
+                } else {
+                    "off"
+                }
+            ));
+        }
+        if self.inspector.show_sessions {
+            ui.separator();
+            ui.label("Work sessions");
+            let active_session = self
+                .sessions
+                .iter()
+                .any(|session| session.finished_at.is_none());
+            if ui
+                .button(if active_session {
+                    "Stop session"
+                } else {
+                    "Start session"
+                })
+                .clicked()
+            {
+                self.toggle_session();
+            }
+            for session in &self.sessions {
+                ui.weak(format!(
+                    "{} → {}",
+                    session.started_at,
+                    session.finished_at.as_deref().unwrap_or("active")
                 ));
-                self.refresh();
-            }
-            Err(error) => {
-                self.delete_confirm = None;
-                self.message = Some(format!("Not deleted: {error:#}"));
             }
         }
     }
 
-    /// Restores a deleted task, returning it to every view.
-    fn restore_item(&mut self, id: &str) {
-        match self.runtime.block_on(self.ledger.restore_item(id)) {
-            Ok(restored) => {
-                self.message = Some(format!("Restored {}.", restored.item.title));
-                self.refresh();
-            }
-            Err(error) => self.message = Some(format!("Not restored: {error:#}")),
+    /// The raw editing surface, kept apart from the everyday controls.
+    fn section_advanced(&mut self, ui: &mut egui::Ui) {
+        if !self.inspector.show_raw_json {
+            ui.weak("Raw JSON is hidden in section display.");
+            return;
+        }
+        ui.label("Raw JSON (prototype)");
+        ui.add(egui::TextEdit::multiline(&mut self.raw_json).desired_rows(12));
+        if ui.button("Parse JSON").clicked() {
+            self.message = match serde_json::from_str::<serde_json::Value>(&self.raw_json) {
+                Ok(_) => Some(
+                    "JSON parses. Applying raw JSON is intentionally deferred until ItemPatch is atomic."
+                        .to_owned(),
+                ),
+                Err(error) => Some(format!("JSON parse error: {error}")),
+            };
+        }
+        if ui.button("Apply atomic patch").clicked() {
+            self.apply_raw_patch();
+        }
+        if ui.button("Load title and priority").clicked() {
+            self.load_raw_drafts();
         }
     }
 
-    /// Re-reads the list of deleted tasks, leaving any failure to the next explicit refresh.
-    fn refresh_deleted_quietly(&mut self) {
-        if let Ok(deleted) = self.runtime.block_on(self.ledger.deleted_items()) {
-            self.deleted = deleted;
-        }
-    }
-
-    /// Re-reads the list of deleted tasks.
-    fn refresh_deleted(&mut self) {
-        match self.runtime.block_on(self.ledger.deleted_items()) {
-            Ok(deleted) => self.deleted = deleted,
-            Err(error) => self.message = Some(format!("Deleted list unavailable: {error:#}")),
+    /// Per-subsection visibility, which changes nothing about the task itself.
+    fn section_display_settings(&mut self, ui: &mut egui::Ui) {
+        ui.label("Subsections shown. Hiding one changes nothing about the task.");
+        ui.checkbox(&mut self.inspector.show_parent, "Parent task");
+        ui.checkbox(&mut self.inspector.show_dependencies, "Depends on");
+        ui.checkbox(&mut self.inspector.show_blockers, "Blocked by");
+        ui.checkbox(&mut self.inspector.show_relations, "Typed relations");
+        ui.checkbox(&mut self.inspector.show_focus_sequence, "Focus sequence");
+        ui.checkbox(&mut self.inspector.show_dates, "Dates and effort");
+        ui.checkbox(&mut self.inspector.show_sessions, "Work sessions");
+        ui.checkbox(&mut self.inspector.show_notes, "Notes");
+        ui.checkbox(&mut self.inspector.show_links, "Linked resources");
+        ui.checkbox(&mut self.inspector.show_raw_json, "Raw JSON");
+        if ui.button("Reset to theme defaults").clicked() {
+            self.inspector = self.theme.inspector;
         }
     }
 
@@ -593,7 +1035,6 @@ impl TodoGui {
     }
 
     fn refresh(&mut self) {
-        self.refresh_deleted_quietly();
         match self
             .runtime
             .block_on(self.ledger.list_items(ItemScope::All, true))
@@ -1474,467 +1915,8 @@ impl eframe::App for TodoGui {
                 });
             });
         egui::Panel::right("inspector")
-            .default_size(280.0)
-            .show(ui, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                ui.heading("Inspector");
-                egui::CollapsingHeader::new("Display")
-                    .default_open(false)
-                    .show(ui, |ui| {
-                        ui.label("Sections shown. Hiding one changes nothing about the task.");
-                        ui.checkbox(&mut self.inspector.show_parent, "Parent task");
-                        ui.checkbox(&mut self.inspector.show_dependencies, "Depends on");
-                        ui.checkbox(&mut self.inspector.show_blockers, "Blocked by");
-                        ui.checkbox(&mut self.inspector.show_relations, "Typed relations");
-                        ui.checkbox(&mut self.inspector.show_focus_sequence, "Focus sequence");
-                        ui.checkbox(&mut self.inspector.show_dates, "Dates");
-                        ui.checkbox(&mut self.inspector.show_sessions, "Work sessions");
-                        ui.checkbox(&mut self.inspector.show_notes, "Notes");
-                        ui.checkbox(&mut self.inspector.show_links, "Linked resources");
-                        ui.checkbox(&mut self.inspector.show_raw_json, "Raw JSON");
-                        if ui.button("Reset to theme defaults").clicked() {
-                            self.inspector = self.theme.inspector;
-                        }
-                    });
-                if let Some(item) = self.selected_item().cloned() {
-                    ui.label(format!("{} · {}", item.item.state, item.item.id));
-                    ui.separator();
-                    ui.label("Title");
-                    ui.text_edit_singleline(&mut self.title_draft);
-                    let title_valid = !self.title_draft.trim().is_empty();
-                    if !title_valid {
-                        ui.colored_label(Color32::RED, "Title cannot be empty.");
-                    }
-                    if ui
-                        .add_enabled(title_valid, egui::Button::new("Save title"))
-                        .clicked()
-                    {
-                        self.save_title();
-                    }
-                    ui.separator();
-                    ui.label("Priority");
-                    egui::ComboBox::from_id_salt("priority")
-                        .selected_text(self.priority_draft.to_string())
-                        .show_ui(ui, |ui| {
-                            for priority in [
-                                Priority::Low,
-                                Priority::Normal,
-                                Priority::High,
-                                Priority::Critical,
-                            ] {
-                                ui.selectable_value(
-                                    &mut self.priority_draft,
-                                    priority,
-                                    priority.to_string(),
-                                );
-                            }
-                        });
-                    if ui.button("Save priority").clicked() {
-                        self.save_priority();
-                    }
-                    ui.separator();
-                    ui.label("Status");
-                    egui::ComboBox::from_id_salt("state")
-                        .selected_text(self.state_draft.to_string())
-                        .show_ui(ui, |ui| {
-                            for state in [
-                                ItemState::Inbox,
-                                ItemState::Active,
-                                ItemState::Done,
-                                ItemState::Canceled,
-                            ]
-                            .into_iter()
-                            .filter(|state| item.item.state.can_transition_to(*state))
-                            {
-                                ui.selectable_value(&mut self.state_draft, state, state.to_string());
-                            }
-                        });
-                    if ui.button("Save status").clicked() { self.save_state(); }
-                    ui.separator();
-                    if ui
-                        .button(if item.item.state == ItemState::Done {
-                            "Reopen task"
-                        } else {
-                            "Complete task"
-                        })
-                        .clicked()
-                    {
-                        self.toggle_complete();
-                    }
-                    ui.separator();
-                    ui.label("Tags");
-                    for tag in &item.namespaces {
-                        ui.horizontal(|ui| {
-                            ui.monospace(tag.as_str());
-                            if ui.small_button("Remove").clicked() {
-                                self.remove_tag(tag);
-                            }
-                        });
-                    }
-                    if item.namespaces.is_empty() {
-                        ui.weak("No tags");
-                    }
-                    ui.horizontal(|ui| {
-                        ui.text_edit_singleline(&mut self.tag_draft);
-                        if ui.button("Add tag").clicked() {
-                            self.add_tag();
-                        }
-                    });
-                    let tag_query = self.tag_draft.to_lowercase();
-                    let tag_matches = self
-                        .assigned_tag_paths()
-                        .into_iter()
-                        .filter(|path| {
-                            !item.namespaces.iter().any(|tag| tag.as_str() == path)
-                                && (tag_query.is_empty()
-                                    || path.to_lowercase().contains(&tag_query))
-                        })
-                        .take(5)
-                        .collect::<Vec<_>>();
-                    for namespace in tag_matches {
-                        if ui.small_button(format!("Add {namespace}")).clicked() {
-                            self.tag_draft = namespace;
-                            self.add_tag();
-                        }
-                    }
-                    ui.separator();
-                    ui.horizontal(|ui| {
-                        if self.delete_confirm.as_deref() == Some(item.item.id.to_string().as_str())
-                        {
-                            ui.colored_label(Color32::from_rgb(228, 126, 94), "Delete this task?");
-                            if ui.button("Yes, delete").clicked() {
-                                self.delete_selected();
-                            }
-                            if ui.button("Keep it").clicked() {
-                                self.delete_confirm = None;
-                            }
-                        } else if ui.button("Delete task").clicked() {
-                            if self.theme.safety.confirm_delete {
-                                self.delete_confirm = Some(item.item.id.to_string());
-                            } else {
-                                self.delete_selected();
-                            }
-                        }
-                    });
-                    ui.weak("Deleting hides a task from every view and is reversible.");
-                    if self.theme.safety.show_deleted_list {
-                        egui::CollapsingHeader::new(format!("Deleted ({})", self.deleted.len()))
-                            .default_open(false)
-                            .show(ui, |ui| {
-                                if ui.button("Refresh list").clicked() {
-                                    self.refresh_deleted();
-                                }
-                                let listed = self.deleted.clone();
-                                for entry in listed {
-                                    ui.horizontal(|ui| {
-                                        ui.label(short_title(&entry.title));
-                                        if ui.small_button("Restore").clicked() {
-                                            self.restore_item(&entry.id.to_string());
-                                        }
-                                    });
-                                    ui.weak(entry.deleted_at.clone());
-                                }
-                            });
-                    }
-                    // Shared by the dependency and blocker sections, so either can be
-                    // hidden without taking the list away from the other.
-                    let relation_candidates = self
-                        .items
-                        .iter()
-                        .filter(|candidate| {
-                            candidate.item.id != item.item.id
-                                && candidate.item.project_id == item.item.project_id
-                        })
-                        .map(|candidate| (candidate.item.id.to_string(), candidate.item.title.clone()))
-                        .collect::<Vec<_>>();
-                    // Parent task hides only the view; the underlying relationships stay.
-                    if self.inspector.show_parent {
-                        ui.separator();
-                        ui.label("Parent task");
-                        let candidates = self
-                            .items
-                            .iter()
-                            .filter(|candidate| {
-                                candidate.item.id != item.item.id
-                                    && candidate.item.project_id == item.item.project_id
-                            })
-                            .map(|candidate| (candidate.item.id.to_string(), candidate.item.title.clone()))
-                            .collect::<Vec<_>>();
-                        if let Some(parent) = self.parent_draft.clone() {
-                            ui.horizontal(|ui| {
-                                ui.monospace(parent);
-                                if ui.small_button("Remove").clicked() {
-                                    self.parent_draft = None;
-                                    self.save_parent();
-                                }
-                            });
-                        }
-                        ui.horizontal(|ui| {
-                            ui.text_edit_singleline(&mut self.parent_search);
-                            if ui.button("Clear parent").clicked() {
-                                self.parent_draft = None;
-                                self.save_parent();
-                            }
-                        });
-                        let parent_query = self.parent_search.to_lowercase();
-                        for (id, title) in candidates.into_iter().filter(|(_, title)| {
-                            parent_query.is_empty() || title.to_lowercase().contains(&parent_query)
-                        }).take(5) {
-                            if ui.small_button(format!("Set parent: {title}")).clicked() {
-                                self.parent_draft = Some(id);
-                                self.save_parent();
-                            }
-                        }
-                    }
-                    // Depends on hides only the view; the underlying relationships stay.
-                    if self.inspector.show_dependencies {
-                        ui.label("Depends on (planned prerequisite)");
-                        for dependency in &item.dependencies {
-                            ui.horizontal(|ui| {
-                                ui.monospace(dependency.to_string());
-                                if ui.small_button("Remove").clicked() {
-                                    self.toggle_dependency(dependency.to_string(), false);
-                                }
-                            });
-                        }
-                        ui.text_edit_singleline(&mut self.dependency_search);
-                        let dependency_query = self.dependency_search.to_lowercase();
-                        for (id, title) in relation_candidates.iter().filter(|(id, title)| {
-                            !item.dependencies.iter().any(|dependency| dependency.to_string() == *id)
-                                && (dependency_query.is_empty() || title.to_lowercase().contains(&dependency_query))
-                        }).take(5) {
-                            if ui.small_button(format!("Add dependency: {title}")).clicked() {
-                                self.toggle_dependency(id.clone(), true);
-                            }
-                        }
-                    }
-                    // Blocked by hides only the view; the underlying relationships stay.
-                    if self.inspector.show_blockers {
-                        ui.separator();
-                        ui.label("Blocked by (active impediment)");
-                        if !item.blocked_by.is_empty() {
-                            ui.colored_label(Color32::from_rgb(228, 126, 94), "This task is currently blocked.");
-                        }
-                        for blocker in &item.blocked_by {
-                            ui.horizontal(|ui| {
-                                ui.monospace(blocker.to_string());
-                                if ui.small_button("Remove").clicked() {
-                                    self.toggle_blocker(blocker.to_string(), false);
-                                }
-                            });
-                        }
-                        ui.text_edit_singleline(&mut self.blocker_search);
-                        let blocker_query = self.blocker_search.to_lowercase();
-                        for (id, title) in relation_candidates.iter().filter(|(id, title)| {
-                            !item.blocked_by.iter().any(|blocker| blocker.to_string() == *id)
-                                && (blocker_query.is_empty() || title.to_lowercase().contains(&blocker_query))
-                        }).take(5) {
-                            if ui.small_button(format!("Add active blocker: {title}")).clicked() {
-                                self.toggle_blocker(id.clone(), true);
-                            }
-                        }
-                    }
-                    // Typed relations hides only the view; the relations stay.
-                    if self.inspector.show_relations {
-                        ui.separator();
-                        ui.label("Typed relations (cross-project, never blocking)");
-                        for relation in &item.relations {
-                            let existing = *relation;
-                            ui.horizontal(|ui| {
-                                ui.monospace(format!(
-                                    "{} {}",
-                                    existing.relation, existing.target
-                                ));
-                                if ui.small_button("Remove").clicked() {
-                                    self.remove_relation(
-                                        existing.relation,
-                                        existing.target.to_string(),
-                                    );
-                                }
-                            });
-                        }
-                        ui.horizontal(|ui| {
-                            for relation in RelationKind::all() {
-                                if ui
-                                    .selectable_label(
-                                        self.relation_draft == relation,
-                                        relation.to_string(),
-                                    )
-                                    .clicked()
-                                {
-                                    self.relation_draft = relation;
-                                }
-                            }
-                        });
-                        ui.text_edit_singleline(&mut self.relation_search);
-                        let relation_query = self.relation_search.to_lowercase();
-                        // Candidates are not filtered by project: relating across
-                        // projects is the point of this edge.
-                        let relation_targets = self
-                            .items
-                            .iter()
-                            .filter(|candidate| candidate.item.id != item.item.id)
-                            .filter(|candidate| {
-                                relation_query.is_empty()
-                                    || candidate
-                                        .item
-                                        .title
-                                        .to_lowercase()
-                                        .contains(&relation_query)
-                            })
-                            .map(|candidate| {
-                                (candidate.item.id.to_string(), candidate.item.title.clone())
-                            })
-                            .take(5)
-                            .collect::<Vec<_>>();
-                        for (id, title) in relation_targets {
-                            if ui
-                                .small_button(format!("{} {title}", self.relation_draft))
-                                .clicked()
-                            {
-                                self.add_relation(id);
-                            }
-                        }
-                    }
-                    // Focus sequence hides only the view; the underlying relationships stay.
-                    if self.inspector.show_focus_sequence {
-                        ui.separator();
-                        ui.label("Focus sequence");
-                        ui.horizontal(|ui| {
-                            ui.text_edit_singleline(&mut self.focus_title_draft);
-                            if ui.button("New sequence").clicked() {
-                                self.create_focus_sequence();
-                            }
-                        });
-                        for sequence in &self.focus_sequences {
-                            if ui
-                                .selectable_label(
-                                    self.selected_focus_sequence.as_deref() == Some(sequence.id.as_str()),
-                                    format!("{} ({})", sequence.title, sequence.items.len()),
-                                )
-                                .clicked()
-                            {
-                                self.selected_focus_sequence = Some(sequence.id.clone());
-                            }
-                        }
-                        if self.selected_focus_sequence.is_some()
-                            && ui.button("Add this task to selected sequence").clicked()
-                        {
-                            self.add_selected_to_focus_sequence();
-                        }
-                    }
-                    // Dates hides only the view; the underlying relationships stay.
-                    if self.inspector.show_dates {
-                        ui.separator();
-                        ui.label("Dates");
-                        ui.horizontal(|ui| {
-                            ui.label("Due");
-                            ui.text_edit_singleline(&mut self.due_draft);
-                            if ui.small_button("Today").clicked() { self.due_draft = Local::now().date_naive().to_string(); }
-                            calendar_picker(ui, "due", &mut self.due_draft);
-                            if ui.button("Save due").clicked() { self.save_date(true); }
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Defer");
-                            ui.text_edit_singleline(&mut self.defer_draft);
-                            if ui.small_button("Today").clicked() { self.defer_draft = Local::now().date_naive().to_string(); }
-                            calendar_picker(ui, "defer", &mut self.defer_draft);
-                            if ui.button("Save defer").clicked() { self.save_date(false); }
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Scheduled");
-                            ui.text_edit_singleline(&mut self.scheduled_draft);
-                            if ui.small_button("Today").clicked() { self.scheduled_draft = Local::now().date_naive().to_string(); }
-                            calendar_picker(ui, "scheduled", &mut self.scheduled_draft);
-                            if ui.button("Save scheduled").clicked() { self.save_scheduled(); }
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Difficulty 1-5");
-                            ui.text_edit_singleline(&mut self.difficulty_draft);
-                            if ui.button("Save difficulty").clicked() { self.save_difficulty(); }
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Estimate minutes");
-                            ui.text_edit_singleline(&mut self.estimate_draft);
-                            if ui.button("Save estimate").clicked() { self.save_estimate(); }
-                        });
-                        // Weight is computed for display; nothing is stored for it.
-                        let children = child_index(&self.items);
-                        ui.weak(format!(
-                            "Weight {:.2} · size by weight is {}",
-                            item_weight(&item, &children, &self.theme),
-                            if self.theme.weight.size_nodes_by_weight { "on" } else { "off" }
-                        ));
-                    }
-                    // Work sessions hides only the view; the underlying relationships stay.
-                    if self.inspector.show_sessions {
-                        ui.separator();
-                        ui.label("Work sessions");
-                        let active_session = self.sessions.iter().any(|session| session.finished_at.is_none());
-                        if ui.button(if active_session { "Stop session" } else { "Start session" }).clicked() {
-                            self.toggle_session();
-                        }
-                        for session in &self.sessions {
-                            ui.weak(format!("{} → {}", session.started_at, session.finished_at.as_deref().unwrap_or("active")));
-                        }
-                    }
-                    // Notes hides only the view; the underlying relationships stay.
-                    if self.inspector.show_notes {
-                        ui.separator();
-                        ui.label("Notes / description");
-                        for note in &self.notes {
-                            ui.group(|ui| {
-                                ui.label(&note.body);
-                            });
-                        }
-                        ui.add(egui::TextEdit::multiline(&mut self.note_draft).desired_rows(4));
-                        if ui.button("Add note").clicked() {
-                            self.add_note();
-                        }
-                    }
-                    // Linked resources hides only the view; the underlying relationships stay.
-                    if self.inspector.show_links {
-                        ui.separator();
-                        ui.label("Linked resources");
-                        for citation in &self.citations {
-                            ui.horizontal(|ui| {
-                                ui.label(citation.label.as_deref().unwrap_or(&citation.target));
-                                if ui.small_button("Open").clicked() {
-                                    ui.ctx().open_url(egui::OpenUrl::new_tab(&citation.target));
-                                }
-                            });
-                        }
-                        ui.text_edit_singleline(&mut self.link_target_draft);
-                        ui.text_edit_singleline(&mut self.link_label_draft);
-                        if ui.button("Add link").clicked() { self.add_link(); }
-                    }
-                    // Raw JSON hides only the view; the underlying relationships stay.
-                    if self.inspector.show_raw_json {
-                        ui.separator();
-                        ui.label("Raw JSON (prototype)");
-                        ui.add(egui::TextEdit::multiline(&mut self.raw_json).desired_rows(12));
-                        if ui.button("Parse JSON").clicked() {
-                            self.message = match serde_json::from_str::<serde_json::Value>(&self.raw_json) {
-                                Ok(_) => Some("JSON parses. Applying raw JSON is intentionally deferred until ItemPatch is atomic.".to_owned()),
-                                Err(error) => Some(format!("JSON parse error: {error}")),
-                            };
-                        }
-                        if ui.button("Apply atomic patch").clicked() {
-                            self.apply_raw_patch();
-                        }
-                        if ui.button("Load title and priority").clicked() {
-                            self.load_raw_drafts();
-                        }
-                    }
-                } else {
-                    ui.weak("Select a task node to inspect it.");
-                }
-                if let Some(message) = &self.message {
-                    ui.separator();
-                    ui.label(message);
-                }
-                });
-            });
+            .default_size(300.0)
+            .show(ui, |ui| self.draw_inspector(ui));
         egui::CentralPanel::default().show(ui, |ui| draw_graph(ui, self));
     }
 }
