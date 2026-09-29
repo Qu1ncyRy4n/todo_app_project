@@ -115,6 +115,7 @@ struct TodoGui {
     timeline_origin: Option<Pos2>,
     new_task_open: bool,
     new_task_title: String,
+    new_task_parent: Option<String>,
     note_draft: String,
     link_target_draft: String,
     link_label_draft: String,
@@ -197,6 +198,7 @@ impl TodoGui {
             timeline_origin: None,
             new_task_open: false,
             new_task_title: String::new(),
+            new_task_parent: None,
             note_draft: String::new(),
             link_target_draft: String::new(),
             link_label_draft: String::new(),
@@ -520,6 +522,12 @@ impl TodoGui {
             })
             .map(|candidate| (candidate.item.id.to_string(), candidate.item.title.clone()))
             .collect::<Vec<_>>();
+        if ui.button("Create child task").clicked() {
+            self.new_task_parent = Some(item.item.id.to_string());
+            self.new_task_title.clear();
+            self.new_task_open = true;
+        }
+        ui.separator();
         if self.inspector.show_parent {
             ui.label("Parent task");
             if let Some(parent) = self.parent_draft.clone() {
@@ -1535,12 +1543,31 @@ impl TodoGui {
             self.message = Some("New task title cannot be empty.".to_owned());
             return;
         }
+        let parent = self.new_task_parent.clone();
         match self.runtime.block_on(self.ledger.add_item(title, None)) {
             Ok(item) => {
                 let id = item.item.id.to_string();
                 self.new_task_title.clear();
                 self.new_task_open = false;
-                self.message = Some("New inbox task created.".to_owned());
+                // The parent is set as a second step because creation is unscoped;
+                // a failure to attach leaves the task itself intact and says so.
+                let attached = match parent {
+                    Some(parent) => {
+                        match self.runtime.block_on(self.ledger.set_parent(&id, &parent)) {
+                            Ok(()) => Some(Ok(())),
+                            Err(error) => Some(Err(error)),
+                        }
+                    }
+                    None => None,
+                };
+                self.new_task_parent = None;
+                self.message = Some(match attached {
+                    None => "New inbox task created.".to_owned(),
+                    Some(Ok(())) => "New child task created.".to_owned(),
+                    Some(Err(error)) => {
+                        format!("Task created, but not attached to its parent: {error:#}")
+                    }
+                });
                 self.refresh();
                 self.select(id);
             }
@@ -2081,6 +2108,8 @@ impl eframe::App for TodoGui {
             ui.horizontal(|ui| {
                 ui.heading("Todo Ledger");
                 if ui.button("New task").clicked() {
+                    self.new_task_parent = None;
+                    self.new_task_title.clear();
                     self.new_task_open = true;
                 }
                 ui.separator();
@@ -2129,9 +2158,17 @@ impl eframe::App for TodoGui {
                 .collapsible(false)
                 .resizable(false)
                 .show(ui.ctx(), |ui| {
-                    ui.label(
-                        "Creates an unscoped inbox task. Assign a project or parent afterward.",
-                    );
+                    match self.new_task_parent.clone() {
+                        Some(parent) => {
+                            let described = self.describe(&parent);
+                            ui.label(format!("Creates an inbox task under {described}."));
+                        }
+                        None => {
+                            ui.label(
+                                "Creates an unscoped inbox task. Assign a project or parent afterward.",
+                            );
+                        }
+                    }
                     ui.text_edit_singleline(&mut self.new_task_title);
                     let valid = !self.new_task_title.trim().is_empty();
                     ui.horizontal(|ui| {
@@ -2141,6 +2178,7 @@ impl eframe::App for TodoGui {
                         if ui.button("Cancel").clicked() {
                             self.new_task_open = false;
                             self.new_task_title.clear();
+                            self.new_task_parent = None;
                         }
                     });
                 });
