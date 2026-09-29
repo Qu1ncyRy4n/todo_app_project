@@ -2185,9 +2185,11 @@ impl eframe::App for TodoGui {
         }
         egui::Panel::left("filters")
             .default_size(230.0)
+            .resizable(true)
             .show(ui, |ui| self.draw_filters(ui));
         egui::Panel::right("inspector")
             .default_size(300.0)
+            .resizable(true)
             .show(ui, |ui| self.draw_inspector(ui));
         egui::CentralPanel::default().show(ui, |ui| draw_graph(ui, self));
     }
