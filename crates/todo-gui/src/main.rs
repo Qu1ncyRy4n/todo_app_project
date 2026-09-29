@@ -384,13 +384,20 @@ impl TodoGui {
         }
     }
 
-    /// Draws the one filter sidebar: what is shown, and which tags are in view.
+    /// Draws the side panel: how the graph is shown, then what is shown in it.
     ///
-    /// Every view toggle lives here rather than being split between a toolbar row
-    /// and a sidebar, so there is a single place to look for why something is or is
-    /// not on screen.
+    /// View and force settings sit above the filters because they are what gets
+    /// adjusted while looking at the graph; filters answer a different question and
+    /// are reached past them.
     fn draw_filters(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical().show(ui, |ui| {
+            egui::CollapsingHeader::new("View")
+                .default_open(true)
+                .show(ui, |ui| self.view_settings(ui));
+            egui::CollapsingHeader::new("Forces")
+                .default_open(false)
+                .show(ui, |ui| self.force_settings(ui));
+            ui.separator();
             ui.heading("Filters");
             egui::CollapsingHeader::new("Tasks shown")
                 .default_open(true)
@@ -415,33 +422,141 @@ impl TodoGui {
                     ui.checkbox(&mut self.show_focus_window, "Focus Window");
                     ui.checkbox(&mut self.show_timeline_ruler, "Timeline ruler");
                 });
-            egui::CollapsingHeader::new("Layout")
-                .default_open(true)
-                .show(ui, |ui| {
-                    ui.label("Group by");
-                    egui::ComboBox::from_id_salt("group-by")
-                        .selected_text(self.group_by.label())
-                        .show_ui(ui, |ui| {
-                            for grouping in GroupBy::all() {
-                                ui.selectable_value(&mut self.group_by, grouping, grouping.label());
-                            }
-                        });
-                    ui.label("Sort by");
-                    egui::ComboBox::from_id_salt("sort-by")
-                        .selected_text(self.sort_by.label())
-                        .show_ui(ui, |ui| {
-                            for sort in SortBy::all() {
-                                ui.selectable_value(&mut self.sort_by, sort, sort.label());
-                            }
-                        });
-                    ui.weak("Group arranges columns from these.");
-                    ui.checkbox(&mut self.relax_overlaps, "Push overlaps apart");
-                    ui.weak("Runs after every layout command. Unstack runs it now.");
-                });
             egui::CollapsingHeader::new("Tags")
                 .default_open(true)
                 .show(ui, |ui| self.draw_tag_filters(ui));
         });
+    }
+
+    /// Modes and arrangement settings, the ones reached for while looking.
+    fn view_settings(&mut self, ui: &mut egui::Ui) {
+        ui.label("Hierarchy grows");
+        ui.horizontal(|ui| {
+            ui.selectable_value(
+                &mut self.theme.layout.tree_axis,
+                geometry::TreeAxis::Down,
+                "Top down",
+            );
+            ui.selectable_value(
+                &mut self.theme.layout.tree_axis,
+                geometry::TreeAxis::Right,
+                "Left to right",
+            );
+        });
+        ui.label("Timeline runs");
+        ui.horizontal(|ui| {
+            ui.selectable_value(
+                &mut self.theme.timeline.axis,
+                geometry::TimelineAxis::LeftRight,
+                "Left to right",
+            );
+            ui.selectable_value(
+                &mut self.theme.timeline.axis,
+                geometry::TimelineAxis::TopDown,
+                "Top down",
+            );
+        });
+        ui.horizontal(|ui| {
+            ui.selectable_value(
+                &mut self.theme.timeline.scale,
+                geometry::TimelineScale::Elapsed,
+                "Elapsed",
+            );
+            ui.selectable_value(
+                &mut self.theme.timeline.scale,
+                geometry::TimelineScale::Sequence,
+                "Sequence",
+            );
+        });
+        ui.separator();
+        ui.label("Group by");
+        egui::ComboBox::from_id_salt("group-by")
+            .selected_text(self.group_by.label())
+            .show_ui(ui, |ui| {
+                for grouping in GroupBy::all() {
+                    ui.selectable_value(&mut self.group_by, grouping, grouping.label());
+                }
+            });
+        ui.label("Sort by");
+        egui::ComboBox::from_id_salt("sort-by")
+            .selected_text(self.sort_by.label())
+            .show_ui(ui, |ui| {
+                for sort in SortBy::all() {
+                    ui.selectable_value(&mut self.sort_by, sort, sort.label());
+                }
+            });
+        ui.separator();
+        ui.checkbox(&mut self.theme.layout.animate, "Glide to new positions");
+        ui.checkbox(&mut self.theme.node.wrap_titles, "Wrap long titles");
+        ui.checkbox(
+            &mut self.theme.focus.parents_of_active_read_active,
+            "Parents of active work read active",
+        );
+    }
+
+    /// The forces that arrange the graph, adjustable while watching them work.
+    ///
+    /// These edit the live theme, so a change shows on the next layout command
+    /// rather than on the next restart. Save to theme.toml writes them down.
+    fn force_settings(&mut self, ui: &mut egui::Ui) {
+        ui.checkbox(&mut self.relax_overlaps, "Push overlaps apart");
+        ui.checkbox(
+            &mut self.theme.layout.separate_after_layout,
+            "Separate tag groups",
+        );
+        ui.checkbox(&mut self.theme.layout.compact_active, "Compact active work");
+        ui.separator();
+        ui.label("Spacing");
+        ui.add(egui::Slider::new(&mut self.theme.layout.leaf_gap, 60.0..=500.0).text("Leaf gap"));
+        ui.add(egui::Slider::new(&mut self.theme.layout.row_gap, 60.0..=500.0).text("Row gap"));
+        ui.add(
+            egui::Slider::new(&mut self.theme.layout.active_head_gap, 80.0..=600.0)
+                .text("Active head gap"),
+        );
+        ui.separator();
+        ui.label("Overlap");
+        ui.add(egui::Slider::new(&mut self.theme.layout.overlap_gap, 0.0..=160.0).text("Gap"));
+        ui.add(
+            egui::Slider::new(&mut self.theme.layout.overlap_strength, 0.05..=1.0).text("Strength"),
+        );
+        ui.add(
+            egui::Slider::new(&mut self.theme.layout.overlap_iterations, 1..=200).text("Passes"),
+        );
+        ui.separator();
+        ui.label("Tag separation");
+        ui.add(
+            egui::Slider::new(&mut self.theme.layout.separation_attraction, 0.0..=1.0)
+                .text("Pull to own group"),
+        );
+        ui.add(
+            egui::Slider::new(&mut self.theme.layout.separation_repulsion, 0.0..=60.0)
+                .text("Push from others"),
+        );
+        ui.add(
+            egui::Slider::new(&mut self.theme.layout.separation_radius, 50.0..=1200.0)
+                .text("Reach"),
+        );
+        ui.add(
+            egui::Slider::new(&mut self.theme.layout.separation_iterations, 1..=60).text("Passes"),
+        );
+        ui.separator();
+        ui.label("Motion");
+        ui.add(
+            egui::Slider::new(&mut self.theme.layout.transition_ms, 0.0..=1500.0)
+                .text("Glide milliseconds"),
+        );
+        ui.separator();
+        if ui.button("Save to theme.toml").clicked() {
+            match self.write_theme() {
+                Ok(()) => {
+                    self.message = Some(format!("Theme saved to {}", self.theme_path.display()));
+                }
+                Err(error) => self.message = Some(format!("Theme not saved: {error:#}")),
+            }
+        }
+        if ui.button("Reload from theme.toml").clicked() {
+            self.reload_theme();
+        }
     }
 
     /// Draws the tag tree, where each tag cycles neutral, only, then hidden.
@@ -1355,6 +1470,7 @@ impl TodoGui {
         let spacing = TreeSpacing {
             leaf_gap: self.theme.layout.leaf_gap,
             row_gap: self.theme.layout.row_gap,
+            axis: self.theme.layout.tree_axis,
         };
         let mut arranged = geometry::tree_positions(&roots, &children, spacing);
         // Finished prerequisites sit above the work that needed them, so a glance
@@ -1761,7 +1877,7 @@ impl TodoGui {
     /// complete starting point to edit rather than a blank file.
     fn reload_theme(&mut self) {
         if !self.theme_path.exists() {
-            match self.write_default_theme() {
+            match self.write_theme() {
                 Ok(()) => {
                     self.message = Some(format!("Theme written to {}", self.theme_path.display()));
                 }
@@ -1783,8 +1899,11 @@ impl TodoGui {
         }
     }
 
-    /// Writes the current theme to disk as an editable starting point.
-    fn write_default_theme(&self) -> Result<()> {
+    /// Writes the current theme to disk, as a starting point or to keep changes.
+    ///
+    /// Settings adjusted in the side panel edit the live theme; this is what makes
+    /// them survive a restart.
+    fn write_theme(&self) -> Result<()> {
         if let Some(parent) = self.theme_path.parent() {
             fs::create_dir_all(parent).context("create theme directory")?;
         }
@@ -2688,6 +2807,11 @@ impl eframe::App for TodoGui {
 
 fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
     let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::drag());
+    // Dragging empty canvas moves the view. Cards are interacted with after this,
+    // so a drag that starts on a card moves the card rather than the canvas.
+    if response.dragged() {
+        app.graph_pan += response.drag_delta();
+    }
     if ui.input(|input| input.pointer.middle_down()) {
         app.graph_pan += ui.input(|input| input.pointer.delta());
     }

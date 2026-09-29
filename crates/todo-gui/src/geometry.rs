@@ -710,13 +710,36 @@ pub fn ruler_ticks(
     ticks
 }
 
+/// Which way a hanging tree grows.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TreeAxis {
+    /// Children hang below their parent; siblings spread sideways.
+    #[default]
+    Down,
+    /// Children sit to the right of their parent; siblings stack downward.
+    Right,
+}
+
 /// Spacing for a hanging tree layout.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TreeSpacing {
-    /// Horizontal distance between neighboring leaves.
+    /// Distance between neighboring leaves, across the direction of growth.
     pub leaf_gap: f32,
-    /// Vertical distance between a task and its children.
+    /// Distance from a task to its children, along the direction of growth.
     pub row_gap: f32,
+    /// Which way the tree grows.
+    pub axis: TreeAxis,
+}
+
+impl TreeSpacing {
+    /// Places a point from its distance along and across the direction of growth.
+    pub fn place(&self, along: f32, across: f32) -> Vec2 {
+        match self.axis {
+            TreeAxis::Down => Vec2::new(across, along),
+            TreeAxis::Right => Vec2::new(along, across),
+        }
+    }
 }
 
 /// Hangs each task's children beneath it, with every parent centered over its own.
@@ -767,7 +790,7 @@ fn place_subtree(
     let empty = Vec::new();
     let offspring = children.get(id).unwrap_or(&empty);
     if offspring.is_empty() {
-        positions.insert(id.to_owned(), Vec2::new(cursor, row));
+        positions.insert(id.to_owned(), spacing.place(row, cursor));
         return cursor + spacing.leaf_gap;
     }
     let start = cursor;
@@ -778,7 +801,7 @@ fn place_subtree(
     // Centering over the span, rather than over the first child, keeps a parent
     // above the middle of what it holds however lopsided the branch is.
     let end = (next - spacing.leaf_gap).max(start);
-    positions.insert(id.to_owned(), Vec2::new((start + end) / 2.0, row));
+    positions.insert(id.to_owned(), spacing.place(row, (start + end) / 2.0));
     next
 }
 
@@ -859,7 +882,7 @@ pub fn edge_between(from: Rect, to: Rect, gap: f32) -> (Pos2, Pos2) {
 mod tests {
     use super::{
         BandSpacing, FlowDirection, FlowSpacing, GroupSpacing, OverlapSpacing, SeparationSpacing,
-        TimelineAxis, TimelineScale, TimelineSpacing, TreeSpacing, arrowhead_points,
+        TimelineAxis, TimelineScale, TimelineSpacing, TreeAxis, TreeSpacing, arrowhead_points,
         banded_positions, boundary_point, centroid, cluster_points, convex_hull, duration_length,
         ease_toward, edge_between, expand_path, fit_view, grouped_positions, is_settled,
         layered_positions, relax_overlaps, ruler_ticks, separate_groups, shaft_end,
@@ -1381,6 +1404,7 @@ mod tests {
         TreeSpacing {
             leaf_gap: 100.0,
             row_gap: 80.0,
+            axis: TreeAxis::Down,
         }
     }
 
@@ -1450,6 +1474,23 @@ mod tests {
     #[test]
     fn grouping_nothing_places_nothing() {
         assert!(grouped_positions(&[], group_spacing()).is_empty());
+    }
+
+    #[test]
+    fn a_tree_can_grow_rightward_instead() {
+        let positions = tree_positions(
+            &ids(&["root"]),
+            &tree_of(&[("root", &["child"])]),
+            TreeSpacing {
+                axis: TreeAxis::Right,
+                ..tree_spacing()
+            },
+        );
+        assert!(matches!(
+            (positions.get("root"), positions.get("child")),
+            (Some(root), Some(child))
+                if child.x > root.x && (child.y - root.y).abs() < 0.001
+        ));
     }
 
     #[test]

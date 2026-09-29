@@ -5,7 +5,7 @@
 //! encode protocol or data meaning never belong here.
 
 use crate::{
-    geometry::{FlowDirection, TimelineAxis, TimelineScale},
+    geometry::{FlowDirection, TimelineAxis, TimelineScale, TreeAxis},
     palette::Colormap,
 };
 use anyhow::{Context, Result};
@@ -77,7 +77,12 @@ pub enum NormalizeStyle {
 pub struct LayoutTheme {
     /// How Normalize arranges the graph.
     pub style: NormalizeStyle,
-    /// Horizontal distance between neighboring leaves in a hierarchy.
+    /// Which way a normalized hierarchy grows.
+    ///
+    /// Down by default: work reads from its head downward through what it holds,
+    /// which is the direction time runs in the rest of the editor.
+    pub tree_axis: TreeAxis,
+    /// Distance between neighboring leaves, across the direction of growth.
     pub leaf_gap: f32,
     /// Vertical distance between a task and its children in a hierarchy.
     pub row_gap: f32,
@@ -140,8 +145,9 @@ impl Default for LayoutTheme {
     fn default() -> Self {
         Self {
             style: NormalizeStyle::default(),
-            leaf_gap: 210.0,
-            row_gap: 130.0,
+            tree_axis: TreeAxis::default(),
+            leaf_gap: 190.0,
+            row_gap: 165.0,
             done_band_gap: 190.0,
             done_above: true,
             compact_active: true,
