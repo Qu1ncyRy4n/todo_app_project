@@ -271,6 +271,60 @@ impl TodoGui {
         }
     }
 
+    /// Draws the one filter sidebar: what is shown, and which tags are in view.
+    ///
+    /// Every view toggle lives here rather than being split between a toolbar row
+    /// and a sidebar, so there is a single place to look for why something is or is
+    /// not on screen.
+    fn draw_filters(&mut self, ui: &mut egui::Ui) {
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.heading("Filters");
+            egui::CollapsingHeader::new("Tasks shown")
+                .default_open(true)
+                .show(ui, |ui| {
+                    ui.checkbox(&mut self.show_completed, "Completed and canceled");
+                });
+            egui::CollapsingHeader::new("Relationships drawn")
+                .default_open(true)
+                .show(ui, |ui| {
+                    ui.checkbox(&mut self.show_parent_graph, "Parent tasks");
+                    ui.checkbox(&mut self.show_dependency_graph, "Depends on");
+                    ui.checkbox(&mut self.show_blocker_graph, "Blocked by");
+                    ui.checkbox(&mut self.show_relations, "Typed relations");
+                });
+            egui::CollapsingHeader::new("Overlays")
+                .default_open(true)
+                .show(ui, |ui| {
+                    ui.checkbox(&mut self.show_tag_constellation, "Tag regions");
+                    ui.checkbox(&mut self.show_parent_regions, "Parent regions");
+                    ui.checkbox(&mut self.show_focus_window, "Focus Window");
+                    ui.checkbox(&mut self.show_timeline_ruler, "Timeline ruler");
+                });
+            egui::CollapsingHeader::new("Tags")
+                .default_open(true)
+                .show(ui, |ui| self.draw_tag_filters(ui));
+        });
+    }
+
+    /// Draws the tag filter list.
+    fn draw_tag_filters(&mut self, ui: &mut egui::Ui) {
+        ui.text_edit_singleline(&mut self.tag_filter);
+        if ui.button("Clear tag filter").clicked() {
+            self.tag_filter.clear();
+        }
+        let query = self.tag_filter.to_lowercase();
+        let matches = self
+            .assigned_tag_paths()
+            .into_iter()
+            .filter(|path| query.is_empty() || path.to_lowercase().contains(&query))
+            .collect::<Vec<_>>();
+        for path in matches {
+            if ui.small_button(&path).clicked() {
+                self.tag_filter = path;
+            }
+        }
+    }
+
     /// Draws the inspector as five collapsible sections over the selected task.
     ///
     /// Grouping keeps the panel navigable: status, then how the task relates to
@@ -1812,6 +1866,8 @@ impl eframe::App for TodoGui {
                 self.graph_pan.y -= step;
             }
         }
+        // The toolbar carries actions only. Every view toggle lives in the filter
+        // sidebar, so there is one place to look for what is shown.
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("Todo Ledger");
@@ -1819,20 +1875,17 @@ impl eframe::App for TodoGui {
                     self.new_task_open = true;
                 }
                 ui.separator();
-                ui.checkbox(&mut self.show_parent_graph, "Parent tasks");
-                ui.checkbox(&mut self.show_dependency_graph, "Depends on");
-                ui.checkbox(&mut self.show_blocker_graph, "Blocked by");
-                ui.checkbox(&mut self.show_tag_constellation, "Tag constellation");
-                ui.checkbox(&mut self.show_parent_regions, "Parent regions");
-                ui.checkbox(&mut self.show_relations, "Typed relations");
-                ui.checkbox(&mut self.show_focus_window, "Focus Window");
-                ui.checkbox(&mut self.show_timeline_ruler, "Timeline ruler");
                 if ui.button("−").clicked() {
                     self.graph_zoom = (self.graph_zoom / 1.2).max(0.4);
                 }
                 if ui.button("+").clicked() {
                     self.graph_zoom = (self.graph_zoom * 1.2).min(2.5);
                 }
+                if ui.button("Reset view").clicked() {
+                    self.graph_zoom = 1.0;
+                    self.graph_pan = Vec2::ZERO;
+                }
+                ui.separator();
                 if ui.button("Normalize").clicked() {
                     // The graph rect is only known while drawing, so the request is
                     // deferred one frame rather than guessed at here.
@@ -1850,12 +1903,9 @@ impl eframe::App for TodoGui {
                 if ui.button("Undo layout").clicked() {
                     self.undo_layout();
                 }
+                ui.separator();
                 if ui.button("Reload theme").clicked() {
                     self.reload_theme();
-                }
-                if ui.button("Reset view").clicked() {
-                    self.graph_zoom = 1.0;
-                    self.graph_pan = Vec2::ZERO;
                 }
                 if ui.button("Refresh").clicked() {
                     self.refresh();
@@ -1884,36 +1934,8 @@ impl eframe::App for TodoGui {
                 });
         }
         egui::Panel::left("filters")
-            .default_size(210.0)
-            .show(ui, |ui| {
-                ui.heading("Filters");
-                ui.checkbox(&mut self.show_completed, "Show completed");
-                ui.checkbox(&mut self.show_parent_graph, "Parent task graph");
-                ui.checkbox(&mut self.show_dependency_graph, "Depends-on graph");
-                ui.checkbox(&mut self.show_blocker_graph, "Blocked-by graph");
-                ui.checkbox(&mut self.show_tag_constellation, "Tag constellation");
-                ui.checkbox(&mut self.show_focus_window, "Focus Window");
-                ui.separator();
-                ui.label("Tags");
-                ui.text_edit_singleline(&mut self.tag_filter);
-                if ui.button("Clear tag filter").clicked() {
-                    self.tag_filter.clear();
-                }
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    let query = self.tag_filter.to_lowercase();
-                    let matches = self
-                        .assigned_tag_paths()
-                        .into_iter()
-                        .filter(|path| query.is_empty() || path.to_lowercase().contains(&query))
-                        .take(5)
-                        .collect::<Vec<_>>();
-                    for path in matches {
-                        if ui.small_button(&path).clicked() {
-                            self.tag_filter = path;
-                        }
-                    }
-                });
-            });
+            .default_size(230.0)
+            .show(ui, |ui| self.draw_filters(ui));
         egui::Panel::right("inspector")
             .default_size(300.0)
             .show(ui, |ui| self.draw_inspector(ui));
