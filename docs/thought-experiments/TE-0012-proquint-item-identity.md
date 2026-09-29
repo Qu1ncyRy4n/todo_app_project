@@ -163,3 +163,26 @@ becoming the sole durable backend identity. A later interaction-design slice
 should establish completion, relevance ranking, ambiguity presentation, and
 non-interactive agent output before selecting a call-sign storage or migration
 format.
+
+### 2026-09-28 - Derived Rendering Shipped; Minting Still Deferred
+
+A rendering step shipped ahead of the deferred decision, deliberately narrow so
+that it forecloses none of the routes above. Item identifiers are displayed as
+proquints computed from the existing UUID, using the distinguishing tail, and
+every command accepts a proquint back by decoding it to the hexadecimal it stands
+for. An ordinary hexadecimal reference is never mistaken for a proquint, so both
+forms resolve.
+
+What this is not: nothing is minted, nothing is reserved, and no handle is stored.
+There is no new field, no protocol version, and no backfill. The rendering is a
+pure function of the UUID, so it cannot collide any more than the UUID tail it
+comes from, which is exactly what reference matching already compared. Two items
+whose tails collide are as ambiguous as before and are reported as such.
+
+This satisfies the refinement above for recognition, speech, and CLI invocation
+without claiming the durable call-sign the organization convention describes.
+Routes A through E, the storage format, the collision policy, and the completion
+and ranking design all remain open, and a minted handle can be added later as an
+additional field beside this rendering.
+
+Recorded by agent-assistant.
