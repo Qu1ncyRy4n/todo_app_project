@@ -64,6 +64,22 @@ dogfooding notes. Every slice below landed as its own commit with tests.
 25. Focus layout exiles and dims non-active work, then frames the active band.
     An Active work only filter hides it entirely instead.
 26. Nodes glide to new positions instead of jumping.
+27. The day ruler is pinned to the canvas, so no pan can hide it.
+28. Tasks are named by title and by proquint, never by raw hexadecimal.
+29. Create child from the inspector.
+30. Titles wrap and the card grows to hold them.
+31. The inspector and filter panels resize.
+32. Tasks inherit the tags of the tasks above them, configurably.
+33. A task holding active work reads as active, derived and never stored.
+34. Tag colors come from a bright rainbow ramp; borders carry the tag family.
+35. Each visual channel is told what it means, with example themes.
+36. A parent task is the box its subtree sits in.
+37. Normalize hangs subtrees under their head, finished prerequisites above.
+38. Normalize pulls active heads together, each carrying its subtree.
+39. Group into columns by tag, sequence, time, priority, or state, and sort
+    within them.
+40. The timeline has an orientation, a scale, and duration blocks.
+41. A void state for items created in error, distinct from canceled.
 
 ## Configuration
 
@@ -73,7 +89,9 @@ rather than ignored. Reload theme re-reads it in place, and writes the current
 defaults the first time as an editable starting point.
 
 Sections: `[node]`, `[edge]`, `[tag]`, `[layout]`, `[focus]`, `[timeline]`,
-`[parent]`, `[weight]`, `[inspector]`. A `[safety]` section from an earlier
+`[parent]`, `[weight]`, `[inspector]`. Example arrangements live in
+`docs/themes/`, including the visual channels: a node's bar, body, and border are
+each told what they stand for rather than being wired to one meaning. A `[safety]` section from an earlier
 version is still accepted so existing files keep loading, but it no longer does
 anything: deleting left the editor.
 
@@ -94,11 +112,20 @@ log, and the CLI integration suite.
 
 These were considered and put off deliberately, not overlooked.
 
-1. Live physics: continuous gravity and repulsion, so the graph self-organizes and
+0. A scheduled time of day. The ledger stores a scheduled date only, so the
+   timeline's second, hourly dimension has nothing to place tasks against. It
+   needs a field and a protocol version, and is the next thing the timeline
+   wants.
+1. A forced purge, behind a confirmation that requires retyping the task title.
+   Voiding and deleting both stay reversible until then.
+2. The proquints and todo-standard skill, pending which standard is meant.
+   TE-0012 records what shipped and what the rendering deliberately does not do.
+3. Live physics: continuous gravity and repulsion, so the graph self-organizes and
    reacts while dragging. The eased transitions and the overlap pass are the
    settling half of it; the always-running simulation is the part left.
-2. Timeline snapping: dragging a task onto a day to set its scheduled date.
-3. Sort and group options for the task views.
+4. Timeline snapping: dragging a task onto a day to set its scheduled date.
+5. Grouping and sorting in the CLI listings, which so far exist only in the
+   graph editor.
 
 ## Remaining work
 
@@ -112,6 +139,11 @@ These were considered and put off deliberately, not overlooked.
    already available, such as size-by-weight tuned against real data.
 5. Measure region label widths with a text galley rather than estimating from the
    font size, if a clipped label ever lands visibly short or long.
+6. Compacting active heads runs after the overlap pass, so branches keep their
+   spacing while heads move; a head's own branch can end up overlapping a
+   neighbor's. Re-running Unstack separates them.
+7. Tag inheritance walks the ancestor chain per task on each read. Fine at this
+   size; an index would be the upgrade if a tree ever gets deep and wide.
 
 ## Protocol sequence
 
@@ -122,9 +154,10 @@ These were considered and put off deliberately, not overlooked.
 - v10: reversible item deletion (`item.deleted`, `item.restored`).
 - v11: difficulty and effort estimate fields.
 - v12: typed cross-project relations.
+- v13: the void state, for items created in error.
 
 Each protocol document is in `docs/protocols/`. New ledger writes use the latest
-protocol; import accepts historical v5 through v12 events. Deletion is a
+protocol; import accepts historical v5 through v13 events. Deletion is a
 projection state, not ledger truth: the log stays append-only and no historical
 event is removed or rewritten.
 
