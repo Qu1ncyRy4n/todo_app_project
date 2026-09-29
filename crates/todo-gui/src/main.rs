@@ -1,10 +1,13 @@
 //! Native graph editor for the local Todo Ledger.
 
+mod theme;
+
 use anyhow::{Context, Result, bail};
 use chrono::{Local, NaiveDate};
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec2};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fs, path::PathBuf};
+use theme::Theme;
 use todo_core::{ItemState, NamespacePath, Priority};
 use todo_store::{
     AppConfig, AppPaths, Citation, FocusSequence, ItemPatch, ItemScope, Ledger, NamespaceEntry,
@@ -74,6 +77,7 @@ struct TodoGui {
     scheduled_draft: String,
     graph_pan: Vec2,
     graph_zoom: f32,
+    theme: Theme,
     new_task_open: bool,
     new_task_title: String,
     note_draft: String,
@@ -126,6 +130,7 @@ impl TodoGui {
             scheduled_draft: String::new(),
             graph_pan: Vec2::ZERO,
             graph_zoom: 1.0,
+            theme: Theme::default(),
             new_task_open: false,
             new_task_title: String::new(),
             note_draft: String::new(),
@@ -1156,7 +1161,7 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
     let show_dependencies = app.show_dependency_graph;
     let show_blockers = app.show_blocker_graph;
     if app.show_tag_constellation {
-        draw_tag_constellation(&painter, &items, &positions, app.graph_zoom);
+        draw_tag_constellation(&painter, &items, &positions, app.graph_zoom, &app.theme);
     }
     if app.show_focus_window {
         let active = items
@@ -1242,6 +1247,17 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
             }
         };
         painter.rect_filled(node, 7.0, fill);
+        if let Some(accent) = node_tag_color(item, &app.theme) {
+            let stripe = app.theme.tag.node_stripe_width * app.graph_zoom;
+            painter.rect_filled(
+                Rect::from_min_max(
+                    node.left_top(),
+                    egui::pos2(node.left() + stripe, node.bottom()),
+                ),
+                7.0,
+                accent,
+            );
+        }
         painter.rect_stroke(
             node,
             7.0,
@@ -1351,6 +1367,7 @@ fn draw_tag_constellation(
     items: &[StoredItem],
     positions: &HashMap<String, Pos2>,
     zoom: f32,
+    theme: &Theme,
 ) {
     let mut groups: HashMap<String, Vec<Pos2>> = HashMap::new();
     for item in items {
@@ -1375,18 +1392,28 @@ fn draw_tag_constellation(
         let Some(bounds) = bounds_for_points(points, Vec2::new(92.0, 38.0) * zoom) else {
             continue;
         };
-        let color = tag_color(&path);
+        let color = theme.tag.color(&path);
         painter.rect_filled(
             bounds.expand(16.0),
             18.0,
-            Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 26),
+            Color32::from_rgba_unmultiplied(
+                color.r(),
+                color.g(),
+                color.b(),
+                theme.tag.region_fill_alpha,
+            ),
         );
         painter.rect_stroke(
             bounds.expand(16.0),
             18.0,
             Stroke::new(
                 1.0,
-                Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), 110),
+                Color32::from_rgba_unmultiplied(
+                    color.r(),
+                    color.g(),
+                    color.b(),
+                    theme.tag.region_stroke_alpha,
+                ),
             ),
             egui::StrokeKind::Outside,
         );
@@ -1408,12 +1435,22 @@ fn bounds_for_points(points: &[Pos2], half_size: Vec2) -> Option<Rect> {
     ))
 }
 
-fn tag_color(path: &str) -> Color32 {
-    let value = path.bytes().fold(0_u32, |hash, byte| {
-        hash.wrapping_mul(31).wrapping_add(u32::from(byte))
-    });
-    let hue = u8::try_from(value % 180).unwrap_or(0);
-    Color32::from_rgb(55 + hue / 5, 135 + hue / 4, 95 + hue / 6)
+/// Returns a node's tag accent from the item's own deepest tag.
+///
+/// The accent never comes from a region the node merely sits inside, so an item
+/// tagged only `work` keeps the plain `work` color while drawn within a
+/// `work/cdint` region. Ties break alphabetically to stay deterministic.
+fn node_tag_color(item: &StoredItem, theme: &Theme) -> Option<Color32> {
+    let mut tags = item
+        .namespaces
+        .iter()
+        .map(NamespacePath::as_str)
+        .collect::<Vec<_>>();
+    tags.sort_unstable();
+    let deepest = tags
+        .into_iter()
+        .max_by_key(|tag| tag.matches('/').count())?;
+    Some(theme.tag.color(deepest))
 }
 
 fn load_layout(path: &std::path::Path) -> HashMap<String, Vec2> {
