@@ -438,12 +438,69 @@ pub fn timeline_positions(
     positions
 }
 
+/// Groups points into clusters where each point is within `max_distance` of another.
+///
+/// Single linkage: a chain of near neighbors stays one cluster, so a tag applied to
+/// one spread-out body of work keeps one region, while the same tag applied to two
+/// distant groups draws two. Without this a single tag's region stretches across
+/// everything it touches and swallows unrelated work.
+///
+/// Clusters come back in the order their first point was given, so drawing is
+/// stable frame to frame.
+pub fn cluster_points(points: &[Pos2], max_distance: f32) -> Vec<Vec<Pos2>> {
+    // ponytail: O(n^2) over the nodes on screen, which is tens, not thousands.
+    // A grid index is the upgrade if a graph ever gets large enough to feel it.
+    let mut parent: Vec<usize> = (0..points.len()).collect();
+    fn find(parent: &mut [usize], index: usize) -> usize {
+        let mut current = index;
+        while parent.get(current).copied().unwrap_or(current) != current {
+            current = parent.get(current).copied().unwrap_or(current);
+        }
+        let mut walk = index;
+        while parent.get(walk).copied().unwrap_or(walk) != walk {
+            let next = parent.get(walk).copied().unwrap_or(walk);
+            if let Some(slot) = parent.get_mut(walk) {
+                *slot = current;
+            }
+            walk = next;
+        }
+        current
+    }
+    let limit = max_distance.max(0.0);
+    for (left, first) in points.iter().enumerate() {
+        for (right, second) in points.iter().enumerate().skip(left + 1) {
+            if (*first - *second).length() <= limit {
+                let root_left = find(&mut parent, left);
+                let root_right = find(&mut parent, right);
+                if root_left != root_right
+                    && let Some(slot) = parent.get_mut(root_right)
+                {
+                    *slot = root_left;
+                }
+            }
+        }
+    }
+    let mut order: Vec<usize> = Vec::new();
+    let mut groups: BTreeMap<usize, Vec<Pos2>> = BTreeMap::new();
+    for (index, point) in points.iter().enumerate() {
+        let root = find(&mut parent, index);
+        if !groups.contains_key(&root) {
+            order.push(root);
+        }
+        groups.entry(root).or_default().push(*point);
+    }
+    order
+        .into_iter()
+        .filter_map(|root| groups.remove(&root))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         BandSpacing, FlowDirection, FlowSpacing, SeparationSpacing, TimelineSpacing,
-        arrowhead_points, banded_positions, centroid, convex_hull, expand_path, layered_positions,
-        separate_groups, shaft_end, smooth_closed_path, timeline_positions,
+        arrowhead_points, banded_positions, centroid, cluster_points, convex_hull, expand_path,
+        layered_positions, separate_groups, shaft_end, smooth_closed_path, timeline_positions,
     };
     use eframe::egui::{Vec2, pos2};
 
@@ -608,6 +665,44 @@ mod tests {
         let first = separate_groups(&positions, &groups, separation());
         let second = separate_groups(&positions, &groups, separation());
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn near_points_form_one_cluster() {
+        let clusters = cluster_points(&[pos2(0.0, 0.0), pos2(50.0, 0.0), pos2(100.0, 0.0)], 80.0);
+        assert_eq!(clusters.len(), 1);
+    }
+
+    #[test]
+    fn distant_points_form_separate_clusters() {
+        let clusters = cluster_points(&[pos2(0.0, 0.0), pos2(900.0, 0.0)], 80.0);
+        assert_eq!(clusters.len(), 2);
+    }
+
+    #[test]
+    fn a_chain_of_neighbors_stays_one_cluster() {
+        let chain = (0_u8..6)
+            .map(|step| pos2(f32::from(step) * 70.0, 0.0))
+            .collect::<Vec<_>>();
+        assert_eq!(cluster_points(&chain, 80.0).len(), 1);
+    }
+
+    #[test]
+    fn two_bodies_of_work_draw_two_regions() {
+        let points = vec![
+            pos2(0.0, 0.0),
+            pos2(60.0, 10.0),
+            pos2(800.0, 0.0),
+            pos2(860.0, 20.0),
+        ];
+        let clusters = cluster_points(&points, 100.0);
+        assert_eq!(clusters.len(), 2);
+        assert!(clusters.iter().all(|cluster| cluster.len() == 2));
+    }
+
+    #[test]
+    fn clustering_nothing_yields_nothing() {
+        assert!(cluster_points(&[], 50.0).is_empty());
     }
 
     #[test]

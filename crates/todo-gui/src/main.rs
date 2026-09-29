@@ -2630,12 +2630,12 @@ fn draw_tag_constellation(
     }
     let mut paths = groups.keys().cloned().collect::<Vec<_>>();
     paths.sort_by_key(|path| path.matches('/').count());
+    let half_size = {
+        let (width, height) = theme.node.size();
+        Vec2::new(width / 2.0 + 14.0, height / 2.0 + 10.0) * zoom
+    };
     for path in paths {
         let Some(points) = groups.get(&path) else {
-            continue;
-        };
-        let half_size = Vec2::new(92.0, 38.0) * zoom;
-        let Some(bounds) = bounds_for_points(points, half_size) else {
             continue;
         };
         let color = palette.color(&path, &theme.tag);
@@ -2654,33 +2654,90 @@ fn draw_tag_constellation(
                 theme.tag.region_stroke_alpha,
             ),
         );
-        if theme.tag.region_shape == RegionShape::Hull {
-            let corners = node_corners(points, half_size);
-            let hull = geometry::convex_hull(&corners);
-            let padded = geometry::expand_path(&hull, theme.tag.region_padding);
-            let outline = geometry::smooth_closed_path(&padded, theme.tag.region_smoothing);
-            if outline.len() >= 3 {
-                painter.add(egui::Shape::convex_polygon(outline, fill, stroke));
-                painter.text(
-                    bounds.left_top() + Vec2::new(5.0, 4.0),
-                    Align2::LEFT_TOP,
-                    path,
-                    FontId::proportional(11.0),
-                    color,
-                );
+        // One region per cluster of nearby members, so a tag spread over two
+        // distant bodies of work draws two regions instead of one that spans the
+        // canvas and appears to contain everything between them.
+        for cluster in geometry::cluster_points(points, theme.tag.cluster_distance * zoom) {
+            if cluster.len() < theme.tag.min_region_members {
                 continue;
             }
+            let Some(bounds) = bounds_for_points(&cluster, half_size) else {
+                continue;
+            };
+            let drawn = if theme.tag.region_shape == RegionShape::Hull {
+                let corners = node_corners(&cluster, half_size);
+                let hull = geometry::convex_hull(&corners);
+                let padded = geometry::expand_path(&hull, theme.tag.region_padding);
+                let outline = geometry::smooth_closed_path(&padded, theme.tag.region_smoothing);
+                if outline.len() >= 3 {
+                    painter.add(egui::Shape::convex_polygon(outline, fill, stroke));
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            if !drawn {
+                painter.rect_filled(bounds.expand(16.0), 18.0, fill);
+                painter.rect_stroke(bounds.expand(16.0), 18.0, stroke, egui::StrokeKind::Outside);
+            }
+            draw_region_label(painter, bounds, &path, color, theme, zoom);
         }
-        painter.rect_filled(bounds.expand(16.0), 18.0, fill);
-        painter.rect_stroke(bounds.expand(16.0), 18.0, stroke, egui::StrokeKind::Outside);
-        painter.text(
-            bounds.left_top() + Vec2::new(5.0, 4.0),
-            Align2::LEFT_TOP,
-            path,
-            FontId::proportional(11.0),
-            color,
-        );
     }
+}
+
+/// Draws a region's label above it, clipped to the width the region can hold.
+///
+/// A label sits outside the region rather than over its members, so it never
+/// overlaps a task card, and a region too narrow to read a label goes unlabeled
+/// rather than showing a few clipped characters.
+fn draw_region_label(
+    painter: &egui::Painter,
+    bounds: Rect,
+    path: &str,
+    color: Color32,
+    theme: &Theme,
+    zoom: f32,
+) {
+    let width = bounds.width();
+    if width < theme.tag.label_min_width * zoom {
+        return;
+    }
+    let text = if theme.tag.label_full_path {
+        path.to_owned()
+    } else {
+        path.rsplit('/').next().unwrap_or(path).to_owned()
+    };
+    let font_size = theme.tag.label_font_size * zoom;
+    // Roughly half the font size per character is close enough to keep a label
+    // inside its region without measuring the galley first.
+    let per_character = (font_size * 0.55).max(1.0);
+    let mut shown = String::new();
+    let mut used = 0.0_f32;
+    let mut clipped = false;
+    for character in text.chars() {
+        if used + per_character > width {
+            clipped = true;
+            break;
+        }
+        shown.push(character);
+        used += per_character;
+    }
+    if clipped {
+        shown.pop();
+        shown.push('…');
+    }
+    if shown.is_empty() {
+        return;
+    }
+    painter.text(
+        bounds.center_top() - Vec2::new(0.0, 6.0 * zoom),
+        Align2::CENTER_BOTTOM,
+        shown,
+        FontId::proportional(font_size),
+        color,
+    );
 }
 
 /// Returns the corner points of every node box, for hulls that wrap whole nodes.

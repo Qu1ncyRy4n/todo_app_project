@@ -571,6 +571,19 @@ pub struct TagTheme {
     pub region_smoothing: u8,
     /// How tag hues are assigned.
     pub coloring: TagColoring,
+    /// How far apart two tagged tasks can sit and still share one region.
+    ///
+    /// Without a limit, one tag draws a single region spanning everything it
+    /// touches, which swallows unrelated work sitting in between.
+    pub cluster_distance: f32,
+    /// How many tasks a cluster needs before it is drawn as a region.
+    pub min_region_members: usize,
+    /// Whether the full tag path is drawn, rather than the last segment.
+    pub label_full_path: bool,
+    /// Font size of a region label.
+    pub label_font_size: f32,
+    /// Narrowest region, in points, that still gets a label.
+    pub label_min_width: f32,
 }
 
 impl Default for TagTheme {
@@ -589,6 +602,11 @@ impl Default for TagTheme {
             region_padding: 24.0,
             region_smoothing: 2,
             coloring: TagColoring::default(),
+            cluster_distance: 420.0,
+            min_region_members: 2,
+            label_full_path: false,
+            label_font_size: 11.0,
+            label_min_width: 70.0,
         }
     }
 }
