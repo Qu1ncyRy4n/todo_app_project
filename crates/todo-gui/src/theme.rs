@@ -511,6 +511,13 @@ pub struct TimelineTheme {
     pub show_ruler: bool,
     /// How many days of ruler to draw either side of the scheduled range.
     pub ruler_margin_days: u16,
+    /// Distance from the top of the canvas to the day axis.
+    ///
+    /// The ruler is pinned to the viewport rather than carried by the graph
+    /// transform, so panning the graph can never take the axis off screen.
+    pub ruler_top_offset: f32,
+    /// Whether arranging a timeline also resets the pan, framing what it built.
+    pub reset_view: bool,
     /// Whether unscheduled tasks are parked in a lane of their own.
     ///
     /// Scheduled dates alone drive the timeline: due is a commitment and defer
@@ -525,6 +532,8 @@ impl Default for TimelineTheme {
             lane_height: 82.0,
             show_ruler: true,
             ruler_margin_days: 2,
+            ruler_top_offset: 34.0,
+            reset_view: true,
             park_unscheduled: true,
         }
     }

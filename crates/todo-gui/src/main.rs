@@ -918,6 +918,11 @@ impl TodoGui {
         }
         self.relax_if_enabled(rect);
         self.focus_mode = false;
+        if self.theme.timeline.reset_view {
+            // Focus layout leaves the view framed on the active band. Keeping that
+            // pan would place the timeline somewhere off screen.
+            self.graph_pan = Vec2::ZERO;
+        }
         self.timeline_origin = Some(origin);
         self.save_layout();
         self.message = Some("Timeline arranged by scheduled date.".to_owned());
@@ -2589,13 +2594,22 @@ fn draw_edge(
 fn draw_timeline_ruler(painter: &egui::Painter, rect: Rect, origin: Pos2, app: &TodoGui) {
     let today = Local::now().date_naive();
     let day_width = app.theme.timeline.day_width * app.graph_zoom;
-    if day_width <= f32::EPSILON {
-        return;
-    }
     let center = rect.center();
     let axis_origin = center + (origin - center) * app.graph_zoom + app.graph_pan;
+    // The axis is pinned to the top of the canvas and only follows the graph
+    // horizontally. Carrying its height through the transform let a pan left over
+    // from another layout push the whole ruler off screen.
+    let axis_y = rect.top() + app.theme.timeline.ruler_top_offset;
     let margin = f32::from(app.theme.timeline.ruler_margin_days) * day_width;
-    let axis_y = axis_origin.y - 70.0 * app.graph_zoom;
+    let ticks = geometry::ruler_ticks(
+        axis_origin.x,
+        day_width,
+        (rect.left(), rect.right()),
+        margin,
+    );
+    if ticks.is_empty() {
+        return;
+    }
     painter.line_segment(
         [
             Pos2::new(rect.left(), axis_y),
@@ -2603,23 +2617,11 @@ fn draw_timeline_ruler(painter: &egui::Painter, rect: Rect, origin: Pos2, app: &
         ],
         Stroke::new(1.0, Color32::from_gray(90)),
     );
-    // Stepping in whole days keeps every tick on a real date instead of a rounded
-    // pixel column.
-    let mut index: i16 = 0;
-    while index > i16::MIN + 1
-        && axis_origin.x + f32::from(index) * day_width > rect.left() - margin
-    {
-        index -= 1;
-    }
-    while index < i16::MAX {
-        let x = axis_origin.x + f32::from(index) * day_width;
-        if x > rect.right() + margin {
-            break;
-        }
-        let Some(day) = today.checked_add_signed(chrono::Duration::days(i64::from(index))) else {
-            break;
+    for (offset, x) in ticks {
+        let Some(day) = today.checked_add_signed(chrono::Duration::days(i64::from(offset))) else {
+            continue;
         };
-        let is_today = day == today;
+        let is_today = offset == 0;
         let tick_color = if is_today {
             Color32::from_rgb(224, 188, 73)
         } else {
@@ -2640,7 +2642,6 @@ fn draw_timeline_ruler(painter: &egui::Painter, rect: Rect, origin: Pos2, app: &
                 Color32::from_gray(140)
             },
         );
-        index += 1;
     }
 }
 

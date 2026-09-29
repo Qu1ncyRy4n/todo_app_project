@@ -604,13 +604,50 @@ pub fn is_settled(current: Vec2, target: Vec2, tolerance: f32) -> bool {
     (target - current).length() <= tolerance
 }
 
+/// Returns the day ticks visible across a viewport, as day offset and x position.
+///
+/// Day zero sits at `axis_x`; offsets run negative to the left and positive to the
+/// right. Ticks are stepped in whole days so every mark lands on a real date rather
+/// than a rounded pixel column, and the span is bounded by the viewport plus a
+/// margin, so a far-off axis yields nothing instead of looping.
+pub fn ruler_ticks(
+    axis_x: f32,
+    day_width: f32,
+    viewport: (f32, f32),
+    margin: f32,
+) -> Vec<(i16, f32)> {
+    let (left, right) = viewport;
+    if day_width <= f32::EPSILON || right < left {
+        return Vec::new();
+    }
+    let first_edge = left - margin;
+    let last_edge = right + margin;
+    let mut index: i16 = 0;
+    while index > i16::MIN + 1 && axis_x + f32::from(index) * day_width > first_edge {
+        index -= 1;
+    }
+    while index < i16::MAX && axis_x + f32::from(index) * day_width < first_edge {
+        index += 1;
+    }
+    let mut ticks = Vec::new();
+    while index < i16::MAX {
+        let x = axis_x + f32::from(index) * day_width;
+        if x > last_edge {
+            break;
+        }
+        ticks.push((index, x));
+        index += 1;
+    }
+    ticks
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         BandSpacing, FlowDirection, FlowSpacing, OverlapSpacing, SeparationSpacing,
         TimelineSpacing, arrowhead_points, banded_positions, centroid, cluster_points, convex_hull,
         ease_toward, expand_path, fit_view, is_settled, layered_positions, relax_overlaps,
-        separate_groups, shaft_end, smooth_closed_path, timeline_positions,
+        ruler_ticks, separate_groups, shaft_end, smooth_closed_path, timeline_positions,
     };
     use eframe::egui::{Rect, Vec2, pos2};
 
@@ -762,6 +799,41 @@ mod tests {
             stepped = ease_toward(stepped, target, 0.02, 0.4);
         }
         assert!((one_long.x - stepped.x).abs() < 1.0);
+    }
+
+    #[test]
+    fn a_ruler_covers_the_viewport() {
+        let ticks = ruler_ticks(500.0, 100.0, (0.0, 1000.0), 0.0);
+        assert!(ticks.len() >= 10);
+        assert!(ticks.iter().all(|(_, x)| *x >= -0.001 && *x <= 1000.001));
+    }
+
+    #[test]
+    fn ruler_ticks_are_one_day_apart() {
+        let ticks = ruler_ticks(500.0, 100.0, (0.0, 1000.0), 0.0);
+        for pair in ticks.windows(2) {
+            if let [(first_day, first_x), (second_day, second_x)] = pair {
+                assert_eq!(second_day - first_day, 1);
+                assert!((second_x - first_x - 100.0).abs() < 0.001);
+            }
+        }
+    }
+
+    #[test]
+    fn day_zero_is_marked_when_the_axis_is_in_view() {
+        let ticks = ruler_ticks(500.0, 100.0, (0.0, 1000.0), 0.0);
+        assert!(ticks.iter().any(|(day, _)| *day == 0));
+    }
+
+    #[test]
+    fn an_axis_far_off_screen_yields_no_ticks_rather_than_looping() {
+        let ticks = ruler_ticks(9_000_000.0, 100.0, (0.0, 1000.0), 0.0);
+        assert!(ticks.is_empty());
+    }
+
+    #[test]
+    fn a_zero_day_width_yields_nothing() {
+        assert!(ruler_ticks(0.0, 0.0, (0.0, 1000.0), 0.0).is_empty());
     }
 
     #[test]
