@@ -1,6 +1,7 @@
 //! Native graph editor for the local Todo Ledger.
 
 mod geometry;
+mod tags;
 mod theme;
 
 use anyhow::{Context, Result, bail};
@@ -9,6 +10,7 @@ use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec
 use geometry::{BandSpacing, FlowSpacing, SeparationSpacing, TimelineSpacing};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fs, path::PathBuf};
+use tags::{TagFilter, TagFilterState};
 use theme::{InspectorTheme, NodeShape, RegionShape, TagColoring, TagPalette, Theme};
 use todo_core::{ItemState, NamespacePath, Priority, RelationKind, WeightInputs};
 use todo_store::{
@@ -76,6 +78,7 @@ struct TodoGui {
     show_focus_window: bool,
     show_completed: bool,
     tag_filter: String,
+    tag_states: TagFilter,
     message: Option<String>,
     raw_json: String,
     tag_draft: String,
@@ -151,6 +154,7 @@ impl TodoGui {
             show_focus_window: true,
             show_completed: false,
             tag_filter: String::new(),
+            tag_states: TagFilter::default(),
             message: theme_message,
             raw_json: String::new(),
             tag_draft: String::new(),
@@ -306,22 +310,53 @@ impl TodoGui {
         });
     }
 
-    /// Draws the tag filter list.
+    /// Draws the tag tree, where each tag cycles neutral, only, then hidden.
+    ///
+    /// The search box narrows which rows are listed; it does not filter tasks on its
+    /// own, so what is shown in the graph is always the tag states and nothing else.
     fn draw_tag_filters(&mut self, ui: &mut egui::Ui) {
-        ui.text_edit_singleline(&mut self.tag_filter);
-        if ui.button("Clear tag filter").clicked() {
-            self.tag_filter.clear();
+        ui.horizontal(|ui| {
+            ui.text_edit_singleline(&mut self.tag_filter);
+            if ui.small_button("Clear").clicked() {
+                self.tag_filter.clear();
+            }
+        });
+        if self.tag_states.is_active() && ui.button("Reset tag filters").clicked() {
+            self.tag_states.clear();
         }
         let query = self.tag_filter.to_lowercase();
-        let matches = self
-            .assigned_tag_paths()
-            .into_iter()
-            .filter(|path| query.is_empty() || path.to_lowercase().contains(&query))
-            .collect::<Vec<_>>();
-        for path in matches {
-            if ui.small_button(&path).clicked() {
-                self.tag_filter = path;
+        let assigned = self.assigned_tag_paths();
+        let rows = tags::tag_rows(assigned.iter().map(String::as_str));
+        for row in rows {
+            if !query.is_empty() && !row.path.to_lowercase().contains(&query) {
+                continue;
             }
+            let state = self.tag_states.state_of(&row.path);
+            let inherited = self.tag_states.resolve(&row.path);
+            ui.horizontal(|ui| {
+                ui.add_space(f32::from(u8::try_from(row.depth).unwrap_or(u8::MAX)) * 12.0);
+                let color = match inherited {
+                    TagFilterState::Only => Color32::from_rgb(120, 190, 140),
+                    TagFilterState::Hidden => Color32::from_rgb(200, 120, 110),
+                    TagFilterState::Neutral => Color32::GRAY,
+                };
+                if ui
+                    .small_button(&row.label)
+                    .on_hover_text(&row.path)
+                    .clicked()
+                {
+                    self.tag_states.cycle(&row.path);
+                }
+                // An inherited state is shown in parentheses, so it is clear the row
+                // is following its parent rather than holding a state of its own.
+                let marker =
+                    if state == TagFilterState::Neutral && inherited != TagFilterState::Neutral {
+                        format!("({})", inherited.marker())
+                    } else {
+                        state.marker().to_owned()
+                    };
+                ui.colored_label(color, marker);
+            });
         }
     }
 
@@ -1033,18 +1068,15 @@ impl TodoGui {
 
     /// Returns the items the graph is currently drawing, after state and tag filters.
     fn visible_items(&self) -> Vec<StoredItem> {
-        let tag_filter = self.tag_filter.to_lowercase();
         self.items
             .iter()
             .filter(|item| {
                 (self.show_completed
                     || (item.item.state != ItemState::Done
                         && item.item.state != ItemState::Canceled))
-                    && (tag_filter.is_empty()
-                        || item
-                            .namespaces
-                            .iter()
-                            .any(|tag| tag.as_str().to_lowercase().contains(&tag_filter)))
+                    && self
+                        .tag_states
+                        .accepts(item.namespaces.iter().map(NamespacePath::as_str))
             })
             .cloned()
             .collect()
