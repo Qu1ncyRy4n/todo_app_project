@@ -8,7 +8,11 @@ use crate::geometry::FlowDirection;
 use anyhow::{Context, Result};
 use eframe::egui::{Color32, ecolor::Hsva};
 use serde::{Deserialize, Serialize};
-use std::{fs, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    fs,
+    path::Path,
+};
 
 /// Presentation settings for the whole graph editor.
 #[derive(Clone, Debug, Default, PartialEq, Deserialize, Serialize)]
@@ -220,6 +224,112 @@ impl EdgeTheme {
     }
 }
 
+/// How tag paths are assigned hues.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TagColoring {
+    /// Divide the hue wheel between the tag groups that are actually visible.
+    #[default]
+    Wheel,
+    /// Hash each tag group to a fixed hue, independent of what else is visible.
+    ///
+    /// Colors stay put as tags come and go, at the cost of uneven spacing.
+    GroupHash,
+}
+
+/// A hierarchy-aware color assignment over the tags currently visible.
+///
+/// The hue wheel is divided evenly between visible top-level groups in
+/// alphabetical order. Each group's sector is then subdivided between its visible
+/// children, so the first child sits nearest the parent hue and the last sits
+/// furthest, while depth continues to darken. Colors are derived only from the
+/// visible tag tree, never from item ids or random state, so the same set of tags
+/// always paints the same way.
+#[derive(Clone, Debug, Default)]
+pub struct TagPalette {
+    colors: HashMap<String, Color32>,
+}
+
+impl TagPalette {
+    /// Builds a palette over every tag path that is currently visible.
+    pub fn build<'a>(paths: impl IntoIterator<Item = &'a str>, theme: &TagTheme) -> Self {
+        let mut children: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let mut roots: BTreeSet<String> = BTreeSet::new();
+        for path in paths {
+            let mut prefix = String::new();
+            for segment in path.split('/') {
+                if prefix.is_empty() {
+                    prefix.push_str(segment);
+                    roots.insert(prefix.clone());
+                } else {
+                    let parent = prefix.clone();
+                    prefix.push('/');
+                    prefix.push_str(segment);
+                    children.entry(parent).or_default().insert(prefix.clone());
+                }
+            }
+        }
+        let mut colors = HashMap::new();
+        let count = roots.len();
+        let width = if count == 0 {
+            1.0
+        } else {
+            1.0 / f32::from(u16::try_from(count).unwrap_or(u16::MAX))
+        };
+        for (index, root) in roots.iter().enumerate() {
+            let start = f32::from(u16::try_from(index).unwrap_or(u16::MAX)) * width;
+            assign_sector(root, start, width, 0, &children, theme, &mut colors);
+        }
+        Self { colors }
+    }
+
+    /// Returns the color for a tag path, falling back to the group hash mapping.
+    ///
+    /// A path outside the palette still gets a stable color rather than nothing,
+    /// which keeps a newly added tag visible before the next rebuild.
+    pub fn color(&self, path: &str, theme: &TagTheme) -> Color32 {
+        self.colors
+            .get(path)
+            .copied()
+            .unwrap_or_else(|| theme.hashed_color(path))
+    }
+}
+
+/// Assigns a hue sector to one tag and subdivides it between that tag's children.
+fn assign_sector(
+    path: &str,
+    start: f32,
+    width: f32,
+    depth: usize,
+    children: &BTreeMap<String, BTreeSet<String>>,
+    theme: &TagTheme,
+    colors: &mut HashMap<String, Color32>,
+) {
+    colors.insert(path.to_owned(), theme.shade(start, depth));
+    let Some(next) = children.get(path) else {
+        return;
+    };
+    let count = next.len();
+    if count == 0 {
+        return;
+    }
+    let step = width / f32::from(u16::try_from(count).unwrap_or(u16::MAX));
+    for (index, child) in next.iter().enumerate() {
+        let offset = f32::from(u16::try_from(index).unwrap_or(u16::MAX)) * step;
+        // The first child sits half a step from the parent hue and each later
+        // sibling drifts further, so siblings separate without leaving the sector.
+        assign_sector(
+            child,
+            start + offset + step / 2.0,
+            step,
+            depth + 1,
+            children,
+            theme,
+            colors,
+        );
+    }
+}
+
 /// Controls the region drawn around a parent task and its descendants.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -293,6 +403,8 @@ pub struct TagTheme {
     pub region_padding: f32,
     /// Chaikin rounding passes applied to a hull region.
     pub region_smoothing: u8,
+    /// How tag hues are assigned.
+    pub coloring: TagColoring,
 }
 
 impl Default for TagTheme {
@@ -310,6 +422,7 @@ impl Default for TagTheme {
             region_shape: RegionShape::Hull,
             region_padding: 24.0,
             region_smoothing: 2,
+            coloring: TagColoring::default(),
         }
     }
 }
@@ -320,30 +433,32 @@ impl TagTheme {
     /// A child tag is a deeper shade of its parent: `work` and `work/cdint` share
     /// one hue and differ only by depth. The mapping is a pure function of the
     /// path, never of an item id or random state, so it is stable across runs.
-    pub fn color(&self, path: &str) -> Color32 {
+    /// This is the fallback used when no visible tag tree is available.
+    pub fn hashed_color(&self, path: &str) -> Color32 {
         let group = path.split('/').next().unwrap_or(path);
         let hash = group.bytes().fold(0_u32, |hash, byte| {
             hash.wrapping_mul(31).wrapping_add(u32::from(byte))
         });
         let hue = f32::from(u16::try_from(hash % 360).unwrap_or(0)) / 360.0;
-        let depth = self.depth_of(path);
-        // ponytail: one shade step per depth level; the hierarchy-aware hue wheel
-        // that divides a parent sector between visible siblings is the upgrade.
+        self.shade(hue, path.matches('/').count())
+    }
+
+    /// Returns the color for a hue at a given tag depth.
+    ///
+    /// Depth darkens and saturates, so nesting reads as depth in any hue scheme.
+    pub fn shade(&self, hue: f32, depth: usize) -> Color32 {
+        let depth = f32::from(u8::try_from(depth).unwrap_or(u8::MAX));
         let saturation =
             (self.base_saturation + self.depth_saturation_step * depth).min(self.max_saturation);
         let value = (self.base_value - self.depth_value_step * depth).max(self.min_value);
-        Color32::from(Hsva::new(hue, saturation, value, 1.0))
-    }
-
-    /// Returns the tag depth of a path, where a top-level group is depth zero.
-    fn depth_of(&self, path: &str) -> f32 {
-        f32::from(u8::try_from(path.matches('/').count()).unwrap_or(u8::MAX))
+        Color32::from(Hsva::new(hue.rem_euclid(1.0), saturation, value, 1.0))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{EdgeTheme, NodeShape, NodeTheme, TagTheme, Theme};
+    use super::{EdgeTheme, NodeShape, NodeTheme, TagColoring, TagPalette, TagTheme, Theme};
+    use eframe::egui::Color32;
     use std::path::Path;
 
     #[test]
@@ -397,6 +512,71 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_palette_falls_back_to_the_hash_mapping() {
+        let theme = TagTheme::default();
+        let palette = TagPalette::build(std::iter::empty(), &theme);
+        assert_eq!(palette.color("work", &theme), theme.hashed_color("work"));
+    }
+
+    #[test]
+    fn a_single_group_still_receives_a_color() {
+        let theme = TagTheme::default();
+        let palette = TagPalette::build(["work"], &theme);
+        assert_ne!(palette.color("work", &theme), Color32::TRANSPARENT);
+    }
+
+    #[test]
+    fn separate_groups_take_separate_sectors() {
+        let theme = TagTheme::default();
+        let palette = TagPalette::build(["work", "home", "play"], &theme);
+        let work = palette.color("work", &theme);
+        let home = palette.color("home", &theme);
+        let play = palette.color("play", &theme);
+        assert_ne!(work, home);
+        assert_ne!(home, play);
+        assert_ne!(work, play);
+    }
+
+    #[test]
+    fn siblings_drift_further_from_the_parent_in_order() {
+        let theme = TagTheme::default();
+        let palette = TagPalette::build(["work/a", "work/b", "work/c"], &theme);
+        let first = palette.color("work/a", &theme);
+        let second = palette.color("work/b", &theme);
+        let third = palette.color("work/c", &theme);
+        assert_ne!(first, second);
+        assert_ne!(second, third);
+    }
+
+    #[test]
+    fn a_child_is_darker_than_its_parent_under_the_wheel() {
+        let theme = TagTheme::default();
+        let palette = TagPalette::build(["work/cdint"], &theme);
+        let parent = palette.color("work", &theme);
+        let child = palette.color("work/cdint", &theme);
+        let brightness =
+            |color: Color32| u32::from(color.r()) + u32::from(color.g()) + u32::from(color.b());
+        assert!(brightness(child) < brightness(parent));
+    }
+
+    #[test]
+    fn the_palette_is_deterministic_for_the_same_tags() {
+        let theme = TagTheme::default();
+        let first = TagPalette::build(["work/a", "home"], &theme);
+        let second = TagPalette::build(["home", "work/a"], &theme);
+        assert_eq!(
+            first.color("work/a", &theme),
+            second.color("work/a", &theme)
+        );
+    }
+
+    #[test]
+    fn the_coloring_mode_can_be_configured() {
+        let parsed: Result<Theme, _> = toml::from_str("[tag]\ncoloring = \"group_hash\"\n");
+        assert!(matches!(parsed, Ok(theme) if theme.tag.coloring == TagColoring::GroupHash));
+    }
+
+    #[test]
     fn arrowheads_ignore_zoom_by_default() {
         let theme = EdgeTheme::default();
         assert_eq!(theme.arrowhead_size(0.4), theme.arrowhead_size(2.5));
@@ -416,9 +596,9 @@ mod tests {
     #[test]
     fn a_child_tag_is_a_deeper_shade_of_its_parent() {
         let theme = TagTheme::default();
-        let parent = theme.color("work");
-        let child = theme.color("work/cdint");
-        let grandchild = theme.color("work/cdint/ingest");
+        let parent = theme.hashed_color("work");
+        let child = theme.hashed_color("work/cdint");
+        let grandchild = theme.hashed_color("work/cdint/ingest");
         assert!(child.g() < parent.g() || child.r() < parent.r() || child.b() < parent.b());
         assert!(grandchild.g() <= child.g());
     }
@@ -426,15 +606,15 @@ mod tests {
     #[test]
     fn separate_groups_receive_separate_colors() {
         let theme = TagTheme::default();
-        assert_ne!(theme.color("work"), theme.color("home"));
+        assert_ne!(theme.hashed_color("work"), theme.hashed_color("home"));
     }
 
     #[test]
     fn a_child_keeps_the_hue_of_its_group() {
         let theme = TagTheme::default();
-        let shallow = theme.color("work/cdint");
-        let deep = theme.color("work/cdint/ingest/api");
-        let other = theme.color("home/cdint");
+        let shallow = theme.hashed_color("work/cdint");
+        let deep = theme.hashed_color("work/cdint/ingest/api");
+        let other = theme.hashed_color("home/cdint");
         assert_ne!(shallow, other);
         assert_ne!(shallow, deep);
     }
@@ -442,13 +622,16 @@ mod tests {
     #[test]
     fn coloring_is_deterministic() {
         let theme = TagTheme::default();
-        assert_eq!(theme.color("work/cdint"), theme.color("work/cdint"));
+        assert_eq!(
+            theme.hashed_color("work/cdint"),
+            theme.hashed_color("work/cdint")
+        );
     }
 
     #[test]
     fn deep_tags_stay_above_the_brightness_floor() {
         let theme = TagTheme::default();
-        let very_deep = theme.color("work/a/b/c/d/e/f/g/h");
+        let very_deep = theme.hashed_color("work/a/b/c/d/e/f/g/h");
         assert!(very_deep.r() > 0 || very_deep.g() > 0 || very_deep.b() > 0);
     }
 }

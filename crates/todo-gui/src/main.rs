@@ -9,7 +9,7 @@ use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Vec
 use geometry::{BandSpacing, FlowSpacing};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fs, path::PathBuf};
-use theme::{NodeShape, RegionShape, Theme};
+use theme::{NodeShape, RegionShape, TagColoring, TagPalette, Theme};
 use todo_core::{ItemState, NamespacePath, Priority};
 use todo_store::{
     AppConfig, AppPaths, Citation, FocusSequence, ItemPatch, ItemScope, Ledger, NamespaceEntry,
@@ -1347,6 +1347,17 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
         app.focus_layout(rect);
     }
     let items = app.visible_items();
+    // The wheel divides hues between the tags actually on screen, so the palette is
+    // rebuilt whenever the visible set changes.
+    let palette = match app.theme.tag.coloring {
+        TagColoring::Wheel => TagPalette::build(
+            items
+                .iter()
+                .flat_map(|item| item.namespaces.iter().map(NamespacePath::as_str)),
+            &app.theme.tag,
+        ),
+        TagColoring::GroupHash => TagPalette::default(),
+    };
     let positions = graph_positions(
         &items,
         rect,
@@ -1358,10 +1369,24 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
     let show_dependencies = app.show_dependency_graph;
     let show_blockers = app.show_blocker_graph;
     if app.show_parent_regions && app.theme.parent.show_regions {
-        draw_parent_regions(&painter, &items, &positions, app.graph_zoom, &app.theme);
+        draw_parent_regions(
+            &painter,
+            &items,
+            &positions,
+            app.graph_zoom,
+            &app.theme,
+            &palette,
+        );
     }
     if app.show_tag_constellation {
-        draw_tag_constellation(&painter, &items, &positions, app.graph_zoom, &app.theme);
+        draw_tag_constellation(
+            &painter,
+            &items,
+            &positions,
+            app.graph_zoom,
+            &app.theme,
+            &palette,
+        );
     }
     if app.show_focus_window && app.theme.focus.show_frame {
         let active = items
@@ -1457,7 +1482,7 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
                 ItemState::Inbox => Color32::from_rgb(59, 79, 94),
             }
         };
-        let accent = node_tag_color(item, &app.theme);
+        let accent = node_tag_color(item, &app.theme, &palette);
         let outline = Stroke::new(
             if selected { 3.0 } else { 1.0 },
             if selected {
@@ -1671,6 +1696,7 @@ fn draw_parent_regions(
     positions: &HashMap<String, Pos2>,
     zoom: f32,
     theme: &Theme,
+    palette: &TagPalette,
 ) {
     let mut children: HashMap<String, Vec<String>> = HashMap::new();
     for item in items {
@@ -1699,7 +1725,7 @@ fn draw_parent_regions(
         if points.len() < 2 {
             continue;
         }
-        let color = node_tag_color(item, theme).unwrap_or(Color32::from_gray(150));
+        let color = node_tag_color(item, theme, palette).unwrap_or(Color32::from_gray(150));
         regions.push((subtree.len(), points, color, item.item.title.clone()));
     }
     regions.sort_by_key(|(size, ..)| std::cmp::Reverse(*size));
@@ -1768,6 +1794,7 @@ fn draw_tag_constellation(
     positions: &HashMap<String, Pos2>,
     zoom: f32,
     theme: &Theme,
+    palette: &TagPalette,
 ) {
     let mut groups: HashMap<String, Vec<Pos2>> = HashMap::new();
     for item in items {
@@ -1793,7 +1820,7 @@ fn draw_tag_constellation(
         let Some(bounds) = bounds_for_points(points, half_size) else {
             continue;
         };
-        let color = theme.tag.color(&path);
+        let color = palette.color(&path, &theme.tag);
         let fill = Color32::from_rgba_unmultiplied(
             color.r(),
             color.g(),
@@ -1866,7 +1893,7 @@ fn bounds_for_points(points: &[Pos2], half_size: Vec2) -> Option<Rect> {
 /// The accent never comes from a region the node merely sits inside, so an item
 /// tagged only `work` keeps the plain `work` color while drawn within a
 /// `work/cdint` region. Ties break alphabetically to stay deterministic.
-fn node_tag_color(item: &StoredItem, theme: &Theme) -> Option<Color32> {
+fn node_tag_color(item: &StoredItem, theme: &Theme, palette: &TagPalette) -> Option<Color32> {
     let mut tags = item
         .namespaces
         .iter()
@@ -1876,7 +1903,7 @@ fn node_tag_color(item: &StoredItem, theme: &Theme) -> Option<Color32> {
     let deepest = tags
         .into_iter()
         .max_by_key(|tag| tag.matches('/').count())?;
-    Some(theme.tag.color(deepest))
+    Some(palette.color(deepest, &theme.tag))
 }
 
 fn load_layout(path: &std::path::Path) -> HashMap<String, Vec2> {
