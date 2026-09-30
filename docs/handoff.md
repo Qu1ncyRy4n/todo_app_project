@@ -1,8 +1,9 @@
 # Project Handoff
 
 Updated: 2026-09-29
-Covers: workspace v0.3.0, protocol v13, `main` at the commit following
-"Group by three keys and let the order reach every arrangement".
+Covers: workspace v0.3.0, protocol v13, `main` at "Write a project handoff and
+bring the docs up to date", plus uncommitted graph editor work implementing
+TE-0015.
 
 This is the entry point for picking the project up cold. It states what exists,
 what is deliberately not built, what is unverified, and where each area's own
@@ -13,7 +14,7 @@ handoff lives.
 ```sh
 nix develop          # everything runs in the pinned shell; ./dev wraps it
 ./dev check          # cargo fmt --check, then clippy -D warnings
-./dev test           # 194 tests
+./dev test           # 214 tests
 ./dev gui            # the graph editor against the real ledger
 ./dev run -- ls --tree
 ```
@@ -43,9 +44,12 @@ downstream of that staying true.
 
 ## Area handoffs
 
-- **Graph editor** — `docs/gui-graph-pickup.md`. Slices 1 to 45, every
-  configuration knob, the seven items of remaining work, and what is deferred by
+- **Graph editor** — `docs/gui-graph-pickup.md`. Slices 1 to 49, every
+  configuration knob, the eight items of remaining work, and what is deferred by
   decision.
+- **Family display and Focus** — `docs/thought-experiments/TE-0015-graph-display-flow.md`.
+  An approved trial, not a settled appearance: three questions stay open pending
+  a running-window review.
   This is the most active area and the most detailed handoff.
 - **Multi-user and hosting** — `docs/thought-experiments/TE-0014-multi-user-access-and-hosting.md`.
   Deferred pending PromiseGrid 1.0. Four routes analyzed, two prerequisite
@@ -107,10 +111,13 @@ Stated plainly so it is not mistaken for tested ground.
 
 1. **The editor has no window-level tests.** Coverage is the pure layers only:
    `geometry.rs`, `theme.rs`, `palette.rs`, `tags.rs`, and free functions lifted
-   out of `main.rs` such as `matches_query`. Panel wiring, hotkeys, and focus
-   handling are confirmed by running `./dev gui` and nothing else. The `/` search
-   hotkey and its focus handoff are the most recent code of this kind and have
-   not been exercised in a running window.
+   out of `main.rs` such as `matches_query`, `limit_child_depth`,
+   `bounded_family_box`, and `focus_is_active`. Panel wiring, hotkeys, and focus
+   handling are confirmed by running `./dev gui` and nothing else. Nothing in the
+   TE-0015 work has been seen in a running window: not the `/` or `G` hotkeys,
+   not the parent-to-board stalk, not the continuation chip, and not the Focus
+   separation that was the original bug. The editor handoff lists what to check
+   and in what order.
 2. **Multi-machine sync has been exercised in one direction only**, from the
    machine that first ran `todo sync init`. The clone-then-init path on a second
    machine is correct by inspection of `init_sync_repo` and `sync`, not by
