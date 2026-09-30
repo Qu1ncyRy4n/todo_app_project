@@ -168,9 +168,18 @@ pub fn banded_positions(
     spacing: BandSpacing,
 ) -> HashMap<String, Vec2> {
     let mut positions = HashMap::new();
-    place_band(completed, -1.0, spacing, &mut positions);
+    let active_rows = active.len().div_ceil(spacing.band_width.max(1));
+    let active_half_span =
+        f32::from(u16::try_from(active_rows.saturating_sub(1)).unwrap_or(u16::MAX))
+            * spacing.row_gap
+            / 2.0;
+    let exile_spacing = BandSpacing {
+        band_gap: spacing.band_gap + active_half_span,
+        ..spacing
+    };
+    place_band(completed, -1.0, exile_spacing, &mut positions);
     place_band(active, 0.0, spacing, &mut positions);
-    place_band(future, 1.0, spacing, &mut positions);
+    place_band(future, 1.0, exile_spacing, &mut positions);
     positions
 }
 
@@ -194,7 +203,17 @@ fn place_band(
         let centered = f32::from(u16::try_from(column).unwrap_or(u16::MAX))
             - f32::from(u16::try_from(in_row.saturating_sub(1)).unwrap_or(u16::MAX)) / 2.0;
         let row_step = f32::from(u16::try_from(row).unwrap_or(u16::MAX)) * spacing.row_gap;
-        let band = direction * (spacing.band_gap + row_step);
+        // The active band grows around zero; exiled bands grow away from its
+        // measured row span. Multiplying by zero here used to stack every
+        // wrapped active row on top of the first one.
+        let band = if direction == 0.0 {
+            row_step
+                - f32::from(u16::try_from(row_count.saturating_sub(1)).unwrap_or(u16::MAX))
+                    * spacing.row_gap
+                    / 2.0
+        } else {
+            direction * (spacing.band_gap + row_step)
+        };
         positions.insert(id.clone(), Vec2::new(centered * spacing.node_gap, band));
     }
 }
@@ -564,6 +583,51 @@ pub fn cluster_points(points: &[Pos2], max_distance: f32) -> Vec<Vec<Pos2>> {
         .collect()
 }
 
+/// Connects a cluster with its shortest possible set of links.
+///
+/// The cloud renderer paints these links as soft tubes behind each member's
+/// circle, so a shared tag reads as one organism without a pixelated fill.
+pub fn minimum_spanning_links(points: &[Pos2]) -> Vec<(Pos2, Pos2)> {
+    if points.len() < 2 {
+        return Vec::new();
+    }
+    let mut candidates = Vec::new();
+    for (left_index, left) in points.iter().enumerate() {
+        for (right_index, right) in points.iter().enumerate().skip(left_index + 1) {
+            candidates.push(((*left - *right).length_sq(), left_index, right_index));
+        }
+    }
+    candidates.sort_by(|left, right| {
+        left.0
+            .total_cmp(&right.0)
+            .then_with(|| left.1.cmp(&right.1))
+            .then_with(|| left.2.cmp(&right.2))
+    });
+    let mut parent = (0..points.len()).collect::<Vec<_>>();
+    fn find(parent: &mut [usize], index: usize) -> usize {
+        let mut root = index;
+        while parent.get(root).copied().unwrap_or(root) != root {
+            root = parent.get(root).copied().unwrap_or(root);
+        }
+        root
+    }
+    let mut links = Vec::with_capacity(points.len().saturating_sub(1));
+    for (_, left, right) in candidates {
+        let left_root = find(&mut parent, left);
+        let right_root = find(&mut parent, right);
+        if left_root == right_root {
+            continue;
+        }
+        if let Some(slot) = parent.get_mut(right_root) {
+            *slot = left_root;
+        }
+        if let (Some(first), Some(second)) = (points.get(left), points.get(right)) {
+            links.push((*first, *second));
+        }
+    }
+    links
+}
+
 /// Strength and reach of the overlap relaxation pass.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct OverlapSpacing {
@@ -749,36 +813,147 @@ impl TreeSpacing {
 /// laid out left to right in the order given, so the caller decides what leads.
 ///
 /// Returns positions relative to the first root's leftmost leaf.
+#[cfg(test)]
 pub fn tree_positions(
     roots: &[String],
     children: &BTreeMap<String, Vec<String>>,
     spacing: TreeSpacing,
 ) -> HashMap<String, Vec2> {
+    tree_positions_at_levels(roots, children, &HashMap::new(), spacing)
+}
+
+struct TreePlacement<'a> {
+    children: &'a BTreeMap<String, Vec<String>>,
+    levels: &'a HashMap<String, usize>,
+    spacing: TreeSpacing,
+}
+
+/// Hangs a tree while allowing selected tasks to occupy deeper rows.
+///
+/// The caller supplies levels only for constraints that are not ownership: for
+/// example, a dependency can require a child branch to sit below a prerequisite
+/// in another branch. Horizontal placement remains a tidy tree, so this does
+/// not turn containment into a generic dependency graph.
+pub fn tree_positions_at_levels(
+    roots: &[String],
+    children: &BTreeMap<String, Vec<String>>,
+    levels: &HashMap<String, usize>,
+    spacing: TreeSpacing,
+) -> HashMap<String, Vec2> {
+    let placement = TreePlacement {
+        children,
+        levels,
+        spacing,
+    };
     let mut positions = HashMap::new();
     let mut cursor = 0.0_f32;
     for root in roots {
         let mut seen = BTreeSet::new();
-        cursor = place_subtree(
-            root,
-            0,
-            cursor,
-            children,
-            spacing,
-            &mut seen,
-            &mut positions,
-        );
+        cursor = place_subtree_at_levels(root, 0, cursor, &placement, &mut seen, &mut positions);
         cursor += spacing.leaf_gap;
     }
     positions
 }
 
-/// Places one subtree and returns the x cursor just past it.
-fn place_subtree(
+/// Packs complete task families into rows without changing their internal shape.
+///
+/// A family's rectangle includes card clearance; packing only its root point
+/// would let a broad child board collide with the next family. `bands` keeps
+/// cross-family prerequisites in an earlier row when the caller knows them.
+pub fn pack_tree_families(
+    roots: &[String],
+    children: &BTreeMap<String, Vec<String>>,
+    positions: &HashMap<String, Vec2>,
+    bands: &HashMap<String, usize>,
+    clearance: Vec2,
+    gap: Vec2,
+) -> HashMap<String, Vec2> {
+    let mut families = Vec::new();
+    for root in roots {
+        let mut pending = vec![root.as_str()];
+        let mut seen = BTreeSet::new();
+        let mut members = Vec::new();
+        while let Some(id) = pending.pop() {
+            if !seen.insert(id.to_owned()) {
+                continue;
+            }
+            if let Some(at) = positions.get(id) {
+                members.push((id.to_owned(), *at));
+            }
+            if let Some(next) = children.get(id) {
+                pending.extend(next.iter().map(String::as_str));
+            }
+        }
+        if members.is_empty() {
+            continue;
+        }
+        let min = Vec2::new(
+            members
+                .iter()
+                .map(|(_, at)| at.x)
+                .fold(f32::INFINITY, f32::min),
+            members
+                .iter()
+                .map(|(_, at)| at.y)
+                .fold(f32::INFINITY, f32::min),
+        );
+        let max = Vec2::new(
+            members
+                .iter()
+                .map(|(_, at)| at.x)
+                .fold(f32::NEG_INFINITY, f32::max),
+            members
+                .iter()
+                .map(|(_, at)| at.y)
+                .fold(f32::NEG_INFINITY, f32::max),
+        );
+        let size = max - min + clearance;
+        families.push((root, members, min, size));
+    }
+    let total_area = families
+        .iter()
+        .map(|(_, _, _, size)| (size.x + gap.x) * (size.y + gap.y))
+        .sum::<f32>();
+    let widest = families
+        .iter()
+        .map(|(_, _, _, size)| size.x)
+        .fold(0.0, f32::max);
+    let target_width = total_area.sqrt().max(widest);
+    let mut packed = HashMap::new();
+    let mut top = 0.0;
+    let mut previous_band = None;
+    let mut left = 0.0;
+    let mut row_height = 0.0_f32;
+    // Stable sorting retains the requested active-first order within a band.
+    let mut order = families.iter().collect::<Vec<_>>();
+    order.sort_by_key(|(root, _, _, _)| bands.get(*root).copied().unwrap_or(0));
+    for (root, members, min, size) in order {
+        let current_band = bands.get(*root).copied().unwrap_or(0);
+        if previous_band.is_some_and(|previous| previous != current_band)
+            || (left > 0.0 && left + size.x > target_width)
+        {
+            top += row_height + gap.y;
+            left = 0.0;
+            row_height = 0.0;
+        }
+        let shift = Vec2::new(left + clearance.x / 2.0, top + clearance.y / 2.0) - *min;
+        for (id, at) in members {
+            packed.insert(id.clone(), *at + shift);
+        }
+        left += size.x + gap.x;
+        row_height = row_height.max(size.y);
+        previous_band = Some(current_band);
+    }
+    packed
+}
+
+/// Places one subtree using the greater of its structural depth and requested
+/// layout level, then returns the cursor just past it.
+fn place_subtree_at_levels(
     id: &str,
     depth: usize,
     cursor: f32,
-    children: &BTreeMap<String, Vec<String>>,
-    spacing: TreeSpacing,
+    placement: &TreePlacement<'_>,
     seen: &mut BTreeSet<String>,
     positions: &mut HashMap<String, Vec2>,
 ) -> f32 {
@@ -786,22 +961,31 @@ fn place_subtree(
         // A parent cycle cannot be hung as a tree; stopping leaves the rest placed.
         return cursor;
     }
-    let row = f32::from(u16::try_from(depth).unwrap_or(u16::MAX)) * spacing.row_gap;
+    let level = placement
+        .levels
+        .get(id)
+        .copied()
+        .unwrap_or(depth)
+        .max(depth);
+    let row = f32::from(u16::try_from(level).unwrap_or(u16::MAX)) * placement.spacing.row_gap;
     let empty = Vec::new();
-    let offspring = children.get(id).unwrap_or(&empty);
+    let offspring = placement.children.get(id).unwrap_or(&empty);
     if offspring.is_empty() {
-        positions.insert(id.to_owned(), spacing.place(row, cursor));
-        return cursor + spacing.leaf_gap;
+        positions.insert(id.to_owned(), placement.spacing.place(row, cursor));
+        return cursor + placement.spacing.leaf_gap;
     }
     let start = cursor;
     let mut next = cursor;
     for child in offspring {
-        next = place_subtree(child, depth + 1, next, children, spacing, seen, positions);
+        next = place_subtree_at_levels(child, depth + 1, next, placement, seen, positions);
     }
     // Centering over the span, rather than over the first child, keeps a parent
     // above the middle of what it holds however lopsided the branch is.
-    let end = (next - spacing.leaf_gap).max(start);
-    positions.insert(id.to_owned(), spacing.place(row, (start + end) / 2.0));
+    let end = (next - placement.spacing.leaf_gap).max(start);
+    positions.insert(
+        id.to_owned(),
+        placement.spacing.place(row, (start + end) / 2.0),
+    );
     next
 }
 
@@ -899,10 +1083,12 @@ mod tests {
         SeparationSpacing, TimelineAxis, TimelineScale, TimelineSpacing, TreeAxis, TreeSpacing,
         arrowhead_points, banded_positions, boundary_point, centroid, cluster_points, convex_hull,
         duration_length, ease_toward, edge_between, expand_path, fit_view, grouped_positions,
-        is_settled, layered_positions, relax_overlaps, ruler_ticks, separate_groups, shaft_end,
-        smooth_closed_path, timeline_positions, tree_positions,
+        is_settled, layered_positions, minimum_spanning_links, pack_tree_families, relax_overlaps,
+        ruler_ticks, separate_groups, shaft_end, smooth_closed_path, timeline_positions,
+        tree_positions, tree_positions_at_levels,
     };
     use eframe::egui::{Rect, Vec2, pos2};
+    use std::collections::HashMap;
 
     fn spacing(direction: FlowDirection) -> FlowSpacing {
         FlowSpacing {
@@ -1316,6 +1502,12 @@ mod tests {
     }
 
     #[test]
+    fn cloud_links_connect_every_member_once() {
+        let points = [pos2(0.0, 0.0), pos2(20.0, 0.0), pos2(200.0, 0.0)];
+        assert_eq!(minimum_spanning_links(&points).len(), 2);
+    }
+
+    #[test]
     fn clustering_nothing_yields_nothing() {
         assert!(cluster_points(&[], 50.0).is_empty());
     }
@@ -1396,6 +1588,23 @@ mod tests {
         let positions = banded_positions(&[], &ids(&["a", "b"]), &[], band_spacing());
         let sum = positions.values().map(|position| position.x).sum::<f32>();
         assert!(sum.abs() < 0.001);
+    }
+
+    #[test]
+    fn wrapped_active_rows_do_not_stack_or_touch_exiled_bands() {
+        let active = ids(&["a", "b", "c", "d", "e", "f", "g", "h", "i"]);
+        let positions =
+            banded_positions(&ids(&["done"]), &active, &ids(&["later"]), band_spacing());
+        let active_y = active
+            .iter()
+            .filter_map(|id| positions.get(id).map(|at| at.y))
+            .collect::<Vec<_>>();
+        let top = active_y.iter().copied().fold(f32::INFINITY, f32::min);
+        let bottom = active_y.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        assert!(bottom > top);
+        assert!(
+            matches!((positions.get("done"), positions.get("later")), (Some(done), Some(later)) if done.y < top && later.y > bottom)
+        );
     }
 
     #[test]
@@ -1607,6 +1816,82 @@ mod tests {
                 if (child.y - root.y - 80.0).abs() < 0.001
                     && (deep.y - child.y - 80.0).abs() < 0.001
         ));
+    }
+
+    #[test]
+    fn a_requested_dependency_level_opens_space_below_a_prerequisite() {
+        let levels = std::collections::HashMap::from([("dependent".to_owned(), 2)]);
+        let positions = tree_positions_at_levels(
+            &ids(&["prerequisite", "dependent"]),
+            &tree_of(&[]),
+            &levels,
+            tree_spacing(),
+        );
+        assert!(matches!(
+            (positions.get("prerequisite"), positions.get("dependent")),
+            (Some(prerequisite), Some(dependent)) if dependent.y > prerequisite.y
+        ));
+    }
+
+    #[test]
+    fn family_packing_wraps_a_wide_forest_without_changing_children() {
+        let roots = (0..12).map(|n| format!("root-{n}")).collect::<Vec<_>>();
+        let children = roots
+            .iter()
+            .map(|root| (root.clone(), vec![format!("{root}-child")]))
+            .collect();
+        let original = tree_positions_at_levels(&roots, &children, &HashMap::new(), tree_spacing());
+        let packed = pack_tree_families(
+            &roots,
+            &children,
+            &original,
+            &HashMap::new(),
+            Vec2::new(160.0, 100.0),
+            Vec2::new(40.0, 40.0),
+        );
+        let width = |positions: &HashMap<String, Vec2>| {
+            let min = positions
+                .values()
+                .map(|at| at.x)
+                .fold(f32::INFINITY, f32::min);
+            let max = positions
+                .values()
+                .map(|at| at.x)
+                .fold(f32::NEG_INFINITY, f32::max);
+            max - min
+        };
+        assert!(width(&packed) < width(&original) / 2.0);
+        for root in &roots {
+            let child = format!("{root}-child");
+            assert!(matches!(
+                (
+                    packed.get(&child),
+                    packed.get(root),
+                    original.get(&child),
+                    original.get(root),
+                ),
+                (Some(packed_child), Some(packed_root), Some(old_child), Some(old_root))
+                    if *packed_child - *packed_root == *old_child - *old_root
+            ));
+        }
+    }
+
+    #[test]
+    fn family_packing_keeps_dependency_bands_in_order() {
+        let roots = ids(&["first", "second", "third"]);
+        let original = tree_positions(&roots, &tree_of(&[]), tree_spacing());
+        let bands = HashMap::from([("first".to_owned(), 0), ("second".to_owned(), 1)]);
+        let packed = pack_tree_families(
+            &roots,
+            &tree_of(&[]),
+            &original,
+            &bands,
+            Vec2::splat(100.0),
+            Vec2::splat(20.0),
+        );
+        assert!(
+            matches!((packed.get("first"), packed.get("second")), (Some(first), Some(second)) if second.y > first.y)
+        );
     }
 
     #[test]
