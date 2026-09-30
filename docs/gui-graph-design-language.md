@@ -80,14 +80,18 @@ direct arrow.
 A multi-child family shares one trunk and junction, then fans out through
 angular branches. Branches meet the top edge of their child card at an open
 circle. They must not be replaced by several independent diagonal arrows.
+For a detached parent, the trunk begins where the Outline Anchor meets the
+child well, so the anchor and tree form one continuous structural route instead
+of two competing routes from the parent card.
 
 The family-colored core may continue through the child well. The shared blue
 casing/outline is visible only outside the child infill, where it separates the
 family tree from the canvas. This is the **dynamic family core** rule.
 
 **Implementation status:** implemented. The family-colored core remains
-continuous; the shared blue casing is omitted for path segments whose midpoint
-is inside a child well.
+continuous; the shared blue casing is geometrically clipped at every child-well
+boundary, so it cannot peek through a well merely because a segment's midpoint
+happened to sit elsewhere.
 
 ## Family presentation policy
 
@@ -120,10 +124,10 @@ padding. They annotate cards; they do not form a child well or parent outline.
 
 ## Appearance Lab
 
-The proposed **Appearance Lab** is an optional renderer page using a fixed,
+The **Appearance Lab** is an optional renderer page using a fixed,
 synthetic exemplar graph and the production theme/renderer. It should expose
 the same live appearance state as the real graph, without writing ledger data.
-Its exemplar scenes should include:
+Its exemplar scene includes:
 
 1. an isolated tagged task and a same-tag pair;
 2. overlapping different-tag clouds;
@@ -135,4 +139,6 @@ Its exemplar scenes should include:
 
 It is available from the toolbar as **Appearance Lab**. It is deliberately
 ledger-free and uses the live theme values, so presentation controls can be
-tuned without changing real task data.
+tuned without changing real task data. The parent outline has a dedicated
+`parent.outline_weight` appearance control; its default is stronger than card
+and child-well strokes without changing either of those other visual channels.

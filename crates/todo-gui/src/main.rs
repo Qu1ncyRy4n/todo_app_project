@@ -765,6 +765,10 @@ impl TodoGui {
             egui::Slider::new(&mut self.theme.parent.max_board_span, 1.0..=8.0)
                 .text("Maximum family span"),
         );
+        ui.add(
+            egui::Slider::new(&mut self.theme.parent.outline_weight, 1.0..=5.0)
+                .text("Parent outline weight"),
+        );
         ui.horizontal(|ui| {
             ui.label("Connector");
             ui.selectable_value(
@@ -2558,33 +2562,209 @@ impl TodoGui {
             return;
         }
         egui::Window::new("Appearance Lab")
-            .default_size(Vec2::new(760.0, 520.0))
+            .default_size(Vec2::new(880.0, 610.0))
             .resizable(true)
             .show(ctx, |ui| {
                 ui.label("Fixed exemplar — controls in Appearance update this scene live.");
-                ui.weak("tag clouds · family frame · detached anchor · shared junction · dependency arrow · hidden children");
+                ui.weak("tag clouds · parent outline · outline anchor · family tree · dependency arrow · hidden children");
                 let (rect, _) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
                 let painter = ui.painter_at(rect);
                 let zoom = 0.8;
-                let parent = Rect::from_center_size(rect.left_top() + Vec2::new(190.0, 95.0), Vec2::new(190.0, 64.0));
-                let child_a = Rect::from_center_size(rect.left_top() + Vec2::new(105.0, 285.0), Vec2::new(170.0, 62.0));
-                let child_b = Rect::from_center_size(rect.left_top() + Vec2::new(310.0, 285.0), Vec2::new(170.0, 62.0));
-                let detached = Rect::from_center_size(rect.left_top() + Vec2::new(560.0, 130.0), Vec2::new(170.0, 62.0));
-                let well = Rect::from_min_max(rect.left_top() + Vec2::new(42.0, 158.0), rect.left_top() + Vec2::new(375.0, 360.0));
+                let origin = rect.left_top() + Vec2::new(18.0, 18.0);
+                let parent = Rect::from_center_size(origin + Vec2::new(205.0, 58.0), Vec2::new(190.0, 64.0));
+                let child_a = Rect::from_center_size(origin + Vec2::new(112.0, 246.0), Vec2::new(165.0, 62.0));
+                let child_b = Rect::from_center_size(origin + Vec2::new(308.0, 246.0), Vec2::new(165.0, 62.0));
+                let grandchild = Rect::from_center_size(origin + Vec2::new(308.0, 358.0), Vec2::new(160.0, 60.0));
+                let detached = Rect::from_center_size(origin + Vec2::new(575.0, 70.0), Vec2::new(175.0, 62.0));
+                let remote = Rect::from_center_size(origin + Vec2::new(700.0, 300.0), Vec2::new(165.0, 66.0));
+                let well = Rect::from_min_max(origin + Vec2::new(30.0, 126.0), origin + Vec2::new(390.0, 405.0));
                 let body = well.expand(18.0);
-                painter.rect_filled(body, self.theme.parent.corner_radius, Color32::from_rgb(67, 57, 73));
-                painter.rect_filled(well, self.theme.parent.corner_radius * 0.7, Color32::from_rgb(28, 36, 50));
-                painter.rect_stroke(body, self.theme.parent.corner_radius, Stroke::new(self.theme.parent.stroke_width * 2.0, Color32::from_rgb(190, 180, 220)), egui::StrokeKind::Outside);
+                let nested_well = Rect::from_min_max(origin + Vec2::new(218.0, 285.0), origin + Vec2::new(395.0, 405.0));
+                let nested_body = nested_well.expand(12.0);
                 let tag = Color32::from_rgb(105, 205, 216);
-                for card in [parent, child_a, child_b] {
-                    painter.circle_filled(card.center(), card.size().length() * 0.55, cloud_pastel(tag, ui.visuals().panel_fill));
+                let alternate_tag = Color32::from_rgb(226, 139, 98);
+                let (fill, well_fill, edge) = family_colors(tag);
+                let outer_stroke = Stroke::new(
+                    (self.theme.parent.stroke_width * self.theme.parent.outline_weight * zoom)
+                        .max(1.0),
+                    edge,
+                );
+                let rounding = self.theme.parent.corner_radius * zoom;
+
+                // Paint clouds before family structure, as on the real canvas.
+                let draw_cloud = |card: Rect, color: Color32| {
+                    let cloud = cloud_pastel(color, ui.visuals().panel_fill);
+                    let member = card.expand(self.theme.tag.region_padding * zoom);
+                    match self.theme.tag.cloud_member_shape {
+                        CloudMemberShape::Circle => painter.circle_filled(
+                            member.center(),
+                            member.size().length() / 2.0,
+                            cloud,
+                        ),
+                        CloudMemberShape::Card => painter.rect_filled(
+                            member,
+                            app_cloud_rounding(&self.theme, zoom),
+                            cloud,
+                        ),
+                    }
+                };
+                let member_a = child_a.expand(self.theme.tag.region_padding * zoom);
+                let member_b = child_b.expand(self.theme.tag.region_padding * zoom);
+                let cloud = cloud_pastel(tag, ui.visuals().panel_fill);
+                painter.line_segment(
+                    [member_a.center(), member_b.center()],
+                    Stroke::new(member_a.height().min(member_b.height()) * 0.8, cloud),
+                );
+                for card in [parent, child_a, child_b, grandchild] {
+                    draw_cloud(card, tag);
                 }
-                draw_family_tree(&painter, parent, &[child_a, child_b], 0, zoom, geometry::TreeAxis::Down, Color32::from_rgb(82, 90, 122), ConnectorStyle::FillCore, &[well]);
-                draw_board_attachment(&painter, detached, well, zoom, Color32::from_rgb(122, 80, 92), ConnectorStyle::FillCore);
-                for (card, label) in [(parent, "parent task"), (child_a, "child A"), (child_b, "child B"), (detached, "detached parent")] {
-                    draw_node_body(&painter, card, Color32::from_rgb(65, 70, 97), Stroke::new(2.0, tag), Some(tag), &self.theme, 1.0);
-                    painter.text(card.center(), Align2::CENTER_CENTER, label, FontId::proportional(14.0), Color32::WHITE);
+                draw_cloud(detached, alternate_tag);
+                draw_cloud(remote, alternate_tag);
+
+                match self.theme.parent.well_fill {
+                    FamilyWellFill::Transparent => {
+                        draw_family_ring(&painter, body, well, rounding, fill);
+                        painter.rect_stroke(
+                            well,
+                            rounding * 0.7,
+                            Stroke::new(zoom.max(1.0), fill),
+                            egui::StrokeKind::Outside,
+                        );
+                    }
+                    FamilyWellFill::Dark => {
+                        painter.rect_filled(body, rounding, fill);
+                        painter.rect_filled(nested_body, rounding * 0.7, well_fill);
+                        painter.rect_filled(well, rounding * 0.7, well_fill);
+                    }
                 }
+                painter.rect_stroke(body, rounding, outer_stroke, egui::StrokeKind::Outside);
+                painter.rect_filled(nested_body, rounding * 0.7, fill);
+                painter.rect_stroke(
+                    nested_body,
+                    rounding * 0.7,
+                    Stroke::new(outer_stroke.width * 0.75, edge),
+                    egui::StrokeKind::Outside,
+                );
+                if self.theme.parent.child_style == FamilyChildStyle::RecessedBoard {
+                    painter.rect_stroke(
+                        well,
+                        rounding * 0.7,
+                        Stroke::new((1.5 * zoom).max(1.0), edge),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+
+                draw_family_tree(
+                    &painter,
+                    parent,
+                    None,
+                    &[child_a, child_b],
+                    0,
+                    zoom,
+                    geometry::TreeAxis::Down,
+                    fill,
+                    self.theme.parent.connector_style,
+                    &[well, nested_well],
+                );
+                draw_family_tree(
+                    &painter,
+                    child_b,
+                    None,
+                    &[grandchild],
+                    1,
+                    zoom,
+                    geometry::TreeAxis::Down,
+                    fill,
+                    self.theme.parent.connector_style,
+                    &[well, nested_well],
+                );
+                // This direct arrow intentionally coexists with a family tree
+                // so the two relationship types can be compared in one scene.
+                let (dependency_start, dependency_end) = geometry::edge_between(child_a, child_b, 8.0);
+                draw_edge(
+                    &painter,
+                    dependency_start,
+                    dependency_end,
+                    Color32::from_rgb(75, 142, 210),
+                    &self.theme,
+                    zoom,
+                );
+
+                let remote_well = Rect::from_center_size(origin + Vec2::new(570.0, 220.0), Vec2::new(185.0, 82.0));
+                let remote_body = remote_well.expand(12.0);
+                painter.rect_filled(remote_body, rounding, family_colors(alternate_tag).0);
+                painter.rect_stroke(
+                    remote_body,
+                    rounding,
+                    Stroke::new(outer_stroke.width, family_colors(alternate_tag).2),
+                    egui::StrokeKind::Outside,
+                );
+                draw_board_attachment(
+                    &painter,
+                    detached,
+                    remote_well,
+                    zoom,
+                    family_colors(alternate_tag).0,
+                    self.theme.parent.connector_style,
+                );
+                let (remote_start, remote_end) = geometry::edge_between(remote_well, remote, 8.0);
+                draw_edge(
+                    &painter,
+                    remote_start,
+                    remote_end,
+                    Color32::from_rgb(75, 142, 210),
+                    &self.theme,
+                    zoom,
+                );
+
+                for (card, label, selected) in [
+                    (parent, "parent task", true),
+                    (child_a, "child A", false),
+                    (child_b, "child B", false),
+                    (grandchild, "nested child", false),
+                    (detached, "detached parent", false),
+                    (remote, "remote child", false),
+                ] {
+                    let outline = Stroke::new(
+                        if selected { 3.0 } else { 2.0 },
+                        if selected { Color32::GOLD } else { tag },
+                    );
+                    draw_node_body(
+                        &painter,
+                        card,
+                        Color32::from_rgb(65, 70, 97),
+                        outline,
+                        Some(if card == detached || card == remote { alternate_tag } else { tag }),
+                        &self.theme,
+                        1.0,
+                    );
+                    painter.text(
+                        card.center(),
+                        Align2::CENTER_CENTER,
+                        label,
+                        FontId::proportional(13.0),
+                        Color32::WHITE,
+                    );
+                }
+                let hidden_marker = Rect::from_center_size(
+                    parent.center_bottom() + Vec2::new(0.0, 6.0),
+                    Vec2::new(26.0, 13.0),
+                );
+                painter.rect_filled(hidden_marker, 7.0, Color32::from_rgb(61, 68, 89));
+                painter.text(
+                    hidden_marker.center(),
+                    Align2::CENTER_CENTER,
+                    "…",
+                    FontId::proportional(14.0),
+                    Color32::WHITE,
+                );
+                painter.text(
+                    origin + Vec2::new(8.0, 430.0),
+                    Align2::LEFT_TOP,
+                    "Gold outline: selected  •  blue arrow: dependency  •  …: hidden children",
+                    FontId::proportional(12.0),
+                    ui.visuals().weak_text_color(),
+                );
             });
     }
 
@@ -3760,6 +3940,10 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
             draw_family_tree(
                 &painter,
                 parent,
+                boxes.get(&parent_id).and_then(|family| {
+                    (!family.attached_parent)
+                        .then(|| geometry::boundary_point(family.well, parent.center()))
+                }),
                 &children,
                 depth,
                 app.graph_zoom,
@@ -4278,7 +4462,6 @@ fn draw_board_attachment(
     let (casing, core) = connector_strokes(fill, style, 6.0 * zoom, zoom);
     painter.line_segment([start, end], casing);
     painter.line_segment([start, end], core);
-    painter.circle_stroke(end, 5.0 * zoom, Stroke::new(2.0 * zoom, core.color));
 }
 
 /// The shared blue every family connector carries, so a link reads as a link
@@ -4314,6 +4497,7 @@ fn connector_strokes(
 fn draw_family_tree(
     painter: &egui::Painter,
     parent: Rect,
+    source: Option<Pos2>,
     children: &[Rect],
     depth: usize,
     zoom: f32,
@@ -4330,20 +4514,12 @@ fn draw_family_tree(
     let radius = 4.0 * zoom;
     let (casing, core) = connector_strokes(fill, style, width, zoom);
     let color = core.color;
-    let Some((start, junction, ends)) = family_tree_geometry(parent, children, radius, axis) else {
-        // A child that is arranged behind its parent still receives one simple
-        // structural line. There is no sibling-wise duplication in this path.
-        for child in children {
-            let (start, end) = geometry::edge_between(parent, *child, radius + 2.0 * zoom);
-            draw_family_path(painter, &[start, end], casing, core, wells);
-            painter.circle_stroke(end, radius, Stroke::new(1.6 * zoom, color));
-        }
-        return;
-    };
+    let (start, junction, ends, branch_axis) =
+        family_tree_geometry(parent, source, children, radius, axis);
     draw_family_path(painter, &[start, junction], casing, core, wells);
     painter.circle_stroke(junction, radius, Stroke::new(1.6 * zoom, color));
     for end in ends {
-        let path = match axis {
+        let path = match branch_axis {
             geometry::TreeAxis::Down => vec![junction, egui::pos2(end.x, junction.y), end],
             geometry::TreeAxis::Right => vec![junction, egui::pos2(junction.x, end.y), end],
         };
@@ -4352,43 +4528,92 @@ fn draw_family_tree(
     }
 }
 
-/// Returns the canonical angular tree geometry when every child is placed in
-/// front of its parent on the configured axis.
+/// Returns angular tree geometry for any visible parent/child arrangement.
+///
+/// Normalized hierarchy layouts use the configured axis and meet child cards
+/// on their top/left edge. A manually moved child can end up on the opposite
+/// side of its parent; that remains an angular family route rather than
+/// silently degrading into the direct diagonal used by dependency arrows.
 fn family_tree_geometry(
     parent: Rect,
+    source: Option<Pos2>,
     children: &[Rect],
     radius: f32,
     axis: geometry::TreeAxis,
-) -> Option<(Pos2, Pos2, Vec<Pos2>)> {
+) -> (Pos2, Pos2, Vec<Pos2>, geometry::TreeAxis) {
     let gap = radius + 2.0;
     match axis {
         geometry::TreeAxis::Down => {
-            if children.iter().any(|child| child.top() <= parent.bottom()) {
-                return None;
+            let start = source.unwrap_or_else(|| parent.center_bottom());
+            let forward = children.iter().all(|child| child.top() > start.y);
+            if forward {
+                let ends = children
+                    .iter()
+                    .map(|child| child.center_top() - Vec2::new(0.0, gap))
+                    .collect::<Vec<_>>();
+                let first_end = ends
+                    .iter()
+                    .map(|end| end.y)
+                    .min_by(f32::total_cmp)
+                    .unwrap_or(start.y + gap);
+                let junction = egui::pos2(start.x, (start.y + first_end) * 0.5);
+                return (start, junction, ends, axis);
             }
-            let start = parent.center_bottom();
-            let ends = children
-                .iter()
-                .map(|child| child.center_top() - Vec2::new(0.0, gap))
-                .collect::<Vec<_>>();
-            let first_end = ends.iter().map(|end| end.y).min_by(f32::total_cmp)?;
-            let junction = egui::pos2(start.x, (start.y + first_end) * 0.5);
-            Some((start, junction, ends))
+            family_tree_fallback_geometry(parent, source, children, axis)
         }
         geometry::TreeAxis::Right => {
-            if children.iter().any(|child| child.left() <= parent.right()) {
-                return None;
+            let start = source.unwrap_or_else(|| parent.right_center());
+            let forward = children.iter().all(|child| child.left() > start.x);
+            if forward {
+                let ends = children
+                    .iter()
+                    .map(|child| child.left_center() - Vec2::new(gap, 0.0))
+                    .collect::<Vec<_>>();
+                let first_end = ends
+                    .iter()
+                    .map(|end| end.x)
+                    .min_by(f32::total_cmp)
+                    .unwrap_or(start.x + gap);
+                let junction = egui::pos2((start.x + first_end) * 0.5, start.y);
+                return (start, junction, ends, axis);
             }
-            let start = parent.right_center();
-            let ends = children
-                .iter()
-                .map(|child| child.left_center() - Vec2::new(gap, 0.0))
-                .collect::<Vec<_>>();
-            let first_end = ends.iter().map(|end| end.x).min_by(f32::total_cmp)?;
-            let junction = egui::pos2((start.x + first_end) * 0.5, start.y);
-            Some((start, junction, ends))
+            family_tree_fallback_geometry(parent, source, children, axis)
         }
     }
+}
+
+/// Routes a manually displaced family through a shared axis-aligned junction.
+/// This preserves the family vocabulary even when a user has moved cards into
+/// a shape that is not a conventional downward/rightward hierarchy.
+fn family_tree_fallback_geometry(
+    parent: Rect,
+    source: Option<Pos2>,
+    children: &[Rect],
+    preferred_axis: geometry::TreeAxis,
+) -> (Pos2, Pos2, Vec<Pos2>, geometry::TreeAxis) {
+    let centers = children.iter().map(Rect::center).collect::<Vec<_>>();
+    let count = f32::from(u16::try_from(centers.len().max(1)).unwrap_or(u16::MAX));
+    let average = centers
+        .iter()
+        .fold(Vec2::ZERO, |sum, center| sum + center.to_vec2())
+        / count;
+    let center = Pos2::new(average.x, average.y);
+    let start = source.unwrap_or_else(|| geometry::boundary_point(parent, center));
+    let ends = children
+        .iter()
+        .map(|child| geometry::boundary_point(*child, parent.center()))
+        .collect::<Vec<_>>();
+    let end_average = ends.iter().fold(Vec2::ZERO, |sum, end| sum + end.to_vec2()) / count;
+    let branch_axis = if (end_average.x - start.x).abs() > (end_average.y - start.y).abs() {
+        geometry::TreeAxis::Right
+    } else {
+        preferred_axis
+    };
+    let junction = match branch_axis {
+        geometry::TreeAxis::Down => egui::pos2(start.x, (start.y + end_average.y) * 0.5),
+        geometry::TreeAxis::Right => egui::pos2((start.x + end_average.x) * 0.5, start.y),
+    };
+    (start, junction, ends, branch_axis)
 }
 
 fn draw_family_path(
@@ -4404,12 +4629,58 @@ fn draw_family_path(
         let [start, end] = segment else {
             continue;
         };
-        let midpoint = start.lerp(*end, 0.5);
-        if !wells.iter().any(|well| well.contains(midpoint)) {
-            painter.line_segment([*start, *end], casing);
+        let mut visible = vec![(*start, *end)];
+        for well in wells {
+            visible = visible
+                .into_iter()
+                .flat_map(|(from, to)| segment_outside_rect(from, to, *well))
+                .collect();
+        }
+        for (from, to) in visible {
+            painter.line_segment([from, to], casing);
         }
     }
     painter.add(egui::Shape::line(path.to_vec(), core));
+}
+
+/// Returns the portions of a segment outside one axis-aligned child well.
+/// This is Liang-Barsky clipping expressed as parameter intervals, so a casing
+/// cannot peek through the middle of an infill merely because its midpoint lies
+/// elsewhere.
+fn segment_outside_rect(start: Pos2, end: Pos2, rect: Rect) -> Vec<(Pos2, Pos2)> {
+    let delta = end - start;
+    let mut enter = 0.0_f32;
+    let mut exit = 1.0_f32;
+    for (p, q) in [
+        (-delta.x, start.x - rect.left()),
+        (delta.x, rect.right() - start.x),
+        (-delta.y, start.y - rect.top()),
+        (delta.y, rect.bottom() - start.y),
+    ] {
+        if p.abs() <= f32::EPSILON {
+            if q < 0.0 {
+                return vec![(start, end)];
+            }
+            continue;
+        }
+        let ratio = q / p;
+        if p < 0.0 {
+            enter = enter.max(ratio);
+        } else {
+            exit = exit.min(ratio);
+        }
+    }
+    if enter > exit || exit <= 0.0 || enter >= 1.0 {
+        return vec![(start, end)];
+    }
+    let mut outside = Vec::new();
+    if enter > 0.0 {
+        outside.push((start, start.lerp(end, enter.clamp(0.0, 1.0))));
+    }
+    if exit < 1.0 {
+        outside.push((start.lerp(end, exit.clamp(0.0, 1.0)), end));
+    }
+    outside
 }
 
 /// Returns the color a typed relation is drawn in.
@@ -4865,7 +5136,13 @@ fn draw_family_boxes(
         let (fill, well_fill, edge) = family_colors(accent);
         let zoom = app.graph_zoom;
         let rounding = app.theme.parent.corner_radius * zoom;
-        let stroke = Stroke::new((app.theme.parent.stroke_width * zoom).max(1.0), edge);
+        // Parent outlines are a structural enclosure, deliberately heavier
+        // than cards and the child-well seam. The independent theme weight
+        // keeps that hierarchy legible without changing every other stroke.
+        let stroke = Stroke::new(
+            (app.theme.parent.stroke_width * app.theme.parent.outline_weight * zoom).max(1.0),
+            edge,
+        );
         // Once a family is open its own cards carry the structure, so the fill
         // is only clutter over them. The boundary returns as a dashed outline
         // while the family is being moved, which is when its extent matters.
@@ -5971,9 +6248,10 @@ fn short_title(title: &str) -> String {
 )]
 mod tests {
     use super::{
-        FamilyView, GroupBy, bounded_family_box, collect_subtree, compare_group_labels, family_box,
-        family_dependency_bands, family_ring_mesh, family_tree_geometry, focus_is_active,
-        hierarchy_levels, limit_child_depth, matches_query,
+        FamilyPresentation, FamilyView, GroupBy, LocalGraphLayout, bounded_family_box,
+        collect_subtree, compare_group_labels, family_box, family_dependency_bands,
+        family_ring_mesh, family_tree_geometry, focus_is_active, hierarchy_levels,
+        limit_child_depth, matches_query, segment_outside_rect,
     };
     use eframe::egui::{Color32, Pos2, Rect, pos2, vec2};
     use std::collections::{HashMap, HashSet};
@@ -6231,14 +6509,95 @@ mod tests {
         let parent = Rect::from_min_size(pos2(100.0, 20.0), vec2(150.0, 58.0));
         let left = Rect::from_min_size(pos2(40.0, 200.0), vec2(120.0, 60.0));
         let right = Rect::from_min_size(pos2(260.0, 240.0), vec2(120.0, 60.0));
-        let geometry =
-            family_tree_geometry(parent, &[left, right], 4.0, super::geometry::TreeAxis::Down);
-        assert!(geometry.is_some());
-        let (start, junction, terminals) = geometry.unwrap();
+        let (start, junction, terminals, axis) = family_tree_geometry(
+            parent,
+            None,
+            &[left, right],
+            4.0,
+            super::geometry::TreeAxis::Down,
+        );
         assert_eq!(terminals.len(), 2);
+        assert_eq!(axis, super::geometry::TreeAxis::Down);
         assert_eq!(junction.x, start.x);
         assert!(junction.y > start.y);
         assert!(terminals.iter().all(|terminal| terminal.y > junction.y));
+    }
+
+    #[test]
+    fn family_casing_is_split_at_child_well_edges() {
+        let pieces = segment_outside_rect(
+            pos2(0.0, 10.0),
+            pos2(100.0, 10.0),
+            Rect::from_min_max(pos2(30.0, 0.0), pos2(70.0, 20.0)),
+        );
+        assert_eq!(pieces.len(), 2);
+        let mut pieces = pieces.into_iter();
+        let left = pieces.next().unwrap();
+        let right = pieces.next().unwrap();
+        assert!((left.1.x - 30.0).abs() < 0.001);
+        assert!((left.1.y - 10.0).abs() < 0.001);
+        assert!((right.0.x - 70.0).abs() < 0.001);
+        assert!((right.0.y - 10.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn family_display_overrides_round_trip_in_local_layout_only() {
+        let mut family_presentations = HashMap::new();
+        family_presentations.insert("parent-a".to_owned(), FamilyPresentation::Tree);
+        family_presentations.insert("parent-b".to_owned(), FamilyPresentation::Box);
+        let layout = LocalGraphLayout {
+            node_offsets: HashMap::new(),
+            family_presentations,
+        };
+        let encoded = serde_json::to_string(&layout).unwrap();
+        let decoded: LocalGraphLayout = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(
+            decoded.family_presentations.get("parent-a"),
+            Some(&FamilyPresentation::Tree)
+        );
+        assert_eq!(
+            decoded.family_presentations.get("parent-b"),
+            Some(&FamilyPresentation::Box)
+        );
+    }
+
+    #[test]
+    fn displaced_children_keep_the_shared_angular_family_route() {
+        let parent = Rect::from_min_size(pos2(100.0, 120.0), vec2(150.0, 58.0));
+        let above = Rect::from_min_size(pos2(20.0, 20.0), vec2(120.0, 60.0));
+        let beside = Rect::from_min_size(pos2(340.0, 160.0), vec2(120.0, 60.0));
+        let (start, junction, terminals, axis) = family_tree_geometry(
+            parent,
+            None,
+            &[above, beside],
+            4.0,
+            super::geometry::TreeAxis::Down,
+        );
+        assert_eq!(terminals.len(), 2);
+        assert!(matches!(
+            axis,
+            super::geometry::TreeAxis::Down | super::geometry::TreeAxis::Right
+        ));
+        match axis {
+            super::geometry::TreeAxis::Down => assert_eq!(junction.x, start.x),
+            super::geometry::TreeAxis::Right => assert_eq!(junction.y, start.y),
+        }
+    }
+
+    #[test]
+    fn detached_family_tree_starts_where_its_outline_anchor_ends() {
+        let parent = Rect::from_min_size(pos2(100.0, 20.0), vec2(150.0, 58.0));
+        let well = Rect::from_min_size(pos2(90.0, 150.0), vec2(320.0, 190.0));
+        let child = Rect::from_min_size(pos2(180.0, 230.0), vec2(150.0, 58.0));
+        let source = super::geometry::boundary_point(well, parent.center());
+        let (start, _, _, _) = family_tree_geometry(
+            parent,
+            Some(source),
+            &[child],
+            4.0,
+            super::geometry::TreeAxis::Down,
+        );
+        assert_eq!(start, source);
     }
 
     #[test]

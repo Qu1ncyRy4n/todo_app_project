@@ -809,6 +809,9 @@ pub struct ParentTheme {
     pub stroke_alpha: u8,
     /// Outline thickness of a parent region.
     pub stroke_width: f32,
+    /// Multiplier that makes the structural parent outline stronger than an
+    /// ordinary card outline without making child-well seams equally heavy.
+    pub outline_weight: f32,
 }
 
 impl Default for ParentTheme {
@@ -833,6 +836,7 @@ impl Default for ParentTheme {
             fill_alpha: 14,
             stroke_alpha: 90,
             stroke_width: 1.5,
+            outline_weight: 2.75,
         }
     }
 }
@@ -1042,6 +1046,13 @@ mod tests {
         let parsed: Result<Theme, _> =
             toml::from_str("[parent]\nclip_well_below_attached_tab = false\n");
         assert!(matches!(parsed, Ok(theme) if !theme.parent.clip_well_below_attached_tab));
+    }
+
+    #[test]
+    fn parent_outline_weight_is_configurable_and_structural_by_default() {
+        let parsed: Result<Theme, _> = toml::from_str("[parent]\noutline_weight = 4.0\n");
+        assert!(matches!(parsed, Ok(theme) if theme.parent.outline_weight == 4.0));
+        assert!(Theme::default().parent.outline_weight > 1.0);
     }
 
     #[test]

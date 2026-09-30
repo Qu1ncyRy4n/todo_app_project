@@ -217,7 +217,8 @@ or `card` when `region_shape = "cloud"`; the default remains `circle`. In
 `hide_outline_in_family = true` to remove only redundant same-family outlines.
 In `[parent]`,
 `clip_well_below_attached_tab` defaults to `true`, keeping an attached parent
-card out of its dark child-space inset. Example
+card out of its dark child-space inset. `outline_weight` controls the structural
+parent-outline emphasis independently of card and child-well strokes. Example
 arrangements live in
 `docs/themes/`, including the visual channels: a node's bar, body, and border are
 each told what they stand for rather than being wired to one meaning. A `[safety]` section from an earlier
@@ -230,7 +231,7 @@ Values that carry data or protocol meaning are deliberately not configurable.
 
 ```sh
 ./dev check   # cargo fmt --check, then clippy --workspace --all-targets -D warnings
-./dev test    # 220 tests: 150 todo-gui, 35 todo-core, 22 todo-store, 13 todo-cli
+./dev test    # 225 tests: 155 todo-gui, 35 todo-core, 22 todo-store, 13 todo-cli
 ```
 
 All workspace tests pass, including protocol round trips, view rebuilds from the
