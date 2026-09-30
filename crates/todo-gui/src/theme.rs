@@ -292,6 +292,10 @@ pub struct NodeTheme {
     pub body_tint_value: f32,
     /// Outline thickness of an unselected node.
     pub outline_width: f32,
+    /// Reduce a card's redundant tag outline inside a same-color family well.
+    pub soften_outline_in_family: bool,
+    /// Omit that redundant outline entirely; selected cards still keep theirs.
+    pub hide_outline_in_family: bool,
     /// Whether a long title wraps onto more lines instead of being cut short.
     pub wrap_titles: bool,
     /// Space between a node's edge and its text.
@@ -321,6 +325,8 @@ impl Default for NodeTheme {
             outline_encodes: Channel::Tag,
             body_tint_value: 0.26,
             outline_width: 1.6,
+            soften_outline_in_family: true,
+            hide_outline_in_family: false,
             wrap_titles: true,
             text_padding: 9.0,
             max_height: 190.0,
@@ -782,6 +788,8 @@ pub struct ParentTheme {
     pub max_board_span: f32,
     /// Whether the child space is open or filled with a dark inset.
     pub well_fill: FamilyWellFill,
+    /// Keep an attached parent's card area out of its child-space inset.
+    pub clip_well_below_attached_tab: bool,
     /// Height of the title strip on a box region.
     pub header_height: f32,
     /// Extra padding added per level of nesting, so nested boxes do not touch.
@@ -815,6 +823,7 @@ impl Default for ParentTheme {
             child_depth: 1,
             max_board_span: 3.0,
             well_fill: FamilyWellFill::Transparent,
+            clip_well_below_attached_tab: true,
             header_height: 18.0,
             nest_padding: 14.0,
             corner_radius: 10.0,
@@ -843,6 +852,17 @@ pub enum RegionShape {
     Cloud,
 }
 
+/// The silhouette used for the per-card members of a cloud tag region.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CloudMemberShape {
+    /// Soft circular islands, useful when tags should feel organic.
+    #[default]
+    Circle,
+    /// Rounded card-sized islands joined by rails, preserving task-card geometry.
+    Card,
+}
+
 /// Controls how tag paths turn into colors and how tag regions are drawn.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -867,6 +887,8 @@ pub struct TagTheme {
     pub node_stripe_width: f32,
     /// Whether a region is drawn as a rectangle, a hull, or separate cloud islands.
     pub region_shape: RegionShape,
+    /// The member silhouette used when `region_shape` is `cloud`.
+    pub cloud_member_shape: CloudMemberShape,
     /// Space left between a region's edge and its member nodes.
     pub region_padding: f32,
     /// Chaikin rounding passes applied to a hull region.
@@ -910,6 +932,7 @@ impl Default for TagTheme {
             region_stroke_alpha: 110,
             node_stripe_width: 7.0,
             region_shape: RegionShape::Hull,
+            cloud_member_shape: CloudMemberShape::Circle,
             region_padding: 24.0,
             region_smoothing: 2,
             coloring: TagColoring::default(),
@@ -963,7 +986,8 @@ impl TagTheme {
 #[cfg(test)]
 mod tests {
     use super::{
-        EdgeTheme, FamilyWellFill, NodeShape, NodeTheme, TagColoring, TagPalette, TagTheme, Theme,
+        CloudMemberShape, EdgeTheme, FamilyWellFill, NodeShape, NodeTheme, TagColoring, TagPalette,
+        TagTheme, Theme,
     };
     use eframe::egui::Color32;
     use std::path::Path;
@@ -1002,6 +1026,28 @@ mod tests {
             Theme::default().parent.well_fill,
             FamilyWellFill::Transparent
         );
+    }
+
+    #[test]
+    fn card_shaped_tag_clouds_are_configurable() {
+        let parsed: Result<Theme, _> =
+            toml::from_str("[tag]\nregion_shape = \"cloud\"\ncloud_member_shape = \"card\"\n");
+        assert!(
+            matches!(parsed, Ok(theme) if theme.tag.cloud_member_shape == CloudMemberShape::Card)
+        );
+    }
+
+    #[test]
+    fn attached_tabs_can_clip_the_child_inset() {
+        let parsed: Result<Theme, _> =
+            toml::from_str("[parent]\nclip_well_below_attached_tab = false\n");
+        assert!(matches!(parsed, Ok(theme) if !theme.parent.clip_well_below_attached_tab));
+    }
+
+    #[test]
+    fn family_outline_can_be_hidden_without_affecting_other_cards() {
+        let parsed: Result<Theme, _> = toml::from_str("[node]\nhide_outline_in_family = true\n");
+        assert!(matches!(parsed, Ok(theme) if theme.node.hide_outline_in_family));
     }
 
     #[test]

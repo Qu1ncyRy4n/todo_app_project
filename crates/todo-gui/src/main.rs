@@ -16,9 +16,9 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fs, path::PathBuf};
 use tags::{TagFilter, TagFilterState};
 use theme::{
-    Channel, ConnectorStyle, FamilyChildStyle, FamilyHeaderStyle, FamilyView, FamilyWellFill,
-    InspectorTheme, NodeShape, NormalizeStyle, ParentRegionStyle, RegionShape, TagColoring,
-    TagInheritance, TagPalette, Theme,
+    Channel, CloudMemberShape, ConnectorStyle, FamilyChildStyle, FamilyHeaderStyle, FamilyView,
+    FamilyWellFill, InspectorTheme, NodeShape, NormalizeStyle, ParentRegionStyle, RegionShape,
+    TagColoring, TagInheritance, TagPalette, Theme,
 };
 use todo_core::{ItemId, ItemState, NamespacePath, Priority, RelationKind, WeightInputs};
 use todo_store::{
@@ -431,6 +431,9 @@ impl TodoGui {
             egui::CollapsingHeader::new("View")
                 .default_open(true)
                 .show(ui, |ui| self.view_settings(ui));
+            egui::CollapsingHeader::new("Appearance")
+                .default_open(false)
+                .show(ui, |ui| self.appearance_settings(ui));
             egui::CollapsingHeader::new("Arrangements")
                 .default_open(true)
                 .show(ui, |ui| self.arrangement_buttons(ui));
@@ -459,45 +462,6 @@ impl TodoGui {
                 .show(ui, |ui| {
                     ui.checkbox(&mut self.show_tag_constellation, "Tag regions");
                     ui.checkbox(&mut self.show_parent_regions, "Parent regions");
-                    ui.add_enabled_ui(self.show_parent_regions, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.selectable_value(
-                                &mut self.theme.parent.family_view,
-                                FamilyView::Adaptive,
-                                "Adaptive",
-                            );
-                            ui.selectable_value(
-                                &mut self.theme.parent.family_view,
-                                FamilyView::Boxed,
-                                "Boxed",
-                            );
-                            ui.selectable_value(
-                                &mut self.theme.parent.family_view,
-                                FamilyView::Connected,
-                                "Connected",
-                            );
-                        });
-                        ui.weak(match self.theme.parent.family_view {
-                            FamilyView::Adaptive => {
-                                "Contains nearby children, bounds a distant one."
-                            }
-                            FamilyView::Boxed => "Every family framed, never capped.",
-                            FamilyView::Connected => "No frames; families read through links.",
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label("Connector");
-                            ui.selectable_value(
-                                &mut self.theme.parent.connector_style,
-                                ConnectorStyle::FillCore,
-                                "Family core",
-                            );
-                            ui.selectable_value(
-                                &mut self.theme.parent.connector_style,
-                                ConnectorStyle::BlueCore,
-                                "Family casing",
-                            );
-                        });
-                    });
                     ui.checkbox(&mut self.show_focus_window, "Focus Window");
                     ui.checkbox(&mut self.show_timeline_ruler, "Timeline ruler");
                 });
@@ -598,7 +562,109 @@ impl TodoGui {
                 "Sequence",
             );
         });
-        ui.label("Family appearance");
+        egui::ComboBox::from_id_salt("family-child-depth")
+            .selected_text(if self.theme.parent.child_depth == 0 {
+                "All".to_owned()
+            } else {
+                self.theme.parent.child_depth.to_string()
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.theme.parent.child_depth, 0, "All child depths");
+                for depth in 1..=6 {
+                    ui.selectable_value(
+                        &mut self.theme.parent.child_depth,
+                        depth,
+                        format!("{depth} generation(s)"),
+                    );
+                }
+            });
+        ui.weak("Collapsed branches show an expand control; active paths stay visible.");
+        ui.separator();
+        ui.label("Group by, in order");
+        for level in 0..3 {
+            let Some(slot) = self.group_by.get_mut(level) else {
+                continue;
+            };
+            egui::ComboBox::from_id_salt(("group-by", level))
+                .selected_text(slot.label())
+                .show_ui(ui, |ui| {
+                    for grouping in GroupBy::all() {
+                        ui.selectable_value(slot, grouping, grouping.label());
+                    }
+                });
+        }
+        ui.weak("First makes the columns; the rest divide them into blocks.");
+        ui.label("Order within a group");
+        egui::ComboBox::from_id_salt("sort-by")
+            .selected_text(self.sort_by.label())
+            .show_ui(ui, |ui| {
+                for sort in SortBy::all() {
+                    ui.selectable_value(&mut self.sort_by, sort, sort.label());
+                }
+            });
+        ui.weak("The order tasks are placed in on the graph.");
+        ui.separator();
+        ui.checkbox(
+            &mut self.theme.focus.parents_of_active_read_active,
+            "Parents of active work read active",
+        );
+    }
+
+    /// Collects presentation controls in one place; layout behavior remains View.
+    fn appearance_settings(&mut self, ui: &mut egui::Ui) {
+        ui.label("Task cards");
+        ui.horizontal(|ui| {
+            ui.selectable_value(
+                &mut self.theme.node.shape,
+                NodeShape::RoundedRect,
+                "Rounded",
+            );
+            ui.selectable_value(&mut self.theme.node.shape, NodeShape::Capsule, "Capsule");
+            ui.selectable_value(&mut self.theme.node.shape, NodeShape::Circle, "Circle");
+        });
+        ui.checkbox(&mut self.theme.node.wrap_titles, "Wrap long titles");
+        ui.checkbox(
+            &mut self.theme.node.soften_outline_in_family,
+            "Soften same-family card outlines",
+        );
+        ui.add_enabled_ui(self.theme.node.soften_outline_in_family, |ui| {
+            ui.checkbox(
+                &mut self.theme.node.hide_outline_in_family,
+                "Hide them completely",
+            );
+        });
+        ui.separator();
+        ui.label("Tag clouds");
+        ui.horizontal(|ui| {
+            ui.selectable_value(
+                &mut self.theme.tag.region_shape,
+                RegionShape::Cloud,
+                "Clouds",
+            );
+            ui.selectable_value(&mut self.theme.tag.region_shape, RegionShape::Hull, "Hull");
+            ui.selectable_value(
+                &mut self.theme.tag.region_shape,
+                RegionShape::Rect,
+                "Rectangles",
+            );
+        });
+        ui.add_enabled_ui(self.theme.tag.region_shape == RegionShape::Cloud, |ui| {
+            ui.horizontal(|ui| {
+                ui.selectable_value(
+                    &mut self.theme.tag.cloud_member_shape,
+                    CloudMemberShape::Circle,
+                    "Circles",
+                );
+                ui.selectable_value(
+                    &mut self.theme.tag.cloud_member_shape,
+                    CloudMemberShape::Card,
+                    "Card clouds",
+                );
+            });
+        });
+        ui.weak("Card clouds follow each task card and connect with square-ended rails.");
+        ui.separator();
+        ui.label("Task families");
         egui::ComboBox::from_id_salt("family-header-style")
             .selected_text(match self.theme.parent.header_style {
                 FamilyHeaderStyle::Header => "Header",
@@ -633,27 +699,6 @@ impl TodoGui {
                     "Nested family",
                 );
             });
-        egui::ComboBox::from_id_salt("family-child-depth")
-            .selected_text(if self.theme.parent.child_depth == 0 {
-                "All".to_owned()
-            } else {
-                self.theme.parent.child_depth.to_string()
-            })
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.theme.parent.child_depth, 0, "All child depths");
-                for depth in 1..=6 {
-                    ui.selectable_value(
-                        &mut self.theme.parent.child_depth,
-                        depth,
-                        format!("{depth} generation(s)"),
-                    );
-                }
-            });
-        ui.weak("Collapsed branches show an expand control; active paths stay visible.");
-        ui.add(
-            egui::Slider::new(&mut self.theme.parent.max_board_span, 1.0..=8.0)
-                .text("Maximum family span"),
-        );
         egui::ComboBox::from_id_salt("family-well-fill")
             .selected_text(match self.theme.parent.well_fill {
                 FamilyWellFill::Transparent => "Transparent child space",
@@ -671,37 +716,32 @@ impl TodoGui {
                     "Dark child space",
                 );
             });
-        ui.weak("Parent identity stays in front of tag clouds; child treatment changes the enclosed subgraph.");
-        ui.separator();
-        ui.label("Group by, in order");
-        for level in 0..3 {
-            let Some(slot) = self.group_by.get_mut(level) else {
-                continue;
-            };
-            egui::ComboBox::from_id_salt(("group-by", level))
-                .selected_text(slot.label())
-                .show_ui(ui, |ui| {
-                    for grouping in GroupBy::all() {
-                        ui.selectable_value(slot, grouping, grouping.label());
-                    }
-                });
-        }
-        ui.weak("First makes the columns; the rest divide them into blocks.");
-        ui.label("Order within a group");
-        egui::ComboBox::from_id_salt("sort-by")
-            .selected_text(self.sort_by.label())
-            .show_ui(ui, |ui| {
-                for sort in SortBy::all() {
-                    ui.selectable_value(&mut self.sort_by, sort, sort.label());
-                }
-            });
-        ui.weak("The order tasks are placed in on the graph.");
+        ui.checkbox(
+            &mut self.theme.parent.clip_well_below_attached_tab,
+            "Keep child fill below attached card",
+        );
+        ui.add(
+            egui::Slider::new(&mut self.theme.parent.max_board_span, 1.0..=8.0)
+                .text("Maximum family span"),
+        );
+        ui.horizontal(|ui| {
+            ui.label("Connector");
+            ui.selectable_value(
+                &mut self.theme.parent.connector_style,
+                ConnectorStyle::FillCore,
+                "Family core",
+            );
+            ui.selectable_value(
+                &mut self.theme.parent.connector_style,
+                ConnectorStyle::BlueCore,
+                "Family casing",
+            );
+        });
         ui.separator();
         ui.checkbox(&mut self.theme.layout.animate, "Glide to new positions");
-        ui.checkbox(&mut self.theme.node.wrap_titles, "Wrap long titles");
         ui.checkbox(
-            &mut self.theme.focus.parents_of_active_read_active,
-            "Parents of active work read active",
+            &mut self.theme.edge.scale_arrowheads_with_zoom,
+            "Scale arrowheads with zoom",
         );
     }
 
@@ -3359,7 +3399,32 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
     if response.hovered()
         && let Some(pointer) = ui.input(|input| input.pointer.hover_pos())
     {
-        let scroll = ui.input(|input| input.smooth_scroll_delta.y + input.zoom_delta().ln_1p());
+        // `smooth_scroll_delta` intentionally continues after the device stops.
+        // Graph zoom should follow only physical wheel events, otherwise it
+        // feels like inertial zoom after the wheel or trackpad is released.
+        // `zoom_delta` is a multiplicative factor, so its neutral value is 1;
+        // use ln (not ln_1p) to keep an idle frame at zero zoom movement.
+        let scroll = ui.input(|input| {
+            let wheel = input
+                .raw
+                .events
+                .iter()
+                .filter_map(|event| match event {
+                    egui::Event::MouseWheel { delta, .. } => Some(delta.y),
+                    _ => None,
+                })
+                .sum::<f32>();
+            let pinch = input
+                .raw
+                .events
+                .iter()
+                .filter_map(|event| match event {
+                    egui::Event::Zoom(scale) => Some(scale.ln()),
+                    _ => None,
+                })
+                .sum::<f32>();
+            wheel + pinch
+        });
         if scroll.abs() > f32::EPSILON {
             let previous = app.graph_zoom;
             app.graph_zoom = (previous * (scroll * 0.004).exp()).clamp(0.2, 4.0);
@@ -3488,7 +3553,7 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
         draw_tag_constellation(
             &painter,
             &items,
-            &rendered_positions,
+            &layouts,
             app.graph_zoom,
             &app.theme,
             &palette,
@@ -3693,6 +3758,28 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
                 app.normalize_family(rect, &id);
                 ui.close();
             }
+            ui.menu_button("Family display", |ui| {
+                if ui
+                    .selectable_value(
+                        &mut app.theme.parent.family_view,
+                        FamilyView::Adaptive,
+                        "Box",
+                    )
+                    .clicked()
+                {
+                    ui.close();
+                }
+                if ui
+                    .selectable_value(
+                        &mut app.theme.parent.family_view,
+                        FamilyView::Connected,
+                        "Tree",
+                    )
+                    .clicked()
+                {
+                    ui.close();
+                }
+            });
         });
         let selected = app.selected.as_deref() == Some(id.as_str());
         let holds_active = holding_active.contains(&id);
@@ -3765,6 +3852,28 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
         )
         .map(dim)
         .unwrap_or(dim(Color32::LIGHT_GRAY));
+        // A child that shares its enclosing family's fill does not need to draw
+        // the same tag border twice. Selection keeps its gold outline, and a
+        // differently colored child keeps the normal outline for contrast.
+        let shares_family_fill = accent.is_some_and(|accent| {
+            let own_family_fill = family_colors(accent).0;
+            boxes.iter().any(|(parent, family)| {
+                parent != &id
+                    && family.well.contains(node.center())
+                    && fill_of(parent) == own_family_fill
+            })
+        });
+        let border = if !selected && shares_family_fill {
+            if app.theme.node.hide_outline_in_family {
+                Color32::TRANSPARENT
+            } else if app.theme.node.soften_outline_in_family {
+                blend_color(border, fill, 18)
+            } else {
+                border
+            }
+        } else {
+            border
+        };
         let outline = Stroke::new(
             if selected {
                 3.0
@@ -3851,33 +3960,35 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
             painter.galley(anchor, title_galley, dim(Color32::WHITE));
         }
         if let Some(hidden) = hidden_descendants.get(&id)
-            && (*hidden > 0 || app.expanded_families.contains(&id))
+            && *hidden > 0
         {
+            // This is deliberately at the card's child-side edge: an ellipsis
+            // reads as a continuation of the family tree, not a floating mode
+            // control in the card's corner.
             let badge = Rect::from_center_size(
-                node.right_top() + Vec2::new(8.0, -7.0),
-                Vec2::new(31.0, 24.0),
+                node.center_bottom() + Vec2::new(0.0, 5.0),
+                Vec2::new(24.0, 12.0),
             );
-            let toggle = ui.interact(
-                badge,
-                ui.make_persistent_id(("family-expand", &id)),
-                Sense::click(),
-            );
-            painter.rect_filled(badge, 8.0, Color32::from_rgb(61, 68, 89));
+            let tooltip = format!("Show {hidden} hidden task(s)");
+            let toggle = ui
+                .interact(
+                    badge,
+                    ui.make_persistent_id(("family-expand", &id)),
+                    Sense::click(),
+                )
+                .on_hover_text(tooltip);
+            painter.rect_filled(badge, 6.0, Color32::from_rgb(61, 68, 89));
             painter.rect_stroke(
                 badge,
-                8.0,
-                Stroke::new(1.5, Color32::LIGHT_GRAY),
+                6.0,
+                Stroke::new(1.0, Color32::LIGHT_GRAY),
                 egui::StrokeKind::Outside,
             );
             painter.text(
                 badge.center(),
                 Align2::CENTER_CENTER,
-                if app.expanded_families.contains(&id) {
-                    "−".to_owned()
-                } else {
-                    format!("+{hidden}")
-                },
-                FontId::proportional(12.0),
+                "…",
+                FontId::proportional(14.0),
                 Color32::WHITE,
             );
             if toggle.clicked() {
@@ -4563,13 +4674,20 @@ fn draw_family_boxes(
     palette: &TagPalette,
     effective: &HashMap<String, Vec<String>>,
 ) {
-    // Complete each ancestor before its descendants. Painting all outer frames
-    // first would let an ancestor's later well wash over a nested family.
+    // Complete each ancestor before its descendants. Rectangle-area ordering can
+    // swap nearly equal animated boards from frame to frame, causing borders to
+    // flash above and below one another; structural depth is stable instead.
     let mut ordered = boxes.iter().collect::<Vec<_>>();
     ordered.sort_by(|left, right| {
-        (right.1.body.area())
-            .partial_cmp(&left.1.body.area())
-            .unwrap_or(std::cmp::Ordering::Equal)
+        let depth = |id: &String| {
+            items
+                .iter()
+                .find(|item| item.item.id.to_string() == *id)
+                .map_or(usize::MAX, |item| ancestor_depth(item, items))
+        };
+        depth(left.0)
+            .cmp(&depth(right.0))
+            .then_with(|| left.0.cmp(right.0))
     });
     let children = child_index(items);
     for (id, family) in ordered {
@@ -4909,22 +5027,25 @@ fn collect_subtree(root: &str, children: &HashMap<String, Vec<String>>) -> Vec<S
 struct TagCloud {
     path: String,
     points: Vec<Pos2>,
+    /// The actual measured card bounds, retained so card clouds cover wrapped
+    /// cards instead of a generic nominal card size.
+    members: Vec<Rect>,
     color: Color32,
 }
 
 fn draw_tag_constellation(
     painter: &egui::Painter,
     items: &[StoredItem],
-    positions: &HashMap<String, Pos2>,
+    layouts: &HashMap<String, NodeLayout>,
     zoom: f32,
     theme: &Theme,
     palette: &TagPalette,
     effective: &HashMap<String, Vec<String>>,
 ) {
-    let mut groups: HashMap<String, Vec<Pos2>> = HashMap::new();
+    let mut groups: HashMap<String, Vec<Rect>> = HashMap::new();
     for item in items {
         let id = item.item.id.to_string();
-        let Some(position) = positions.get(&id).copied() else {
+        let Some(layout) = layouts.get(&id) else {
             continue;
         };
         let empty = Vec::new();
@@ -4937,7 +5058,7 @@ fn draw_tag_constellation(
             .max_by_key(|tag| tag.matches('/').count())
             .cloned()
             .unwrap_or_else(|| "(untagged)".to_owned());
-        groups.entry(tag).or_default().push(position);
+        groups.entry(tag).or_default().push(layout.rect);
     }
     let mut paths = groups.keys().cloned().collect::<Vec<_>>();
     paths.sort();
@@ -4947,7 +5068,7 @@ fn draw_tag_constellation(
     };
     let mut clouds = Vec::new();
     for path in paths {
-        let Some(points) = groups.get(&path) else {
+        let Some(members) = groups.get(&path) else {
             continue;
         };
         let color = if path == "(untagged)" {
@@ -4955,7 +5076,8 @@ fn draw_tag_constellation(
         } else {
             palette.color(&path, &theme.tag)
         };
-        for cluster in geometry::cluster_points(points, theme.tag.cluster_distance * zoom) {
+        let points = members.iter().map(Rect::center).collect::<Vec<_>>();
+        for cluster in geometry::cluster_points(&points, theme.tag.cluster_distance * zoom) {
             if cluster.len() < theme.tag.min_region_members
                 && theme.tag.region_shape != RegionShape::Cloud
             {
@@ -4963,6 +5085,11 @@ fn draw_tag_constellation(
             }
             clouds.push(TagCloud {
                 path: path.clone(),
+                members: members
+                    .iter()
+                    .copied()
+                    .filter(|member| cluster.contains(&member.center()))
+                    .collect(),
                 points: cluster,
                 color,
             });
@@ -4975,7 +5102,7 @@ fn draw_tag_constellation(
         draw_legacy_tag_regions(painter, &clouds, half_size, theme, zoom);
         return;
     }
-    draw_clean_tag_clouds(painter, &clouds, half_size, theme, zoom);
+    draw_clean_tag_clouds(painter, &clouds, theme, zoom);
 }
 
 /// Draws the older rectangle and hull modes without changing their saved meaning.
@@ -5021,26 +5148,35 @@ fn draw_legacy_tag_regions(
     }
 }
 
-/// Draws smooth individual clouds and soft links for one tag family.
+/// Draws a configurable card-sized or circular cloud for one tag family.
 ///
-/// Each tagged task gets a circle even when it has no neighbor. Links are painted
-/// first and circles cap their ends, making a clean tube between matching tags
-/// instead of the pixel grid a sampled metaball field would require.
-fn draw_clean_tag_clouds(
-    painter: &egui::Painter,
-    clouds: &[TagCloud],
-    half_size: Vec2,
-    theme: &Theme,
-    zoom: f32,
-) {
+/// Links are painted first and members cap their ends. Card clouds deliberately
+/// follow the task silhouette, so tags can read as a squarer rail through work
+/// without becoming a family frame around the child subgraph.
+fn draw_clean_tag_clouds(painter: &egui::Painter, clouds: &[TagCloud], theme: &Theme, zoom: f32) {
     let context = painter.ctx();
     let backdrop = context.style_of(context.theme()).visuals.panel_fill;
     for cloud in clouds {
-        let radius = half_size.length() + theme.tag.region_padding * zoom;
         let fill = cloud_pastel(cloud.color, backdrop);
+        let members = cloud
+            .members
+            .iter()
+            .map(|member| member.expand(theme.tag.region_padding * zoom))
+            .collect::<Vec<_>>();
+        let radius = members
+            .iter()
+            .map(|member| member.size().length() / 2.0)
+            .fold(0.0_f32, f32::max);
+        let rail_width = match theme.tag.cloud_member_shape {
+            CloudMemberShape::Circle => radius * 1.15,
+            CloudMemberShape::Card => {
+                members.iter().map(Rect::height).sum::<f32>()
+                    / f32::from(u16::try_from(members.len()).unwrap_or(u16::MAX)).max(1.0)
+            }
+        };
         // The opaque pastel is pre-blended with the canvas once, so overlapping
         // circles and their tube stay one continuous color rather than darkening.
-        let tube = Stroke::new(radius * 1.15, fill);
+        let tube = Stroke::new(rail_width, fill);
         for (from, to) in geometry::minimum_spanning_links(&cloud.points) {
             // Clouds are now behind the family layer and cards, so a tag can span
             // one broad body of work without being mistaken for its foreground
@@ -5049,15 +5185,54 @@ fn draw_clean_tag_clouds(
                 painter.line_segment([from, to], tube);
             }
         }
-        for point in &cloud.points {
-            painter.circle_filled(*point, radius, fill);
+        for member in &members {
+            match theme.tag.cloud_member_shape {
+                CloudMemberShape::Circle => {
+                    painter.circle_filled(member.center(), member.size().length() / 2.0, fill)
+                }
+                CloudMemberShape::Card => {
+                    painter.rect_filled(*member, app_cloud_rounding(theme, zoom), fill)
+                }
+            };
         }
-        if cloud.points.len() >= 2
-            && let Some(bounds) = bounds_for_points(&cloud.points, half_size)
-        {
-            draw_region_label(painter, bounds, &cloud.path, cloud.color, theme, zoom);
+        if let Some(bounds) = union_rects(&members) {
+            draw_cloud_label(painter, bounds, &cloud.path, cloud.color, theme, zoom);
         }
     }
+}
+
+fn union_rects(rects: &[Rect]) -> Option<Rect> {
+    let first = *rects.first()?;
+    Some(
+        rects
+            .iter()
+            .skip(1)
+            .fold(first, |bounds, rect| bounds.union(*rect)),
+    )
+}
+
+fn app_cloud_rounding(theme: &Theme, zoom: f32) -> f32 {
+    theme.node.rounding().min(18.0) * zoom
+}
+
+/// Keeps a cloud label within its own colored member space instead of floating
+/// separately above a parent board where it could look like a family heading.
+fn draw_cloud_label(
+    painter: &egui::Painter,
+    bounds: Rect,
+    path: &str,
+    color: Color32,
+    theme: &Theme,
+    zoom: f32,
+) {
+    let label_bounds = Rect::from_min_size(
+        bounds.left_top() + Vec2::splat(5.0 * zoom),
+        Vec2::new(
+            bounds.width() - 10.0 * zoom,
+            theme.tag.label_font_size * zoom + 4.0,
+        ),
+    );
+    draw_region_label_inside(painter, label_bounds, path, color, theme, zoom);
 }
 
 /// Returns a fully opaque, low-saturation version of a tag color over `backdrop`.
@@ -5074,6 +5249,23 @@ fn cloud_pastel(color: Color32, backdrop: Color32) -> Color32 {
         blend(color.r(), backdrop.r()),
         blend(color.g(), backdrop.g()),
         blend(color.b(), backdrop.b()),
+    )
+}
+
+/// Moves a redundant outline toward its surrounding fill without removing the
+/// card's selection and status cues.
+fn blend_color(from: Color32, toward: Color32, toward_percent: u8) -> Color32 {
+    let toward_percent = u16::from(toward_percent.min(100));
+    let from_percent = 100_u16.saturating_sub(toward_percent);
+    let blend = |first: u8, second: u8| {
+        u8::try_from((u16::from(first) * from_percent + u16::from(second) * toward_percent) / 100)
+            .map_or(u8::MAX, |value| value)
+    };
+    Color32::from_rgba_unmultiplied(
+        blend(from.r(), toward.r()),
+        blend(from.g(), toward.g()),
+        blend(from.b(), toward.b()),
+        blend(from.a(), toward.a()),
     )
 }
 
@@ -5124,6 +5316,53 @@ fn draw_region_label(
     painter.text(
         bounds.center_top() - Vec2::new(0.0, 6.0 * zoom),
         Align2::CENTER_BOTTOM,
+        shown,
+        FontId::proportional(font_size),
+        color,
+    );
+}
+
+/// Draws the same clipped tag label inside a cloud member instead of above it.
+fn draw_region_label_inside(
+    painter: &egui::Painter,
+    bounds: Rect,
+    path: &str,
+    color: Color32,
+    theme: &Theme,
+    zoom: f32,
+) {
+    let width = bounds.width();
+    if width < theme.tag.label_min_width * zoom {
+        return;
+    }
+    let text = if theme.tag.label_full_path {
+        path.to_owned()
+    } else {
+        path.rsplit('/').next().unwrap_or(path).to_owned()
+    };
+    let font_size = theme.tag.label_font_size * zoom;
+    let per_character = (font_size * 0.55).max(1.0);
+    let mut used = 0.0;
+    let mut shown = String::new();
+    let mut clipped = false;
+    for character in text.chars() {
+        if used + per_character > width {
+            clipped = true;
+            break;
+        }
+        shown.push(character);
+        used += per_character;
+    }
+    if shown.is_empty() {
+        return;
+    }
+    if clipped {
+        shown.pop();
+        shown.push('…');
+    }
+    painter.text(
+        bounds.left_top(),
+        Align2::LEFT_TOP,
         shown,
         FontId::proportional(font_size),
         color,
@@ -5280,7 +5519,7 @@ fn family_boxes(
 /// tab; at any greater distance the attachment stalk carries the relationship
 /// and the frame stays a tight border around the children.
 fn family_box(parent: Rect, children: Rect, theme: &Theme, zoom: f32) -> FamilyBox {
-    let well = children.expand((theme.parent.padding + theme.parent.nest_padding) * zoom);
+    let mut well = children.expand((theme.parent.padding + theme.parent.nest_padding) * zoom);
     let side = theme.parent.padding * zoom;
     let body = well.expand(side);
     let overlap = (parent.height() * 0.18).min(14.0 * zoom);
@@ -5302,6 +5541,15 @@ fn family_box(parent: Rect, children: Rect, theme: &Theme, zoom: f32) -> FamilyB
     } else {
         body
     };
+    // The attached card is the cap of this family, not part of the recessed
+    // child space. Clipping the well below its tab prevents a dark inset from
+    // bleeding through the parent-card area when a child sits very close.
+    if theme.parent.header_style == FamilyHeaderStyle::AttachedTab
+        && theme.parent.clip_well_below_attached_tab
+    {
+        let tab_bottom = parent.bottom() - overlap;
+        well.set_top(well.top().max(tab_bottom).min(well.bottom()));
+    }
     FamilyBox {
         body,
         well,
@@ -5623,6 +5871,18 @@ mod tests {
         assert!(family.well.contains(child.max));
         assert!(family.body.contains(family.well.min));
         assert!(family.body.contains(family.well.max));
+    }
+
+    #[test]
+    fn attached_tab_keeps_the_child_well_out_of_the_parent_card() {
+        let parent = Rect::from_min_size(pos2(100.0, 20.0), vec2(150.0, 58.0));
+        // A closely placed child used to pull its inset behind the attached tab.
+        let child = Rect::from_min_size(pos2(110.0, 72.0), vec2(140.0, 70.0));
+        let theme = super::Theme::default();
+        let family = family_box(parent, child, &theme, 1.0);
+        let overlap = (parent.height() * 0.18).min(14.0);
+        assert!(family.well.top() >= parent.bottom() - overlap);
+        assert!(family.well.contains(child.center()));
     }
 
     #[test]

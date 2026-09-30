@@ -49,7 +49,8 @@ Two clients read the same ledger, and neither owns data the other cannot see:
 The editor is presentation over the same events. Its appearance is configured in
 `theme.toml` and its node placement in `gui-layout.json`, both beside
 `config.toml`; deleting either loses arrangement, never work. See
-[the graph editor handoff](docs/gui-graph-pickup.md).
+[the graph editor handoff](docs/gui-graph-pickup.md) and the
+[graph design language](docs/gui-graph-design-language.md).
 
 ## Development flow
 

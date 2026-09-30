@@ -1,6 +1,11 @@
 # GUI Graph Implementation Pickup
 
-Updated: 2026-09-29
+Updated: 2026-09-30
+
+The stable names and visual contracts for family frames, anchors, tree lines,
+tag clouds, and the planned Appearance Lab live in
+[Graph Design Language](gui-graph-design-language.md). Read it before changing
+graph rendering; this pickup focuses on implementation state.
 
 ## What is implemented in the current worktree
 
@@ -68,12 +73,31 @@ Deletion is deliberately absent from the editor. `todo rm --force` and
   paths remain visible. Distant child boards are capped relative to the parent
   card, with a continuation control to open the complete span. A short stalk
   attaches each parent card to its own child board.
+- The collapsed-family continuation is a small `…` button centered on the
+  parent card's child-side edge, where its tree would continue, rather than a
+  corner badge. It appears only while children are hidden and reveals them on
+  click. Right-clicking a card offers **Family display → Box / Tree**;
+  that global display choice is intentionally not a persistent inspector control.
 - G over empty graph canvas normalizes the visible graph. G over a card, or its
   context-menu command, normalizes only that connected parent/child tree and
   leaves unrelated families in place. Focus now separates wrapped active rows,
   places active-holding parents with them, and omits spanning family fills.
 - Cloud fills are pre-blended once against the active canvas and drawn opaque, so
   a same-tag circle and its connecting tube remain one color at every overlap.
+- Appearance is a dedicated inspector section. It owns card silhouette and
+  wrapping, tag-cloud treatment, family treatment, and motion/arrow presentation;
+  View remains for hierarchy depth and arrangement behavior. Cloud members may be
+  the original circles or optional card-sized rounded rectangles joined by rails.
+  The latter keeps a tag visibly attached to the cards it annotates without
+  turning it into a parent board. Card clouds use each card's measured bounds,
+  including wrapped-title height, and cloud labels sit inside their own bounds.
+- Scroll zoom consumes raw wheel and pinch events, rather than egui's deliberately
+  inertial smoothed scroll state. The neutral pinch scale no longer produces a
+  zoom step on every idle frame. Family paint order is structural (ancestor before
+  descendant), avoiding border flicker when nearly equal animated boards swap
+  area order. Same-tag child outlines can soften within their family well; selected
+  and differently tagged cards keep their contrast. Appearance can also hide a
+  redundant same-family outline completely.
 
 ## Completed goal: slices 1-7 and the follow-on slices 8-17
 
@@ -187,7 +211,13 @@ Sections: `[node]`, `[edge]`, `[tag]`, `[layout]`, `[focus]`, `[timeline]`,
 `header` or `attached_tab`, and `child_style` accepts `recessed_board` or
 `nested_family`. `well_fill` accepts `transparent` or `dark`. `family_view`
 accepts `adaptive`, `boxed`, or `connected`, and `connector_style` accepts
-`fill_core` or `blue_core`. Example
+`fill_core` or `blue_core`. In `[tag]`, `cloud_member_shape` accepts `circle`
+or `card` when `region_shape = "cloud"`; the default remains `circle`. In
+`[node]`, `soften_outline_in_family` defaults to `true`; optionally set
+`hide_outline_in_family = true` to remove only redundant same-family outlines.
+In `[parent]`,
+`clip_well_below_attached_tab` defaults to `true`, keeping an attached parent
+card out of its dark child-space inset. Example
 arrangements live in
 `docs/themes/`, including the visual channels: a node's bar, body, and border are
 each told what they stand for rather than being wired to one meaning. A `[safety]` section from an earlier
@@ -200,7 +230,7 @@ Values that carry data or protocol meaning are deliberately not configurable.
 
 ```sh
 ./dev check   # cargo fmt --check, then clippy --workspace --all-targets -D warnings
-./dev test    # 214 tests: 144 todo-gui, 35 todo-core, 22 todo-store, 13 todo-cli
+./dev test    # 219 tests: 149 todo-gui, 35 todo-core, 22 todo-store, 13 todo-cli
 ```
 
 All workspace tests pass, including protocol round trips, view rebuilds from the
@@ -224,6 +254,12 @@ what to check there first:
   a dense graph;
 - whether the parent-to-board stalk and the continuation chip read clearly at
   different zoom levels;
+- smooth versus card-shaped clouds over a single card, a row of matching cards,
+  and overlapping unrelated tags; confirm labels stay with their clouds;
+- scroll-wheel and trackpad zoom on the canvas: it should stop as soon as the
+  physical gesture stops, while still anchoring the hovered card;
+- the compact chevron child-depth control at both a parent card and its attached
+  family frame, plus same-family outline softening with and without selection;
 - the TE-0015 screenshot cases: normalize a large family, expand one child,
   arrange that family from its context menu, then switch to Focus and confirm no
   inactive card sits inside the gold boundary.
