@@ -90,13 +90,10 @@ pub struct LayoutTheme {
     pub done_band_gap: f32,
     /// Whether finished prerequisites are lifted into a band above.
     pub done_above: bool,
-    /// Whether active work is pulled together after arranging.
-    ///
-    /// A wide subtree otherwise pushes the next active task far along the row, so
-    /// what is being worked on ends up spread across the canvas. Compacting takes
-    /// each head's subtree with it, leaving the heads close and the branches loose.
+    /// Whether hierarchy layout packs complete task families into rows.
+    /// The legacy config key stays stable so existing theme files still load.
     pub compact_active: bool,
-    /// Distance between active heads once they are pulled together.
+    /// Legacy config key for family spacing (one quarter is the visual gap).
     pub active_head_gap: f32,
     /// Horizontal distance between grouped columns.
     pub group_column_gap: f32,
@@ -695,14 +692,76 @@ pub enum ParentRegionStyle {
     Hull,
 }
 
+/// How the parent task is attached to the family enclosure.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FamilyHeaderStyle {
+    /// A title strip sits inside the enclosing family frame.
+    Header,
+    /// A compact tab projects from the frame, keeping the parent identity above
+    /// the child space without consuming room inside it.
+    #[default]
+    AttachedTab,
+}
+
+/// How the visible descendants are presented inside a parent family.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FamilyChildStyle {
+    /// A softly filled inset board, useful when the children should feel recessed.
+    RecessedBoard,
+    /// A strong nested frame, making the child graph read as a contained family.
+    #[default]
+    NestedFamily,
+}
+
+/// Whether the child space covers the graph behind it.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FamilyWellFill {
+    /// Leave the graph and tag clouds visible inside the family frame.
+    #[default]
+    Transparent,
+    /// Use the dark inset from the original family study.
+    Dark,
+}
+
+/// How much framing every family gets, regardless of its own geometry.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FamilyView {
+    /// Contain children that sit nearby, and fall back to a bounded board when
+    /// one is distant. The reading adapts to where the work actually is.
+    #[default]
+    Adaptive,
+    /// Frame every family, never capping into a board. Containment is the
+    /// structure, and a sprawling family is allowed to sprawl.
+    Boxed,
+    /// Draw no frames at all. Families read only through their links, which
+    /// suits a dense graph where boxes would tile over each other.
+    Connected,
+}
+
 /// Controls the region drawn around a parent task and its descendants.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ParentTheme {
     /// Whether parent containment regions are drawn at all.
     pub show_regions: bool,
+    /// How much framing families get, independent of their own geometry.
+    pub family_view: FamilyView,
     /// Whether a parent draws as a titled box or as a hull.
     pub region_style: ParentRegionStyle,
+    /// How the parent identity is attached to its family frame.
+    pub header_style: FamilyHeaderStyle,
+    /// How the descendant compartment is rendered inside that frame.
+    pub child_style: FamilyChildStyle,
+    /// Visible generations below a root; zero means all generations.
+    pub child_depth: usize,
+    /// Maximum compact board width and height, in parent-card dimensions.
+    pub max_board_span: f32,
+    /// Whether the child space is open or filled with a dark inset.
+    pub well_fill: FamilyWellFill,
     /// Height of the title strip on a box region.
     pub header_height: f32,
     /// Extra padding added per level of nesting, so nested boxes do not touch.
@@ -715,9 +774,10 @@ pub struct ParentTheme {
     pub padding: f32,
     /// Chaikin rounding passes applied to the region.
     pub smoothing: u8,
-    /// Fill opacity of a parent region, out of 255.
+    /// Fill opacity of a hull region, out of 255. Box families use opaque fills
+    /// so overlapping generations keep one color.
     pub fill_alpha: u8,
-    /// Outline opacity of a parent region, out of 255.
+    /// Outline opacity of a hull region, out of 255.
     pub stroke_alpha: u8,
     /// Outline thickness of a parent region.
     pub stroke_width: f32,
@@ -727,7 +787,13 @@ impl Default for ParentTheme {
     fn default() -> Self {
         Self {
             show_regions: true,
+            family_view: FamilyView::Adaptive,
             region_style: ParentRegionStyle::Box,
+            header_style: FamilyHeaderStyle::AttachedTab,
+            child_style: FamilyChildStyle::NestedFamily,
+            child_depth: 1,
+            max_board_span: 3.0,
+            well_fill: FamilyWellFill::Transparent,
             header_height: 18.0,
             nest_padding: 14.0,
             corner_radius: 10.0,
@@ -747,9 +813,13 @@ impl Default for ParentTheme {
 pub enum RegionShape {
     /// A rounded rectangle around every member node.
     Rect,
-    /// A smoothed hull that follows the members, for a more organic reading.
-    #[default]
+    /// A smoothed hull that follows the members. Kept for themes that prefer a
+    /// single enclosing region, even though it fills concave gaps.
     Hull,
+    /// Overlapping circular islands joined by a faint thread. The gaps between
+    /// islands remain visible, so unrelated work does not read as tagged.
+    #[default]
+    Cloud,
 }
 
 /// Controls how tag paths turn into colors and how tag regions are drawn.
@@ -774,7 +844,7 @@ pub struct TagTheme {
     pub region_stroke_alpha: u8,
     /// Width of the tag accent stripe drawn on a node's leading edge.
     pub node_stripe_width: f32,
-    /// Whether a region is drawn as a rectangle or a smoothed hull.
+    /// Whether a region is drawn as a rectangle, a hull, or separate cloud islands.
     pub region_shape: RegionShape,
     /// Space left between a region's edge and its member nodes.
     pub region_padding: f32,
@@ -871,7 +941,9 @@ impl TagTheme {
 
 #[cfg(test)]
 mod tests {
-    use super::{EdgeTheme, NodeShape, NodeTheme, TagColoring, TagPalette, TagTheme, Theme};
+    use super::{
+        EdgeTheme, FamilyWellFill, NodeShape, NodeTheme, TagColoring, TagPalette, TagTheme, Theme,
+    };
     use eframe::egui::Color32;
     use std::path::Path;
 
@@ -899,6 +971,16 @@ mod tests {
             .to_toml()
             .and_then(|text| toml::from_str::<Theme>(&text).map_err(anyhow::Error::from));
         assert!(matches!(restored, Ok(restored) if restored == theme));
+    }
+
+    #[test]
+    fn family_child_space_fill_is_configurable() {
+        let parsed: Result<Theme, _> = toml::from_str("[parent]\nwell_fill = \"dark\"\n");
+        assert!(matches!(parsed, Ok(theme) if theme.parent.well_fill == FamilyWellFill::Dark));
+        assert_eq!(
+            Theme::default().parent.well_fill,
+            FamilyWellFill::Transparent
+        );
     }
 
     #[test]

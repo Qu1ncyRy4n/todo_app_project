@@ -16,8 +16,9 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fs, path::PathBuf};
 use tags::{TagFilter, TagFilterState};
 use theme::{
-    Channel, FamilyChildStyle, FamilyHeaderStyle, FamilyWellFill, InspectorTheme, NodeShape,
-    NormalizeStyle, ParentRegionStyle, RegionShape, TagColoring, TagInheritance, TagPalette, Theme,
+    Channel, FamilyChildStyle, FamilyHeaderStyle, FamilyView, FamilyWellFill, InspectorTheme,
+    NodeShape, NormalizeStyle, ParentRegionStyle, RegionShape, TagColoring, TagInheritance,
+    TagPalette, Theme,
 };
 use todo_core::{ItemId, ItemState, NamespacePath, Priority, RelationKind, WeightInputs};
 use todo_store::{
@@ -458,6 +459,32 @@ impl TodoGui {
                 .show(ui, |ui| {
                     ui.checkbox(&mut self.show_tag_constellation, "Tag regions");
                     ui.checkbox(&mut self.show_parent_regions, "Parent regions");
+                    ui.add_enabled_ui(self.show_parent_regions, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.selectable_value(
+                                &mut self.theme.parent.family_view,
+                                FamilyView::Adaptive,
+                                "Adaptive",
+                            );
+                            ui.selectable_value(
+                                &mut self.theme.parent.family_view,
+                                FamilyView::Boxed,
+                                "Boxed",
+                            );
+                            ui.selectable_value(
+                                &mut self.theme.parent.family_view,
+                                FamilyView::Connected,
+                                "Connected",
+                            );
+                        });
+                        ui.weak(match self.theme.parent.family_view {
+                            FamilyView::Adaptive => {
+                                "Contains nearby children, bounds a distant one."
+                            }
+                            FamilyView::Boxed => "Every family framed, never capped.",
+                            FamilyView::Connected => "No frames; families read through links.",
+                        });
+                    });
                     ui.checkbox(&mut self.show_focus_window, "Focus Window");
                     ui.checkbox(&mut self.show_timeline_ruler, "Timeline ruler");
                 });
@@ -3426,7 +3453,10 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
     // Tag clouds are ambient context. Family containment is the structural
     // reading of the graph, so it is painted above the clouds before edges and
     // cards make the parent-to-child path explicit.
-    if app.show_parent_regions && app.theme.parent.show_regions {
+    if app.show_parent_regions
+        && app.theme.parent.show_regions
+        && app.theme.parent.family_view != FamilyView::Connected
+    {
         if app.theme.parent.region_style == ParentRegionStyle::Hull {
             draw_parent_regions(
                 &painter,
@@ -5161,7 +5191,8 @@ fn bounded_family_box(
 ) -> FamilyBox {
     let mut family = family_box(parent, children, theme, zoom);
     let max_size = parent.size() * theme.parent.max_board_span.max(1.0);
-    family.oversized = family.body.width() > max_size.x || family.body.height() > max_size.y;
+    family.oversized = theme.parent.family_view != FamilyView::Boxed
+        && (family.body.width() > max_size.x || family.body.height() > max_size.y);
     family.descendant_count = count;
     if family.oversized && !expanded {
         let body = Rect::from_min_size(
@@ -5474,6 +5505,18 @@ mod tests {
         assert!(compact.body.width() <= parent.width() * theme.parent.max_board_span);
         assert!(compact.body.height() <= parent.height() * theme.parent.max_board_span);
         assert!(expanded.body.contains(children.center()));
+    }
+
+    #[test]
+    fn boxed_view_refuses_to_cap_a_wide_family() {
+        let parent = Rect::from_min_size(pos2(100.0, 20.0), vec2(150.0, 58.0));
+        let children = Rect::from_min_size(pos2(120.0, 140.0), vec2(1600.0, 400.0));
+        let mut theme = super::Theme::default();
+        theme.parent.family_view = super::FamilyView::Boxed;
+        let family = bounded_family_box(parent, children, &theme, 1.0, false, 9);
+        assert!(!family.oversized);
+        assert!(!family.capped);
+        assert!(family.well.contains(children.center()));
     }
 
     /// One far-away child used to trip the cap only because the frame had
