@@ -178,6 +178,7 @@ struct TodoGui {
     show_tag_constellation: bool,
     show_parent_regions: bool,
     expanded_families: std::collections::HashSet<String>,
+    family_presentations: HashMap<String, FamilyPresentation>,
     show_relations: bool,
     relation_draft: RelationKind,
     relation_search: String,
@@ -231,11 +232,35 @@ struct TodoGui {
     search_focus: bool,
     show_filters: bool,
     show_inspector: bool,
+    show_appearance_lab: bool,
+}
+
+/// A local presentation override for one parent family. It belongs to the GUI
+/// layout file, never to the event ledger or task record.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum FamilyPresentation {
+    #[default]
+    Dynamic,
+    Box,
+    Tree,
+}
+
+impl FamilyPresentation {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Dynamic => "Dynamic",
+            Self::Box => "Box",
+            Self::Tree => "Tree",
+        }
+    }
 }
 
 #[derive(Default, Deserialize, Serialize)]
 struct LocalGraphLayout {
     node_offsets: HashMap<String, [f32; 2]>,
+    #[serde(default)]
+    family_presentations: HashMap<String, FamilyPresentation>,
 }
 
 struct LayoutUndo {
@@ -244,8 +269,22 @@ struct LayoutUndo {
 }
 
 impl TodoGui {
+    fn family_view_for(&self, parent: &str) -> FamilyView {
+        match self.family_presentations.get(parent).copied() {
+            Some(FamilyPresentation::Dynamic) => FamilyView::Adaptive,
+            Some(FamilyPresentation::Box) => FamilyView::Boxed,
+            Some(FamilyPresentation::Tree) => FamilyView::Connected,
+            None => self.theme.parent.family_view,
+        }
+    }
+
     fn new(runtime: Runtime, ledger: Ledger, layout_path: PathBuf, theme_path: PathBuf) -> Self {
-        let node_offsets = load_layout(&layout_path);
+        let saved_layout = load_layout(&layout_path);
+        let node_offsets = saved_layout
+            .node_offsets
+            .iter()
+            .map(|(id, [x, y])| (id.clone(), Vec2::new(*x, *y)))
+            .collect();
         let (theme, theme_message) = match Theme::load(&theme_path) {
             Ok(theme) => (theme, None),
             Err(error) => (
@@ -275,6 +314,7 @@ impl TodoGui {
             show_tag_constellation: true,
             show_parent_regions: true,
             expanded_families: std::collections::HashSet::new(),
+            family_presentations: saved_layout.family_presentations,
             show_relations: true,
             relation_draft: RelationKind::ContributesTo,
             relation_search: String::new(),
@@ -330,6 +370,7 @@ impl TodoGui {
             search_focus: false,
             show_filters: true,
             show_inspector: true,
+            show_appearance_lab: false,
         };
         app.refresh();
         app
@@ -2511,6 +2552,42 @@ impl TodoGui {
         }
     }
 
+    /// A fixed, ledger-free scene for tuning live presentation values.
+    fn draw_appearance_lab(&mut self, ctx: &egui::Context) {
+        if !self.show_appearance_lab {
+            return;
+        }
+        egui::Window::new("Appearance Lab")
+            .default_size(Vec2::new(760.0, 520.0))
+            .resizable(true)
+            .show(ctx, |ui| {
+                ui.label("Fixed exemplar — controls in Appearance update this scene live.");
+                ui.weak("tag clouds · family frame · detached anchor · shared junction · dependency arrow · hidden children");
+                let (rect, _) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
+                let painter = ui.painter_at(rect);
+                let zoom = 0.8;
+                let parent = Rect::from_center_size(rect.left_top() + Vec2::new(190.0, 95.0), Vec2::new(190.0, 64.0));
+                let child_a = Rect::from_center_size(rect.left_top() + Vec2::new(105.0, 285.0), Vec2::new(170.0, 62.0));
+                let child_b = Rect::from_center_size(rect.left_top() + Vec2::new(310.0, 285.0), Vec2::new(170.0, 62.0));
+                let detached = Rect::from_center_size(rect.left_top() + Vec2::new(560.0, 130.0), Vec2::new(170.0, 62.0));
+                let well = Rect::from_min_max(rect.left_top() + Vec2::new(42.0, 158.0), rect.left_top() + Vec2::new(375.0, 360.0));
+                let body = well.expand(18.0);
+                painter.rect_filled(body, self.theme.parent.corner_radius, Color32::from_rgb(67, 57, 73));
+                painter.rect_filled(well, self.theme.parent.corner_radius * 0.7, Color32::from_rgb(28, 36, 50));
+                painter.rect_stroke(body, self.theme.parent.corner_radius, Stroke::new(self.theme.parent.stroke_width * 2.0, Color32::from_rgb(190, 180, 220)), egui::StrokeKind::Outside);
+                let tag = Color32::from_rgb(105, 205, 216);
+                for card in [parent, child_a, child_b] {
+                    painter.circle_filled(card.center(), card.size().length() * 0.55, cloud_pastel(tag, ui.visuals().panel_fill));
+                }
+                draw_family_tree(&painter, parent, &[child_a, child_b], 0, zoom, geometry::TreeAxis::Down, Color32::from_rgb(82, 90, 122), ConnectorStyle::FillCore, &[well]);
+                draw_board_attachment(&painter, detached, well, zoom, Color32::from_rgb(122, 80, 92), ConnectorStyle::FillCore);
+                for (card, label) in [(parent, "parent task"), (child_a, "child A"), (child_b, "child B"), (detached, "detached parent")] {
+                    draw_node_body(&painter, card, Color32::from_rgb(65, 70, 97), Stroke::new(2.0, tag), Some(tag), &self.theme, 1.0);
+                    painter.text(card.center(), Align2::CENTER_CENTER, label, FontId::proportional(14.0), Color32::WHITE);
+                }
+            });
+    }
+
     fn save_layout(&mut self) {
         let layout = LocalGraphLayout {
             node_offsets: self
@@ -2518,6 +2595,7 @@ impl TodoGui {
                 .iter()
                 .map(|(id, offset)| (id.clone(), [offset.x, offset.y]))
                 .collect(),
+            family_presentations: self.family_presentations.clone(),
         };
         let result = (|| -> Result<()> {
             let parent = self
@@ -3307,6 +3385,7 @@ impl eframe::App for TodoGui {
                 ui.separator();
                 ui.toggle_value(&mut self.show_filters, "Filters");
                 ui.toggle_value(&mut self.show_inspector, "Inspector");
+                ui.toggle_value(&mut self.show_appearance_lab, "Appearance Lab");
                 ui.separator();
                 ui.label("Search");
                 let search = ui.add(
@@ -3379,6 +3458,7 @@ impl eframe::App for TodoGui {
                 .show(ui, |ui| self.draw_inspector(ui));
         }
         egui::CentralPanel::default().show(ui, |ui| draw_graph(ui, self));
+        self.draw_appearance_lab(ui.ctx());
     }
 }
 
@@ -3541,6 +3621,7 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
             &app.theme,
             app.graph_zoom,
             &app.expanded_families,
+            &app.family_presentations,
         )
     } else {
         HashMap::new()
@@ -3563,10 +3644,7 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
     // Tag clouds are ambient context. Family containment is the structural
     // reading of the graph, so it is painted above the clouds before edges and
     // cards make the parent-to-child path explicit.
-    if app.show_parent_regions
-        && app.theme.parent.show_regions
-        && app.theme.parent.family_view != FamilyView::Connected
-    {
+    if app.show_parent_regions && app.theme.parent.show_regions {
         if app.theme.parent.region_style == ParentRegionStyle::Hull {
             draw_parent_regions(
                 &painter,
@@ -3580,9 +3658,13 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
         } else if !boxes.is_empty() {
             draw_family_boxes(&painter, app, &items, &boxes, &palette, &effective);
             for (id, family) in &boxes {
+                if app.family_view_for(id) == FamilyView::Connected {
+                    continue;
+                }
                 // An open family has no drawn well to attach to; its family
                 // links already run to the cards themselves.
                 if let Some(parent) = layouts.get(id)
+                    && !family.attached_parent
                     && !app.expanded_families.contains(id)
                 {
                     draw_board_attachment(
@@ -3651,6 +3733,7 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
     // Cards are sized before any edge is drawn, so an arrow can be aimed at the
     // rectangle a card actually occupies rather than at an assumed size.
     let rect_of = |id: &str| layouts.get(id).map(|layout| layout.rect);
+    let family_wells = boxes.values().map(|family| family.well).collect::<Vec<_>>();
     let mut clicked = None;
     if show_hierarchy {
         let mut family_children = HashMap::<String, Vec<Rect>>::new();
@@ -3683,6 +3766,7 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
                 app.theme.layout.tree_axis,
                 fill_of(&parent_id),
                 connector_style,
+                &family_wells,
             );
         }
     }
@@ -3777,25 +3861,28 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
                 ui.close();
             }
             ui.menu_button("Family display", |ui| {
+                let selected = app.family_presentations.get(&id).copied();
                 if ui
-                    .selectable_value(
-                        &mut app.theme.parent.family_view,
-                        FamilyView::Adaptive,
-                        "Box",
-                    )
+                    .selectable_label(selected.is_none(), "Inherit graph default")
                     .clicked()
                 {
+                    app.family_presentations.remove(&id);
+                    app.save_layout();
                     ui.close();
                 }
-                if ui
-                    .selectable_value(
-                        &mut app.theme.parent.family_view,
-                        FamilyView::Connected,
-                        "Tree",
-                    )
-                    .clicked()
-                {
-                    ui.close();
+                for presentation in [
+                    FamilyPresentation::Dynamic,
+                    FamilyPresentation::Box,
+                    FamilyPresentation::Tree,
+                ] {
+                    if ui
+                        .selectable_label(selected == Some(presentation), presentation.label())
+                        .clicked()
+                    {
+                        app.family_presentations.insert(id.clone(), presentation);
+                        app.save_layout();
+                        ui.close();
+                    }
                 }
             });
         });
@@ -4186,10 +4273,12 @@ fn draw_board_attachment(
     if (end - start).length() < 3.0 * zoom {
         return;
     }
-    let (casing, core) = connector_strokes(fill, style, 3.0 * zoom, zoom);
+    // A detached parent needs a visually primary bridge to its child outline.
+    // This is the Outline Anchor, intentionally heavier than tree branches.
+    let (casing, core) = connector_strokes(fill, style, 6.0 * zoom, zoom);
     painter.line_segment([start, end], casing);
     painter.line_segment([start, end], core);
-    painter.circle_stroke(end, 4.0 * zoom, Stroke::new(1.6 * zoom, core.color));
+    painter.circle_stroke(end, 5.0 * zoom, Stroke::new(2.0 * zoom, core.color));
 }
 
 /// The shared blue every family connector carries, so a link reads as a link
@@ -4231,6 +4320,7 @@ fn draw_family_tree(
     axis: geometry::TreeAxis,
     fill: Color32,
     style: ConnectorStyle,
+    wells: &[Rect],
 ) {
     if children.is_empty() {
         return;
@@ -4245,20 +4335,19 @@ fn draw_family_tree(
         // structural line. There is no sibling-wise duplication in this path.
         for child in children {
             let (start, end) = geometry::edge_between(parent, *child, radius + 2.0 * zoom);
-            painter.line_segment([start, end], casing);
-            painter.line_segment([start, end], core);
+            draw_family_path(painter, &[start, end], casing, core, wells);
             painter.circle_stroke(end, radius, Stroke::new(1.6 * zoom, color));
         }
         return;
     };
-    draw_family_path(painter, &[start, junction], casing, core);
+    draw_family_path(painter, &[start, junction], casing, core, wells);
     painter.circle_stroke(junction, radius, Stroke::new(1.6 * zoom, color));
     for end in ends {
         let path = match axis {
             geometry::TreeAxis::Down => vec![junction, egui::pos2(end.x, junction.y), end],
             geometry::TreeAxis::Right => vec![junction, egui::pos2(junction.x, end.y), end],
         };
-        draw_family_path(painter, &path, casing, core);
+        draw_family_path(painter, &path, casing, core, wells);
         painter.circle_stroke(end, radius, Stroke::new(1.6 * zoom, color));
     }
 }
@@ -4302,8 +4391,24 @@ fn family_tree_geometry(
     }
 }
 
-fn draw_family_path(painter: &egui::Painter, path: &[Pos2], casing: Stroke, core: Stroke) {
-    painter.add(egui::Shape::line(path.to_vec(), casing));
+fn draw_family_path(
+    painter: &egui::Painter,
+    path: &[Pos2],
+    casing: Stroke,
+    core: Stroke,
+    wells: &[Rect],
+) {
+    // The family-colored core continues through its child space. The shared blue
+    // casing only separates the family from the canvas outside an infill.
+    for segment in path.windows(2) {
+        let [start, end] = segment else {
+            continue;
+        };
+        let midpoint = start.lerp(*end, 0.5);
+        if !wells.iter().any(|well| well.contains(midpoint)) {
+            painter.line_segment([*start, *end], casing);
+        }
+    }
     painter.add(egui::Shape::line(path.to_vec(), core));
 }
 
@@ -4710,6 +4815,10 @@ fn limit_child_depth(
 struct FamilyBox {
     body: Rect,
     well: Rect,
+    /// A card-width structural strip for a nearby parent tab. Keeping it
+    /// separate prevents the child's broad frame from becoming a dark slab.
+    attachment: Option<Rect>,
+    attached_parent: bool,
     oversized: bool,
     capped: bool,
     descendant_count: usize,
@@ -4742,6 +4851,9 @@ fn draw_family_boxes(
     });
     let children = child_index(items);
     for (id, family) in ordered {
+        if app.family_view_for(id) == FamilyView::Connected {
+            continue;
+        }
         let Some(item) = items
             .iter()
             .find(|candidate| candidate.item.id.to_string() == *id)
@@ -4762,6 +4874,15 @@ fn draw_family_boxes(
                 draw_dashed_rect(painter, family.body, rounding, stroke);
             }
             continue;
+        }
+        if let Some(attachment) = family.attachment {
+            painter.rect_filled(attachment, rounding * 0.7, fill);
+            painter.rect_stroke(
+                attachment,
+                rounding * 0.7,
+                stroke,
+                egui::StrokeKind::Outside,
+            );
         }
         match app.theme.parent.well_fill {
             FamilyWellFill::Transparent => {
@@ -5520,6 +5641,7 @@ fn family_boxes(
     theme: &Theme,
     zoom: f32,
     expanded: &std::collections::HashSet<String>,
+    presentations: &HashMap<String, FamilyPresentation>,
 ) -> HashMap<String, FamilyBox> {
     let children = child_index(items);
     let mut boxes = HashMap::new();
@@ -5554,6 +5676,12 @@ fn family_boxes(
             zoom,
             expanded.contains(&id),
             descendant_count,
+            match presentations.get(&id).copied() {
+                Some(FamilyPresentation::Dynamic) => FamilyView::Adaptive,
+                Some(FamilyPresentation::Box) => FamilyView::Boxed,
+                Some(FamilyPresentation::Tree) => FamilyView::Connected,
+                None => theme.parent.family_view,
+            },
         );
         boxes.insert(id, family);
     }
@@ -5574,24 +5702,17 @@ fn family_box(parent: Rect, children: Rect, theme: &Theme, zoom: f32) -> FamilyB
     let side = theme.parent.padding * zoom;
     let body = well.expand(side);
     let overlap = (parent.height() * 0.18).min(14.0 * zoom);
-    let top = match theme.parent.header_style {
-        FamilyHeaderStyle::Header => parent.top(),
-        FamilyHeaderStyle::AttachedTab => parent.bottom() - overlap,
-    };
-    // Folding the card in can only ever thicken the band by the distance to it,
-    // so the reach is one card height: the band stays within the card, which is
-    // the rule this frame is supposed to obey.
-    let body = if parent.expand(parent.height()).intersects(body) {
-        Rect::from_min_max(
-            egui::pos2(parent.left().min(body.left()), top.min(body.top())),
-            egui::pos2(
-                parent.right().max(body.right()),
-                parent.bottom().max(body.bottom()),
-            ),
-        )
-    } else {
-        body
-    };
+    let attached_parent = parent.expand(parent.height()).intersects(body);
+    let attachment = (attached_parent
+        && theme.parent.header_style == FamilyHeaderStyle::AttachedTab)
+        .then(|| {
+            let top = parent.bottom() - overlap;
+            let bottom = body.top().max(top + 1.0 * zoom);
+            Rect::from_min_max(
+                egui::pos2(parent.left(), top),
+                egui::pos2(parent.right(), bottom),
+            )
+        });
     // The attached card is the cap of this family, not part of the recessed
     // child space. Clipping the well below its tab prevents a dark inset from
     // bleeding through the parent-card area when a child sits very close.
@@ -5604,6 +5725,8 @@ fn family_box(parent: Rect, children: Rect, theme: &Theme, zoom: f32) -> FamilyB
     FamilyBox {
         body,
         well,
+        attachment,
+        attached_parent,
         oversized: false,
         capped: false,
         descendant_count: 0,
@@ -5619,10 +5742,11 @@ fn bounded_family_box(
     zoom: f32,
     expanded: bool,
     count: usize,
+    view: FamilyView,
 ) -> FamilyBox {
     let mut family = family_box(parent, children, theme, zoom);
     let max_size = parent.size() * theme.parent.max_board_span.max(1.0);
-    family.oversized = theme.parent.family_view != FamilyView::Boxed
+    family.oversized = view != FamilyView::Connected
         && (family.body.width() > max_size.x || family.body.height() > max_size.y);
     family.descendant_count = count;
     if family.oversized && !expanded {
@@ -5817,17 +5941,10 @@ fn node_tag_color(
     Some(palette.color(deepest, &theme.tag))
 }
 
-fn load_layout(path: &std::path::Path) -> HashMap<String, Vec2> {
+fn load_layout(path: &std::path::Path) -> LocalGraphLayout {
     fs::read_to_string(path)
         .ok()
         .and_then(|contents| serde_json::from_str::<LocalGraphLayout>(&contents).ok())
-        .map(|layout| {
-            layout
-                .node_offsets
-                .into_iter()
-                .map(|(id, [x, y])| (id, Vec2::new(x, y)))
-                .collect()
-        })
         .unwrap_or_default()
 }
 
@@ -5854,7 +5971,7 @@ fn short_title(title: &str) -> String {
 )]
 mod tests {
     use super::{
-        GroupBy, bounded_family_box, collect_subtree, compare_group_labels, family_box,
+        FamilyView, GroupBy, bounded_family_box, collect_subtree, compare_group_labels, family_box,
         family_dependency_bands, family_ring_mesh, family_tree_geometry, focus_is_active,
         hierarchy_levels, limit_child_depth, matches_query,
     };
@@ -5911,13 +6028,15 @@ mod tests {
     }
 
     #[test]
-    fn attached_parent_card_projects_from_a_body_containing_the_children() {
+    fn attached_parent_card_uses_a_card_width_attachment_not_a_wide_body_band() {
         let parent = Rect::from_min_size(pos2(100.0, 20.0), vec2(150.0, 58.0));
         let child = Rect::from_min_size(pos2(300.0, 150.0), vec2(150.0, 70.0));
         let family = family_box(parent, child, &super::Theme::default(), 1.0);
-        assert!(family.body.top() > parent.top());
-        assert!(family.body.top() < parent.bottom());
-        assert!(family.body.contains(parent.center_bottom()));
+        assert!(family.body.top() > parent.bottom());
+        assert!(family.attachment.is_some());
+        let attachment = family.attachment.unwrap();
+        assert_eq!(attachment.width(), parent.width());
+        assert!(attachment.contains(parent.center_bottom()));
         assert!(family.well.contains(child.min));
         assert!(family.well.contains(child.max));
         assert!(family.body.contains(family.well.min));
@@ -5942,8 +6061,17 @@ mod tests {
         // Children spread far apart, which is what legitimately needs capping.
         let children = Rect::from_min_size(pos2(120.0, 140.0), vec2(1600.0, 400.0));
         let theme = super::Theme::default();
-        let compact = bounded_family_box(parent, children, &theme, 1.0, false, 9);
-        let expanded = bounded_family_box(parent, children, &theme, 1.0, true, 9);
+        let compact = bounded_family_box(
+            parent,
+            children,
+            &theme,
+            1.0,
+            false,
+            9,
+            FamilyView::Adaptive,
+        );
+        let expanded =
+            bounded_family_box(parent, children, &theme, 1.0, true, 9, FamilyView::Adaptive);
         assert!(compact.capped);
         assert!(compact.body.width() <= parent.width() * theme.parent.max_board_span);
         assert!(compact.body.height() <= parent.height() * theme.parent.max_board_span);
@@ -5968,15 +6096,15 @@ mod tests {
     }
 
     #[test]
-    fn boxed_view_refuses_to_cap_a_wide_family() {
+    fn boxed_view_keeps_a_wide_family_bounded() {
         let parent = Rect::from_min_size(pos2(100.0, 20.0), vec2(150.0, 58.0));
         let children = Rect::from_min_size(pos2(120.0, 140.0), vec2(1600.0, 400.0));
         let mut theme = super::Theme::default();
         theme.parent.family_view = super::FamilyView::Boxed;
-        let family = bounded_family_box(parent, children, &theme, 1.0, false, 9);
-        assert!(!family.oversized);
-        assert!(!family.capped);
-        assert!(family.well.contains(children.center()));
+        let family = bounded_family_box(parent, children, &theme, 1.0, false, 9, FamilyView::Boxed);
+        assert!(family.oversized);
+        assert!(family.capped);
+        assert!(family.body.width() <= parent.width() * theme.parent.max_board_span);
     }
 
     /// One far-away child used to trip the cap only because the frame had
@@ -5987,7 +6115,8 @@ mod tests {
         let parent = Rect::from_min_size(pos2(100.0, 20.0), vec2(150.0, 58.0));
         let child = Rect::from_min_size(pos2(900.0, 900.0), vec2(150.0, 70.0));
         let theme = super::Theme::default();
-        let compact = bounded_family_box(parent, child, &theme, 1.0, false, 1);
+        let compact =
+            bounded_family_box(parent, child, &theme, 1.0, false, 1, FamilyView::Adaptive);
         assert!(!compact.capped);
         assert!(compact.well.contains(child.center()));
     }
@@ -6014,12 +6143,17 @@ mod tests {
     }
 
     #[test]
-    fn an_adjacent_parent_is_still_folded_into_its_frame() {
+    fn an_adjacent_parent_gets_a_card_width_attachment() {
         let theme = super::Theme::default();
         let child = Rect::from_min_size(pos2(100.0, 140.0), vec2(150.0, 70.0));
         let parent = Rect::from_min_size(pos2(100.0, 20.0), vec2(150.0, 58.0));
         let family = family_box(parent, child, &theme, 1.0);
-        assert!(family.body.contains(parent.center_bottom()));
+        assert!(family.attached_parent);
+        assert!(
+            family
+                .attachment
+                .is_some_and(|attachment| attachment.contains(parent.center_bottom()))
+        );
     }
 
     #[test]

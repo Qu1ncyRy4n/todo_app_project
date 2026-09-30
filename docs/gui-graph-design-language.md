@@ -65,9 +65,9 @@ When a parent card naturally attaches to the frame, it acts as the parent tab
 and no separate outline anchor is drawn. The child infill begins below the tab;
 it does not paint behind or past the card.
 
-**Implementation status:** child-well clipping below an attached card exists.
-The separately thick outline anchor and the strict parent-card-width bound for
-the attachment band are planned follow-on renderer work.
+**Implementation status:** implemented. A detached parent uses a visibly thicker
+Outline Anchor; a nearby parent uses a separate card-width attachment strip.
+The broad child frame and dark infill remain bounded around the children.
 
 ## Family tree contract
 
@@ -85,8 +85,9 @@ The family-colored core may continue through the child well. The shared blue
 casing/outline is visible only outside the child infill, where it separates the
 family tree from the canvas. This is the **dynamic family core** rule.
 
-**Implementation status:** planned. Current family connectors still paint their
-casing consistently along the whole path.
+**Implementation status:** implemented. The family-colored core remains
+continuous; the shared blue casing is omitted for path segments whose midpoint
+is inside a child well.
 
 ## Family presentation policy
 
@@ -100,10 +101,11 @@ per parent family:
 | **Tree** | Suppress the parent outline and show only the family trunk, junctions, branches, and terminals. |
 | **Inherit** | Use the graph default. This is the default for each family. |
 
-The current renderer has graph-wide adaptive/boxed/connected theme modes and a
-right-click Box/Tree selector. The per-family `Inherit`/`Dynamic`/`Box`/`Tree`
-override is a settled design requirement, but is not yet persisted or rendered
-per parent.
+The current renderer has a graph-wide theme default plus a right-click
+per-parent override. `Inherit` removes the local entry; `Dynamic`, `Box`, and
+`Tree` persist in `gui-layout.json`, are presentation-only, and affect only
+that family's frame/capping behavior. Box frames remain bounded rather than
+allowing a remote child to create an unlimited slab.
 
 ## Tag cloud contract
 
@@ -131,5 +133,6 @@ Its exemplar scenes should include:
 6. a family relationship plus a real dependency edge between the same cards;
 7. wrapped titles, selected cards, focus, and hidden descendants.
 
-This page is not implemented yet. It is the preferred place to tune all visual
-options interactively before applying them to a real ledger.
+It is available from the toolbar as **Appearance Lab**. It is deliberately
+ledger-free and uses the live theme values, so presentation controls can be
+tuned without changing real task data.
