@@ -3652,26 +3652,44 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
     // rectangle a card actually occupies rather than at an assumed size.
     let rect_of = |id: &str| layouts.get(id).map(|layout| layout.rect);
     let mut clicked = None;
+    if show_hierarchy {
+        let mut family_children = HashMap::<String, Vec<Rect>>::new();
+        for item in &items {
+            let Some(parent) = item.item.parent_id else {
+                continue;
+            };
+            let Some(child) = rect_of(&item.item.id.to_string()) else {
+                continue;
+            };
+            family_children
+                .entry(parent.to_string())
+                .or_default()
+                .push(child);
+        }
+        for (parent_id, children) in family_children {
+            let Some(parent) = rect_of(&parent_id) else {
+                continue;
+            };
+            let depth = items
+                .iter()
+                .find(|item| item.item.id.to_string() == parent_id)
+                .map_or(0, |item| ancestor_depth(item, &items));
+            draw_family_tree(
+                &painter,
+                parent,
+                &children,
+                depth,
+                app.graph_zoom,
+                app.theme.layout.tree_axis,
+                fill_of(&parent_id),
+                connector_style,
+            );
+        }
+    }
     for item in &items {
         let Some(to_rect) = rect_of(&item.item.id.to_string()) else {
             continue;
         };
-        if show_hierarchy
-            && let Some(parent) = item.item.parent_id.and_then(|id| rect_of(&id.to_string()))
-        {
-            draw_family_link(
-                &painter,
-                parent,
-                to_rect,
-                ancestor_depth(item, &items),
-                app.graph_zoom,
-                app.theme.layout.tree_axis,
-                item.item
-                    .parent_id
-                    .map_or(Color32::from_gray(150), |id| fill_of(&id.to_string())),
-                connector_style,
-            );
-        }
         if show_dependencies {
             for dependency in &item.dependencies {
                 if let Some(from) = rect_of(&dependency.to_string()) {
@@ -4197,63 +4215,96 @@ fn connector_strokes(
     }
 }
 
-/// Family lines bend through the child's compartment and end in an open circle.
-/// Dependencies retain straight arrows, so the two relationships stay distinct.
+/// Draws one shared family trunk, junction, and branches for a parent's direct
+/// children. Dependency arrows deliberately use a separate drawing path, so a
+/// true dependency can coexist without a duplicate structural diagonal.
 #[expect(
     clippy::too_many_arguments,
     reason = "one drawing call taking its geometry, its depth, and its two colors"
 )]
-fn draw_family_link(
+fn draw_family_tree(
     painter: &egui::Painter,
     parent: Rect,
-    child: Rect,
+    children: &[Rect],
     depth: usize,
     zoom: f32,
     axis: geometry::TreeAxis,
     fill: Color32,
     style: ConnectorStyle,
 ) {
+    if children.is_empty() {
+        return;
+    }
     let generation = f32::from(u8::try_from(depth.saturating_sub(1)).unwrap_or(u8::MAX));
     let width = (6.0 - generation * 1.5).max(1.5) * zoom;
     let radius = 4.0 * zoom;
     let (casing, core) = connector_strokes(fill, style, width, zoom);
     let color = core.color;
-    let (start, end, elbow) = match axis {
-        geometry::TreeAxis::Down if child.top() > parent.bottom() => {
-            let start = parent.center_bottom();
-            let end = child.center_top() - Vec2::new(0.0, radius + 2.0 * zoom);
-            (start, end, (start.y + end.y) * 0.5)
-        }
-        geometry::TreeAxis::Right if child.left() > parent.right() => {
-            let start = parent.right_center();
-            let end = child.left_center() - Vec2::new(radius + 2.0 * zoom, 0.0);
-            (start, end, (start.x + end.x) * 0.5)
-        }
-        _ => {
-            let (start, end) = geometry::edge_between(parent, child, radius + 2.0 * zoom);
+    let Some((start, junction, ends)) = family_tree_geometry(parent, children, radius, axis) else {
+        // A child that is arranged behind its parent still receives one simple
+        // structural line. There is no sibling-wise duplication in this path.
+        for child in children {
+            let (start, end) = geometry::edge_between(parent, *child, radius + 2.0 * zoom);
             painter.line_segment([start, end], casing);
             painter.line_segment([start, end], core);
             painter.circle_stroke(end, radius, Stroke::new(1.6 * zoom, color));
-            return;
         }
+        return;
     };
-    let path = match axis {
-        geometry::TreeAxis::Down => vec![
-            start,
-            egui::pos2(start.x, elbow),
-            egui::pos2(end.x, elbow),
-            end,
-        ],
-        geometry::TreeAxis::Right => vec![
-            start,
-            egui::pos2(elbow, start.y),
-            egui::pos2(elbow, end.y),
-            end,
-        ],
-    };
-    painter.add(egui::Shape::line(path.clone(), casing));
-    painter.add(egui::Shape::line(path, core));
-    painter.circle_stroke(end, radius, Stroke::new(1.6 * zoom, color));
+    draw_family_path(painter, &[start, junction], casing, core);
+    painter.circle_stroke(junction, radius, Stroke::new(1.6 * zoom, color));
+    for end in ends {
+        let path = match axis {
+            geometry::TreeAxis::Down => vec![junction, egui::pos2(end.x, junction.y), end],
+            geometry::TreeAxis::Right => vec![junction, egui::pos2(junction.x, end.y), end],
+        };
+        draw_family_path(painter, &path, casing, core);
+        painter.circle_stroke(end, radius, Stroke::new(1.6 * zoom, color));
+    }
+}
+
+/// Returns the canonical angular tree geometry when every child is placed in
+/// front of its parent on the configured axis.
+fn family_tree_geometry(
+    parent: Rect,
+    children: &[Rect],
+    radius: f32,
+    axis: geometry::TreeAxis,
+) -> Option<(Pos2, Pos2, Vec<Pos2>)> {
+    let gap = radius + 2.0;
+    match axis {
+        geometry::TreeAxis::Down => {
+            if children.iter().any(|child| child.top() <= parent.bottom()) {
+                return None;
+            }
+            let start = parent.center_bottom();
+            let ends = children
+                .iter()
+                .map(|child| child.center_top() - Vec2::new(0.0, gap))
+                .collect::<Vec<_>>();
+            let first_end = ends.iter().map(|end| end.y).min_by(f32::total_cmp)?;
+            let junction = egui::pos2(start.x, (start.y + first_end) * 0.5);
+            Some((start, junction, ends))
+        }
+        geometry::TreeAxis::Right => {
+            if children.iter().any(|child| child.left() <= parent.right()) {
+                return None;
+            }
+            let start = parent.right_center();
+            let ends = children
+                .iter()
+                .map(|child| child.left_center() - Vec2::new(gap, 0.0))
+                .collect::<Vec<_>>();
+            let first_end = ends.iter().map(|end| end.x).min_by(f32::total_cmp)?;
+            let junction = egui::pos2((start.x + first_end) * 0.5, start.y);
+            Some((start, junction, ends))
+        }
+    }
+}
+
+fn draw_family_path(painter: &egui::Painter, path: &[Pos2], casing: Stroke, core: Stroke) {
+    painter.add(egui::Shape::line(path.to_vec(), casing));
+    painter.add(egui::Shape::line(path.to_vec(), core));
 }
 
 /// Returns the color a typed relation is drawn in.
@@ -5804,8 +5855,8 @@ fn short_title(title: &str) -> String {
 mod tests {
     use super::{
         GroupBy, bounded_family_box, collect_subtree, compare_group_labels, family_box,
-        family_dependency_bands, family_ring_mesh, focus_is_active, hierarchy_levels,
-        limit_child_depth, matches_query,
+        family_dependency_bands, family_ring_mesh, family_tree_geometry, focus_is_active,
+        hierarchy_levels, limit_child_depth, matches_query,
     };
     use eframe::egui::{Color32, Pos2, Rect, pos2, vec2};
     use std::collections::{HashMap, HashSet};
@@ -6039,6 +6090,21 @@ mod tests {
         };
         assert!(covers(pos2(10.0, 120.0)));
         assert!(!covers(well.center()));
+    }
+
+    #[test]
+    fn siblings_share_one_family_junction_above_their_terminals() {
+        let parent = Rect::from_min_size(pos2(100.0, 20.0), vec2(150.0, 58.0));
+        let left = Rect::from_min_size(pos2(40.0, 200.0), vec2(120.0, 60.0));
+        let right = Rect::from_min_size(pos2(260.0, 240.0), vec2(120.0, 60.0));
+        let geometry =
+            family_tree_geometry(parent, &[left, right], 4.0, super::geometry::TreeAxis::Down);
+        assert!(geometry.is_some());
+        let (start, junction, terminals) = geometry.unwrap();
+        assert_eq!(terminals.len(), 2);
+        assert_eq!(junction.x, start.x);
+        assert!(junction.y > start.y);
+        assert!(terminals.iter().all(|terminal| terminal.y > junction.y));
     }
 
     #[test]
