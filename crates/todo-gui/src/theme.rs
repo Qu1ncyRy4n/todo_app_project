@@ -742,6 +742,24 @@ pub enum FamilyView {
     Connected,
 }
 
+/// How a family connector carries both its relationship and its family.
+///
+/// A connector is drawn twice: a wider casing, then a narrower core over it.
+/// One of the two is the shared family blue, which keeps every family link
+/// recognizable as a link; the other is the family's own fill, which says which
+/// family it belongs to. Which one goes on top is a legibility trade, because a
+/// dark fill reads better as a core against blue than as a casing against a
+/// pale canvas.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectorStyle {
+    /// Blue casing around a family-colored core.
+    #[default]
+    FillCore,
+    /// Family-colored casing around a blue core.
+    BlueCore,
+}
+
 /// Controls the region drawn around a parent task and its descendants.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -750,6 +768,8 @@ pub struct ParentTheme {
     pub show_regions: bool,
     /// How much framing families get, independent of their own geometry.
     pub family_view: FamilyView,
+    /// Which of the two connector strokes carries the family's own color.
+    pub connector_style: ConnectorStyle,
     /// Whether a parent draws as a titled box or as a hull.
     pub region_style: ParentRegionStyle,
     /// How the parent identity is attached to its family frame.
@@ -788,6 +808,7 @@ impl Default for ParentTheme {
         Self {
             show_regions: true,
             family_view: FamilyView::Adaptive,
+            connector_style: ConnectorStyle::FillCore,
             region_style: ParentRegionStyle::Box,
             header_style: FamilyHeaderStyle::AttachedTab,
             child_style: FamilyChildStyle::NestedFamily,

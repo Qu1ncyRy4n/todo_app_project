@@ -16,9 +16,9 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fs, path::PathBuf};
 use tags::{TagFilter, TagFilterState};
 use theme::{
-    Channel, FamilyChildStyle, FamilyHeaderStyle, FamilyView, FamilyWellFill, InspectorTheme,
-    NodeShape, NormalizeStyle, ParentRegionStyle, RegionShape, TagColoring, TagInheritance,
-    TagPalette, Theme,
+    Channel, ConnectorStyle, FamilyChildStyle, FamilyHeaderStyle, FamilyView, FamilyWellFill,
+    InspectorTheme, NodeShape, NormalizeStyle, ParentRegionStyle, RegionShape, TagColoring,
+    TagInheritance, TagPalette, Theme,
 };
 use todo_core::{ItemId, ItemState, NamespacePath, Priority, RelationKind, WeightInputs};
 use todo_store::{
@@ -483,6 +483,19 @@ impl TodoGui {
                             }
                             FamilyView::Boxed => "Every family framed, never capped.",
                             FamilyView::Connected => "No frames; families read through links.",
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Connector");
+                            ui.selectable_value(
+                                &mut self.theme.parent.connector_style,
+                                ConnectorStyle::FillCore,
+                                "Family core",
+                            );
+                            ui.selectable_value(
+                                &mut self.theme.parent.connector_style,
+                                ConnectorStyle::BlueCore,
+                                "Family casing",
+                            );
                         });
                     });
                     ui.checkbox(&mut self.show_focus_window, "Focus Window");
@@ -3391,6 +3404,24 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
         app.graph_pan,
         app.graph_zoom,
     );
+    // A family's connectors use the same fill its frame is painted with, so an
+    // open family keeps the color its box had. Resolved once: every link into a
+    // parent asks for the same value.
+    let family_fill = items
+        .iter()
+        .map(|item| {
+            let fill = node_tag_color(item, &app.theme, &palette, &effective)
+                .map_or(Color32::from_gray(150), |accent| family_colors(accent).0);
+            (item.item.id.to_string(), fill)
+        })
+        .collect::<HashMap<_, _>>();
+    let fill_of = |id: &str| {
+        family_fill
+            .get(id)
+            .copied()
+            .unwrap_or(Color32::from_gray(150))
+    };
+    let connector_style = app.theme.parent.connector_style;
     let show_hierarchy = app.show_parent_graph;
     let show_dependencies = app.show_dependency_graph;
     let show_blockers = app.show_blocker_graph;
@@ -3475,7 +3506,14 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
                 if let Some(parent) = layouts.get(id)
                     && !app.expanded_families.contains(id)
                 {
-                    draw_board_attachment(&painter, parent.rect, family.well, app.graph_zoom);
+                    draw_board_attachment(
+                        &painter,
+                        parent.rect,
+                        family.well,
+                        app.graph_zoom,
+                        fill_of(id),
+                        connector_style,
+                    );
                 }
                 if family.oversized {
                     let chip = Rect::from_min_size(
@@ -3549,6 +3587,10 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
                 ancestor_depth(item, &items),
                 app.graph_zoom,
                 app.theme.layout.tree_axis,
+                item.item
+                    .parent_id
+                    .map_or(Color32::from_gray(150), |id| fill_of(&id.to_string())),
+                connector_style,
             );
         }
         if show_dependencies {
@@ -3987,20 +4029,55 @@ fn draw_node_body(
 
 /// The card owns its board even if its position is between its children.
 /// A short stalk ending at the well is distinct from dependency arrows.
-fn draw_board_attachment(painter: &egui::Painter, parent: Rect, well: Rect, zoom: f32) {
+fn draw_board_attachment(
+    painter: &egui::Painter,
+    parent: Rect,
+    well: Rect,
+    zoom: f32,
+    fill: Color32,
+    style: ConnectorStyle,
+) {
     let toward = well.center();
     let start = geometry::boundary_point(parent, toward);
     let end = geometry::boundary_point(well, parent.center());
     if (end - start).length() < 3.0 * zoom {
         return;
     }
-    let color = Color32::from_rgb(147, 174, 218);
-    painter.line_segment([start, end], Stroke::new(3.0 * zoom, color));
-    painter.circle_stroke(end, 4.0 * zoom, Stroke::new(1.6 * zoom, color));
+    let (casing, core) = connector_strokes(fill, style, 3.0 * zoom, zoom);
+    painter.line_segment([start, end], casing);
+    painter.line_segment([start, end], core);
+    painter.circle_stroke(end, 4.0 * zoom, Stroke::new(1.6 * zoom, core.color));
+}
+
+/// The shared blue every family connector carries, so a link reads as a link
+/// before it reads as a particular family's link.
+const FAMILY_BLUE: Color32 = Color32::from_rgb(147, 174, 218);
+
+/// Returns the casing and core strokes a family connector is drawn with.
+///
+/// The casing is laid down first and the core over it, so the core is what the
+/// eye lands on. A family fill can be dark enough to disappear against the
+/// canvas on its own, which is why it is never drawn without the other stroke
+/// behind it.
+fn connector_strokes(
+    fill: Color32,
+    style: ConnectorStyle,
+    width: f32,
+    zoom: f32,
+) -> (Stroke, Stroke) {
+    let casing = width + 2.0 * zoom;
+    match style {
+        ConnectorStyle::FillCore => (Stroke::new(casing, FAMILY_BLUE), Stroke::new(width, fill)),
+        ConnectorStyle::BlueCore => (Stroke::new(casing, fill), Stroke::new(width, FAMILY_BLUE)),
+    }
 }
 
 /// Family lines bend through the child's compartment and end in an open circle.
 /// Dependencies retain straight arrows, so the two relationships stay distinct.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one drawing call taking its geometry, its depth, and its two colors"
+)]
 fn draw_family_link(
     painter: &egui::Painter,
     parent: Rect,
@@ -4008,11 +4085,14 @@ fn draw_family_link(
     depth: usize,
     zoom: f32,
     axis: geometry::TreeAxis,
+    fill: Color32,
+    style: ConnectorStyle,
 ) {
     let generation = f32::from(u8::try_from(depth.saturating_sub(1)).unwrap_or(u8::MAX));
     let width = (6.0 - generation * 1.5).max(1.5) * zoom;
     let radius = 4.0 * zoom;
-    let color = Color32::from_rgb(147, 174, 218);
+    let (casing, core) = connector_strokes(fill, style, width, zoom);
+    let color = core.color;
     let (start, end, elbow) = match axis {
         geometry::TreeAxis::Down if child.top() > parent.bottom() => {
             let start = parent.center_bottom();
@@ -4026,7 +4106,8 @@ fn draw_family_link(
         }
         _ => {
             let (start, end) = geometry::edge_between(parent, child, radius + 2.0 * zoom);
-            painter.line_segment([start, end], Stroke::new(width, color));
+            painter.line_segment([start, end], casing);
+            painter.line_segment([start, end], core);
             painter.circle_stroke(end, radius, Stroke::new(1.6 * zoom, color));
             return;
         }
@@ -4045,7 +4126,8 @@ fn draw_family_link(
             end,
         ],
     };
-    painter.add(egui::Shape::line(path, Stroke::new(width, color)));
+    painter.add(egui::Shape::line(path.clone(), casing));
+    painter.add(egui::Shape::line(path, core));
     painter.circle_stroke(end, radius, Stroke::new(1.6 * zoom, color));
 }
 
@@ -5541,6 +5623,23 @@ mod tests {
         assert!(compact.body.width() <= parent.width() * theme.parent.max_board_span);
         assert!(compact.body.height() <= parent.height() * theme.parent.max_board_span);
         assert!(expanded.body.contains(children.center()));
+    }
+
+    #[test]
+    fn a_connector_always_carries_both_its_family_and_the_shared_blue() {
+        let fill = Color32::from_rgb(90, 60, 55);
+        let (casing, core) =
+            super::connector_strokes(fill, super::ConnectorStyle::FillCore, 4.0, 1.0);
+        assert_eq!(core.color, fill);
+        assert_eq!(casing.color, super::FAMILY_BLUE);
+        // The casing has to be wider, or the core would cover it completely.
+        assert!(casing.width > core.width);
+
+        let (casing, core) =
+            super::connector_strokes(fill, super::ConnectorStyle::BlueCore, 4.0, 1.0);
+        assert_eq!(core.color, super::FAMILY_BLUE);
+        assert_eq!(casing.color, fill);
+        assert!(casing.width > core.width);
     }
 
     #[test]
