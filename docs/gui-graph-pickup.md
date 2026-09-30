@@ -231,7 +231,7 @@ Values that carry data or protocol meaning are deliberately not configurable.
 
 ```sh
 ./dev check   # cargo fmt --check, then clippy --workspace --all-targets -D warnings
-./dev test    # 225 tests: 155 todo-gui, 35 todo-core, 22 todo-store, 13 todo-cli
+./dev test    # 226 tests: 156 todo-gui, 35 todo-core, 22 todo-store, 13 todo-cli
 ```
 
 All workspace tests pass, including protocol round trips, view rebuilds from the

@@ -2569,18 +2569,21 @@ impl TodoGui {
                 ui.weak("tag clouds · parent outline · outline anchor · family tree · dependency arrow · hidden children");
                 let (rect, _) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
                 let painter = ui.painter_at(rect);
-                let zoom = 0.8;
-                let origin = rect.left_top() + Vec2::new(18.0, 18.0);
-                let parent = Rect::from_center_size(origin + Vec2::new(205.0, 58.0), Vec2::new(190.0, 64.0));
-                let child_a = Rect::from_center_size(origin + Vec2::new(112.0, 246.0), Vec2::new(165.0, 62.0));
-                let child_b = Rect::from_center_size(origin + Vec2::new(308.0, 246.0), Vec2::new(165.0, 62.0));
-                let grandchild = Rect::from_center_size(origin + Vec2::new(308.0, 358.0), Vec2::new(160.0, 60.0));
-                let detached = Rect::from_center_size(origin + Vec2::new(575.0, 70.0), Vec2::new(175.0, 62.0));
-                let remote = Rect::from_center_size(origin + Vec2::new(700.0, 300.0), Vec2::new(165.0, 66.0));
-                let well = Rect::from_min_max(origin + Vec2::new(30.0, 126.0), origin + Vec2::new(390.0, 405.0));
-                let body = well.expand(18.0);
-                let nested_well = Rect::from_min_max(origin + Vec2::new(218.0, 285.0), origin + Vec2::new(395.0, 405.0));
-                let nested_body = nested_well.expand(12.0);
+                let scale = appearance_lab_scale(rect.size());
+                let zoom = 0.8 * scale;
+                let origin = rect.left_top() + Vec2::splat(18.0 * scale);
+                let point = |x, y| origin + Vec2::new(x, y) * scale;
+                let size = |width, height| Vec2::new(width, height) * scale;
+                let parent = Rect::from_center_size(point(205.0, 58.0), size(190.0, 64.0));
+                let child_a = Rect::from_center_size(point(112.0, 246.0), size(165.0, 62.0));
+                let child_b = Rect::from_center_size(point(308.0, 246.0), size(165.0, 62.0));
+                let grandchild = Rect::from_center_size(point(308.0, 358.0), size(160.0, 60.0));
+                let detached = Rect::from_center_size(point(575.0, 70.0), size(175.0, 62.0));
+                let remote = Rect::from_center_size(point(700.0, 300.0), size(165.0, 66.0));
+                let well = Rect::from_min_max(point(30.0, 126.0), point(390.0, 405.0));
+                let body = well.expand(18.0 * scale);
+                let nested_well = Rect::from_min_max(point(218.0, 285.0), point(395.0, 405.0));
+                let nested_body = nested_well.expand(12.0 * scale);
                 let tag = Color32::from_rgb(105, 205, 216);
                 let alternate_tag = Color32::from_rgb(226, 139, 98);
                 let (fill, well_fill, edge) = family_colors(tag);
@@ -2680,7 +2683,8 @@ impl TodoGui {
                 );
                 // This direct arrow intentionally coexists with a family tree
                 // so the two relationship types can be compared in one scene.
-                let (dependency_start, dependency_end) = geometry::edge_between(child_a, child_b, 8.0);
+                let (dependency_start, dependency_end) =
+                    geometry::edge_between(child_a, child_b, 8.0 * scale);
                 draw_edge(
                     &painter,
                     dependency_start,
@@ -2690,8 +2694,8 @@ impl TodoGui {
                     zoom,
                 );
 
-                let remote_well = Rect::from_center_size(origin + Vec2::new(570.0, 220.0), Vec2::new(185.0, 82.0));
-                let remote_body = remote_well.expand(12.0);
+                let remote_well = Rect::from_center_size(point(570.0, 220.0), size(185.0, 82.0));
+                let remote_body = remote_well.expand(12.0 * scale);
                 painter.rect_filled(remote_body, rounding, family_colors(alternate_tag).0);
                 painter.rect_stroke(
                     remote_body,
@@ -2707,7 +2711,8 @@ impl TodoGui {
                     family_colors(alternate_tag).0,
                     self.theme.parent.connector_style,
                 );
-                let (remote_start, remote_end) = geometry::edge_between(remote_well, remote, 8.0);
+                let (remote_start, remote_end) =
+                    geometry::edge_between(remote_well, remote, 8.0 * scale);
                 draw_edge(
                     &painter,
                     remote_start,
@@ -2726,7 +2731,7 @@ impl TodoGui {
                     (remote, "remote child", false),
                 ] {
                     let outline = Stroke::new(
-                        if selected { 3.0 } else { 2.0 },
+                        (if selected { 3.0 } else { 2.0 }) * scale,
                         if selected { Color32::GOLD } else { tag },
                     );
                     draw_node_body(
@@ -2736,33 +2741,33 @@ impl TodoGui {
                         outline,
                         Some(if card == detached || card == remote { alternate_tag } else { tag }),
                         &self.theme,
-                        1.0,
+                        scale,
                     );
                     painter.text(
                         card.center(),
                         Align2::CENTER_CENTER,
                         label,
-                        FontId::proportional(13.0),
+                        FontId::proportional(13.0 * scale),
                         Color32::WHITE,
                     );
                 }
                 let hidden_marker = Rect::from_center_size(
-                    parent.center_bottom() + Vec2::new(0.0, 6.0),
-                    Vec2::new(26.0, 13.0),
+                    parent.center_bottom() + Vec2::new(0.0, 6.0 * scale),
+                    size(26.0, 13.0),
                 );
-                painter.rect_filled(hidden_marker, 7.0, Color32::from_rgb(61, 68, 89));
+                painter.rect_filled(hidden_marker, 7.0 * scale, Color32::from_rgb(61, 68, 89));
                 painter.text(
                     hidden_marker.center(),
                     Align2::CENTER_CENTER,
                     "…",
-                    FontId::proportional(14.0),
+                    FontId::proportional(14.0 * scale),
                     Color32::WHITE,
                 );
                 painter.text(
-                    origin + Vec2::new(8.0, 430.0),
+                    point(8.0, 430.0),
                     Align2::LEFT_TOP,
                     "Gold outline: selected  •  blue arrow: dependency  •  …: hidden children",
-                    FontId::proportional(12.0),
+                    FontId::proportional(12.0 * scale),
                     ui.visuals().weak_text_color(),
                 );
             });
@@ -3320,6 +3325,14 @@ impl TodoGui {
             Err(error) => self.message = Some(format!("Raw JSON not applied: {error:#}")),
         }
     }
+}
+
+/// Keeps the complete fixed exemplar visible in a resized lab window. The
+/// lower bound remains large enough for its relationship marks to be useful.
+fn appearance_lab_scale(available: Vec2) -> f32 {
+    (available.x / 840.0)
+        .min(available.y / 470.0)
+        .clamp(0.45, 1.0)
 }
 
 /// Returns the weeks of a month as rows of seven days, Monday first.
@@ -6248,10 +6261,10 @@ fn short_title(title: &str) -> String {
 )]
 mod tests {
     use super::{
-        FamilyPresentation, FamilyView, GroupBy, LocalGraphLayout, bounded_family_box,
-        collect_subtree, compare_group_labels, family_box, family_dependency_bands,
-        family_ring_mesh, family_tree_geometry, focus_is_active, hierarchy_levels,
-        limit_child_depth, matches_query, segment_outside_rect,
+        FamilyPresentation, FamilyView, GroupBy, LocalGraphLayout, appearance_lab_scale,
+        bounded_family_box, collect_subtree, compare_group_labels, family_box,
+        family_dependency_bands, family_ring_mesh, family_tree_geometry, focus_is_active,
+        hierarchy_levels, limit_child_depth, matches_query, segment_outside_rect,
     };
     use eframe::egui::{Color32, Pos2, Rect, pos2, vec2};
     use std::collections::{HashMap, HashSet};
@@ -6559,6 +6572,13 @@ mod tests {
             decoded.family_presentations.get("parent-b"),
             Some(&FamilyPresentation::Box)
         );
+    }
+
+    #[test]
+    fn appearance_lab_scales_the_complete_exemplar_into_its_window() {
+        assert_eq!(appearance_lab_scale(vec2(840.0, 470.0)), 1.0);
+        assert!((appearance_lab_scale(vec2(420.0, 235.0)) - 0.5).abs() < f32::EPSILON);
+        assert_eq!(appearance_lab_scale(vec2(80.0, 80.0)), 0.45);
     }
 
     #[test]

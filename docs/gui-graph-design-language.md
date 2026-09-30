@@ -142,3 +142,5 @@ ledger-free and uses the live theme values, so presentation controls can be
 tuned without changing real task data. The parent outline has a dedicated
 `parent.outline_weight` appearance control; its default is stronger than card
 and child-well strokes without changing either of those other visual channels.
+The fixed scene scales as the lab window is resized, preserving every exemplar
+instead of clipping the detached-family or hidden-child cases.
