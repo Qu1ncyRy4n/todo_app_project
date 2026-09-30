@@ -15,10 +15,9 @@ use geometry::{
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fs, path::PathBuf};
 use tags::{TagFilter, TagFilterState};
-use theme::TagInheritance;
 use theme::{
-    Channel, InspectorTheme, NodeShape, NormalizeStyle, ParentRegionStyle, RegionShape,
-    TagColoring, TagPalette, Theme,
+    Channel, FamilyChildStyle, FamilyHeaderStyle, FamilyWellFill, InspectorTheme, NodeShape,
+    NormalizeStyle, ParentRegionStyle, RegionShape, TagColoring, TagInheritance, TagPalette, Theme,
 };
 use todo_core::{ItemId, ItemState, NamespacePath, Priority, RelationKind, WeightInputs};
 use todo_store::{
@@ -66,6 +65,8 @@ enum GroupBy {
     /// This level is unused, which is how grouping is narrowed to fewer levels.
     #[default]
     None,
+    /// Keep each structural family together under its top-level task.
+    Hierarchy,
     Tag,
     Sequence,
     Time,
@@ -75,9 +76,10 @@ enum GroupBy {
 
 impl GroupBy {
     /// Returns every grouping, for the sidebar control.
-    fn all() -> [Self; 6] {
+    fn all() -> [Self; 7] {
         [
             Self::None,
+            Self::Hierarchy,
             Self::Sequence,
             Self::Priority,
             Self::Tag,
@@ -90,6 +92,7 @@ impl GroupBy {
     fn label(self) -> &'static str {
         match self {
             Self::None => "—",
+            Self::Hierarchy => "Hierarchy",
             Self::Tag => "Tag",
             Self::Sequence => "Sequence",
             Self::Time => "Time",
@@ -173,6 +176,7 @@ struct TodoGui {
     show_blocker_graph: bool,
     show_tag_constellation: bool,
     show_parent_regions: bool,
+    expanded_families: std::collections::HashSet<String>,
     show_relations: bool,
     relation_draft: RelationKind,
     relation_search: String,
@@ -200,7 +204,7 @@ struct TodoGui {
     theme: Theme,
     theme_path: PathBuf,
     inspector: InspectorTheme,
-    layout_undo: Option<HashMap<String, Vec2>>,
+    layout_undo: Option<LayoutUndo>,
     normalize_requested: bool,
     focus_layout_requested: bool,
     separate_requested: bool,
@@ -231,6 +235,11 @@ struct TodoGui {
 #[derive(Default, Deserialize, Serialize)]
 struct LocalGraphLayout {
     node_offsets: HashMap<String, [f32; 2]>,
+}
+
+struct LayoutUndo {
+    offsets: HashMap<String, Vec2>,
+    expanded_families: std::collections::HashSet<String>,
 }
 
 impl TodoGui {
@@ -264,6 +273,7 @@ impl TodoGui {
             show_blocker_graph: true,
             show_tag_constellation: true,
             show_parent_regions: true,
+            expanded_families: std::collections::HashSet::new(),
             show_relations: true,
             relation_draft: RelationKind::ContributesTo,
             relation_search: String::new(),
@@ -299,8 +309,9 @@ impl TodoGui {
             relax_overlaps: relax_after_layout,
             focus_mode: false,
             focus_only: false,
-            // Sequence, then priority, then tag: the order asked for most often.
-            group_by: [GroupBy::Sequence, GroupBy::Priority, GroupBy::Tag],
+            // Structural families make the starting graph legible; other board
+            // groupings remain available when the operator asks for them.
+            group_by: [GroupBy::Hierarchy, GroupBy::None, GroupBy::None],
             sort_by: SortBy::default(),
             group_requested: false,
             group_labels: Vec::new(),
@@ -413,6 +424,9 @@ impl TodoGui {
     /// are reached past them.
     fn draw_filters(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical().show(ui, |ui| {
+            if ui.button("Reset filters").clicked() {
+                self.reset_filters();
+            }
             egui::CollapsingHeader::new("View")
                 .default_open(true)
                 .show(ui, |ui| self.view_settings(ui));
@@ -451,6 +465,26 @@ impl TodoGui {
                 .default_open(true)
                 .show(ui, |ui| self.draw_tag_filters(ui));
         });
+    }
+
+    /// Restores the transient visibility controls without touching an arrangement
+    /// or the theme. A person who has narrowed the graph needs one known way back
+    /// to the initial view, not a tour through every individual control.
+    fn reset_filters(&mut self) {
+        self.show_completed = false;
+        self.focus_only = false;
+        self.show_parent_graph = true;
+        self.show_dependency_graph = true;
+        self.show_blocker_graph = true;
+        self.show_relations = true;
+        self.show_tag_constellation = true;
+        self.show_parent_regions = true;
+        self.show_focus_window = true;
+        self.show_timeline_ruler = true;
+        self.tag_filter.clear();
+        self.tag_states.clear();
+        self.search.clear();
+        self.message = Some("Filters restored to their defaults.".to_owned());
     }
 
     /// The commands that rearrange the graph, beside the settings they obey.
@@ -524,6 +558,80 @@ impl TodoGui {
                 "Sequence",
             );
         });
+        ui.label("Family appearance");
+        egui::ComboBox::from_id_salt("family-header-style")
+            .selected_text(match self.theme.parent.header_style {
+                FamilyHeaderStyle::Header => "Header",
+                FamilyHeaderStyle::AttachedTab => "Attached tab",
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut self.theme.parent.header_style,
+                    FamilyHeaderStyle::Header,
+                    "Header",
+                );
+                ui.selectable_value(
+                    &mut self.theme.parent.header_style,
+                    FamilyHeaderStyle::AttachedTab,
+                    "Attached tab",
+                );
+            });
+        egui::ComboBox::from_id_salt("family-child-style")
+            .selected_text(match self.theme.parent.child_style {
+                FamilyChildStyle::RecessedBoard => "Recessed board",
+                FamilyChildStyle::NestedFamily => "Nested family",
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut self.theme.parent.child_style,
+                    FamilyChildStyle::RecessedBoard,
+                    "Recessed board",
+                );
+                ui.selectable_value(
+                    &mut self.theme.parent.child_style,
+                    FamilyChildStyle::NestedFamily,
+                    "Nested family",
+                );
+            });
+        egui::ComboBox::from_id_salt("family-child-depth")
+            .selected_text(if self.theme.parent.child_depth == 0 {
+                "All".to_owned()
+            } else {
+                self.theme.parent.child_depth.to_string()
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.theme.parent.child_depth, 0, "All child depths");
+                for depth in 1..=6 {
+                    ui.selectable_value(
+                        &mut self.theme.parent.child_depth,
+                        depth,
+                        format!("{depth} generation(s)"),
+                    );
+                }
+            });
+        ui.weak("Collapsed branches show an expand control; active paths stay visible.");
+        ui.add(
+            egui::Slider::new(&mut self.theme.parent.max_board_span, 1.0..=8.0)
+                .text("Maximum family span"),
+        );
+        egui::ComboBox::from_id_salt("family-well-fill")
+            .selected_text(match self.theme.parent.well_fill {
+                FamilyWellFill::Transparent => "Transparent child space",
+                FamilyWellFill::Dark => "Dark child space",
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut self.theme.parent.well_fill,
+                    FamilyWellFill::Transparent,
+                    "Transparent child space",
+                );
+                ui.selectable_value(
+                    &mut self.theme.parent.well_fill,
+                    FamilyWellFill::Dark,
+                    "Dark child space",
+                );
+            });
+        ui.weak("Parent identity stays in front of tag clouds; child treatment changes the enclosed subgraph.");
         ui.separator();
         ui.label("Group by, in order");
         for level in 0..3 {
@@ -567,14 +675,14 @@ impl TodoGui {
             &mut self.theme.layout.separate_after_layout,
             "Separate tag groups",
         );
-        ui.checkbox(&mut self.theme.layout.compact_active, "Compact active work");
+        ui.checkbox(&mut self.theme.layout.compact_active, "Pack task families");
         ui.separator();
         ui.label("Spacing");
         ui.add(egui::Slider::new(&mut self.theme.layout.leaf_gap, 60.0..=500.0).text("Leaf gap"));
         ui.add(egui::Slider::new(&mut self.theme.layout.row_gap, 60.0..=500.0).text("Row gap"));
         ui.add(
             egui::Slider::new(&mut self.theme.layout.active_head_gap, 80.0..=600.0)
-                .text("Active head gap"),
+                .text("Family gap"),
         );
         ui.separator();
         ui.label("Overlap");
@@ -1312,7 +1420,7 @@ impl TodoGui {
         };
         let arranged = geometry::timeline_positions(&scheduled, spacing);
         let origin = Pos2::new(rect.center().x, rect.top() + 140.0);
-        self.layout_undo = Some(self.node_offsets.clone());
+        self.remember_layout();
         for (index, item) in items.iter().enumerate() {
             let id = item.item.id.to_string();
             let Some(target) = arranged.get(&id) else {
@@ -1358,7 +1466,7 @@ impl TodoGui {
         };
         let relaxed = geometry::relax_overlaps(&placed, Vec2::new(width, height), spacing);
         if record_undo {
-            self.layout_undo = Some(self.node_offsets.clone());
+            self.remember_layout();
         }
         for (index, item) in items.iter().enumerate() {
             let id = item.item.id.to_string();
@@ -1412,7 +1520,7 @@ impl TodoGui {
         };
         let separated = geometry::separate_groups(&placed, &groups, spacing);
         if record_undo {
-            self.layout_undo = Some(self.node_offsets.clone());
+            self.remember_layout();
         }
         for (index, item) in items.iter().enumerate() {
             let id = item.item.id.to_string();
@@ -1440,18 +1548,22 @@ impl TodoGui {
     fn focus_layout(&mut self, rect: Rect) {
         let today = Local::now().date_naive();
         let items = self.visible_items();
+        let holding_active = if self.theme.focus.parents_of_active_read_active {
+            ids_holding_active_work(&items)
+        } else {
+            std::collections::HashSet::new()
+        };
         let mut completed = Vec::new();
         let mut active = Vec::new();
         let mut future = Vec::new();
         for item in &items {
             let id = item.item.id.to_string();
-            let deferred = self.theme.focus.future_includes_deferred
-                && (item.item.defer_until.is_some_and(|date| date > today)
-                    || item.item.scheduled_on.is_some_and(|date| date > today));
-            match item.item.state {
-                ItemState::Done | ItemState::Canceled => completed.push(id),
-                ItemState::Active if !deferred => active.push(id),
-                _ => future.push(id),
+            if focus_is_active(item, &holding_active, &self.theme.focus, today) {
+                active.push(id);
+            } else if matches!(item.item.state, ItemState::Done | ItemState::Canceled) {
+                completed.push(id);
+            } else {
+                future.push(id);
             }
         }
         // Each band is placed in the chosen order, so the sort reaches the Focus
@@ -1487,7 +1599,7 @@ impl TodoGui {
         };
         let arranged = geometry::banded_positions(&completed, &active, &future, spacing);
         let center = rect.center();
-        self.layout_undo = Some(self.node_offsets.clone());
+        self.remember_layout();
         for (index, item) in items.iter().enumerate() {
             let id = item.item.id.to_string();
             let Some(target) = arranged.get(&id) else {
@@ -1497,10 +1609,8 @@ impl TodoGui {
             self.node_offsets.insert(id, (center + *target) - slot);
         }
         self.save_layout();
-        if self.theme.layout.separate_after_layout {
-            self.separate_tag_groups(rect, false);
-        }
-        self.relax_if_enabled(rect);
+        // Tag attraction and generic repulsion do not know about the focus
+        // exclusion boundary; running them here can pull exiled cards back in.
         self.timeline_origin = None;
         self.focus_mode = true;
         if self.theme.focus.zoom_to_active {
@@ -1538,6 +1648,27 @@ impl TodoGui {
                 _ => roots.push(id),
             }
         }
+        let weights = self.weight_index(&items);
+        let sequence_rank = self.sequence_ranks();
+        let sort = self.sort_by;
+        let compare_ids = |left: &String, right: &String| {
+            let find = |id: &String| {
+                items
+                    .iter()
+                    .find(|candidate| candidate.item.id.to_string() == *id)
+            };
+            match (find(left), find(right)) {
+                (Some(first), Some(second)) => {
+                    sort_items(sort, first, second, &weights, &sequence_rank)
+                }
+                _ => left.cmp(right),
+            }
+        };
+        // A tree is only scannable when its sibling order is meaningful. Keeping
+        // this separate from placement lets every arrangement share Sort by.
+        for siblings in children.values_mut() {
+            siblings.sort_by(&compare_ids);
+        }
         let lifted = if self.theme.layout.done_above {
             self.finished_prerequisites(&items)
         } else {
@@ -1547,18 +1678,35 @@ impl TodoGui {
             let item = items
                 .iter()
                 .find(|candidate| candidate.item.id.to_string() == *id);
-            let active = item
-                .is_some_and(|item| item.item.state == ItemState::Active || holding.contains(id));
-            (!active, id.clone())
+            !item.is_some_and(|item| item.item.state == ItemState::Active || holding.contains(id))
         };
         roots.retain(|id| !lifted.contains(id));
-        roots.sort_by_key(leading);
+        roots.sort_by(|left, right| {
+            leading(left)
+                .cmp(&leading(right))
+                .then_with(|| compare_ids(left, right))
+        });
         let spacing = TreeSpacing {
             leaf_gap: self.theme.layout.leaf_gap,
             row_gap: self.theme.layout.row_gap,
             axis: self.theme.layout.tree_axis,
         };
-        let mut arranged = geometry::tree_positions(&roots, &children, spacing);
+        let levels = hierarchy_levels(&items, &visible);
+        let mut arranged = geometry::tree_positions_at_levels(&roots, &children, &levels, spacing);
+        if self.theme.layout.compact_active {
+            let bands = family_dependency_bands(&items, &roots, &children);
+            arranged = geometry::pack_tree_families(
+                &roots,
+                &children,
+                &arranged,
+                &bands,
+                Vec2::new(
+                    self.theme.node.size().0 + self.theme.parent.padding * 4.0,
+                    self.theme.node.max_height.min(110.0) + self.theme.parent.padding * 4.0,
+                ),
+                Vec2::splat(self.theme.layout.active_head_gap * 0.25),
+            );
+        }
         // Finished prerequisites sit above the work that needed them, so a glance
         // down the column reads as what was done, then what is being done.
         let mut lifted_column = 0.0_f32;
@@ -1582,30 +1730,39 @@ impl TodoGui {
             });
             arranged.insert(id, Vec2::new(x, -self.theme.layout.done_band_gap));
         }
-        self.apply_arrangement(
-            rect,
-            &items,
-            &arranged,
-            Pos2::new(rect.center().x, rect.top() + 200.0),
-        );
-        self.relax_if_enabled(rect);
-        if self.theme.layout.compact_active {
-            let heads = roots
-                .iter()
-                .filter(|id| {
-                    items
-                        .iter()
-                        .find(|candidate| candidate.item.id.to_string() == **id)
-                        .is_some_and(|item| {
-                            item.item.state == ItemState::Active || holding.contains(*id)
-                        })
-                })
-                .cloned()
-                .collect::<Vec<_>>();
-            self.compact_active_heads(rect, &heads);
-        }
+        let center = if arranged.is_empty() {
+            Vec2::ZERO
+        } else {
+            let min = Vec2::new(
+                arranged
+                    .values()
+                    .map(|at| at.x)
+                    .fold(f32::INFINITY, f32::min),
+                arranged
+                    .values()
+                    .map(|at| at.y)
+                    .fold(f32::INFINITY, f32::min),
+            );
+            let max = Vec2::new(
+                arranged
+                    .values()
+                    .map(|at| at.x)
+                    .fold(f32::NEG_INFINITY, f32::max),
+                arranged
+                    .values()
+                    .map(|at| at.y)
+                    .fold(f32::NEG_INFINITY, f32::max),
+            );
+            (min + max) / 2.0
+        };
+        self.apply_arrangement(rect, &items, &arranged, rect.center() - center);
+        // The tree spacing is intentional: a generic repulsion pass may push a
+        // child across a sibling or out of its parent's containment region.
+        // Manual Unstack remains available for unusually tall wrapped cards.
         self.timeline_origin = None;
         self.focus_mode = false;
+        self.graph_pan = Vec2::ZERO;
+        self.graph_zoom = 1.0;
         self.group_labels.clear();
         self.message =
             Some("Hierarchy arranged. Undo layout restores the previous one.".to_owned());
@@ -1627,6 +1784,13 @@ impl TodoGui {
             self.message = Some("Nothing to group.".to_owned());
             return;
         }
+        if self.group_by.first().copied() == Some(GroupBy::Hierarchy) {
+            // A hierarchy is not a column category: its useful order is parent
+            // before child, with the child inside the parent's visual family.
+            self.hierarchy_layout(rect);
+            self.message = Some("Grouped by structural family.".to_owned());
+            return;
+        }
         let weights = self.weight_index(&items);
         let levels = self
             .group_by
@@ -1645,16 +1809,22 @@ impl TodoGui {
             );
             columns.entry(key).or_default().push(item);
         }
+        let first_group = levels.first().copied().unwrap_or(GroupBy::None);
+        let mut ordered_columns = columns.into_iter().collect::<Vec<_>>();
+        ordered_columns
+            .sort_by(|(left, _), (right, _)| compare_group_labels(first_group, left, right));
         let mut ordered = Vec::new();
         let mut labels = Vec::new();
-        for (column_index, (name, mut members)) in columns.into_iter().enumerate() {
+        for (column_index, (name, mut members)) in ordered_columns.into_iter().enumerate() {
             // Sorting by the deeper group keys first keeps each block together;
             // the chosen sort then orders tasks inside a block.
             members.sort_by(|left, right| {
                 for level in levels.iter().skip(1) {
-                    let ordering = self
-                        .group_key(left, *level)
-                        .cmp(&self.group_key(right, *level));
+                    let ordering = compare_group_labels(
+                        *level,
+                        &self.group_key(left, *level),
+                        &self.group_key(right, *level),
+                    );
                     if ordering != std::cmp::Ordering::Equal {
                         return ordering;
                     }
@@ -1772,6 +1942,7 @@ impl TodoGui {
     fn group_key(&self, item: &StoredItem, level: GroupBy) -> String {
         match level {
             GroupBy::None => String::new(),
+            GroupBy::Hierarchy => "structural family".to_owned(),
             GroupBy::Tag => {
                 let mut tags = self.effective_tags(item);
                 tags.sort();
@@ -1802,57 +1973,6 @@ impl TodoGui {
         }
     }
 
-    /// Pulls active heads together, each carrying its own subtree.
-    ///
-    /// Runs after the overlap pass so the branches keep the spacing that pass gave
-    /// them, while the heads themselves end up adjacent: the Focus Window reads as
-    /// one row of work rather than as work scattered across the canvas.
-    fn compact_active_heads(&mut self, rect: Rect, heads: &[String]) {
-        if heads.len() < 2 {
-            return;
-        }
-        let items = self.visible_items();
-        let children = child_index(&items);
-        let slot_of = |id: &str| {
-            items
-                .iter()
-                .position(|item| item.item.id.to_string() == id)
-                .map(|index| grid_slot(index, rect).to_vec2())
-        };
-        let mut placed = heads
-            .iter()
-            .filter_map(|id| {
-                let slot = slot_of(id)?;
-                let offset = self.node_offsets.get(id).copied().unwrap_or(Vec2::ZERO);
-                Some((id.clone(), slot + offset))
-            })
-            .collect::<Vec<_>>();
-        placed.sort_by(|left, right| left.1.x.total_cmp(&right.1.x));
-        let center = placed.iter().map(|(_, at)| at.x).sum::<f32>()
-            / f32::from(u16::try_from(placed.len()).unwrap_or(1).max(1));
-        let gap = self.theme.layout.active_head_gap;
-        let span = f32::from(u16::try_from(placed.len().saturating_sub(1)).unwrap_or(0)) * gap;
-        let start = center - span / 2.0;
-        for (index, (id, at)) in placed.iter().enumerate() {
-            let target = start + f32::from(u16::try_from(index).unwrap_or(0)) * gap;
-            let shift = Vec2::new(target - at.x, 0.0);
-            if shift.x.abs() < 0.5 {
-                continue;
-            }
-            // The head takes its subtree with it, so compacting never separates a
-            // parent from the work hanging beneath it.
-            for member in collect_subtree(id, &children) {
-                let current = self
-                    .node_offsets
-                    .get(&member)
-                    .copied()
-                    .unwrap_or(Vec2::ZERO);
-                self.node_offsets.insert(member, current + shift);
-            }
-        }
-        self.save_layout();
-    }
-
     /// Returns finished tasks that something visible still depends on.
     fn finished_prerequisites(&self, items: &[StoredItem]) -> std::collections::HashSet<String> {
         let finished = items
@@ -1877,7 +1997,7 @@ impl TodoGui {
         arranged: &HashMap<String, Vec2>,
         origin: Pos2,
     ) {
-        self.layout_undo = Some(self.node_offsets.clone());
+        self.remember_layout();
         for (index, item) in items.iter().enumerate() {
             let id = item.item.id.to_string();
             let Some(target) = arranged.get(&id) else {
@@ -1887,6 +2007,94 @@ impl TodoGui {
                 .insert(id, (origin + *target) - grid_slot(index, rect));
         }
         self.save_layout();
+    }
+
+    /// Rearranges only the connected parent/child tree under the pointer.
+    ///
+    /// The root stays anchored and collapsed descendants are revealed before
+    /// arranging; unrelated families retain their drawn positions.
+    fn normalize_family(&mut self, rect: Rect, clicked: &str) {
+        let before = self.visible_items();
+        if !before
+            .iter()
+            .any(|item| item.item.id.to_string() == clicked)
+        {
+            return;
+        }
+        let eligible = self.filtered_items();
+        let present = eligible
+            .iter()
+            .map(|item| item.item.id.to_string())
+            .collect::<std::collections::HashSet<_>>();
+        let parents = eligible
+            .iter()
+            .filter_map(|item| {
+                let parent = item.item.parent_id?.to_string();
+                present
+                    .contains(&parent)
+                    .then(|| (item.item.id.to_string(), parent))
+            })
+            .collect::<HashMap<_, _>>();
+        let mut root = clicked.to_owned();
+        let mut seen = std::collections::HashSet::new();
+        while seen.insert(root.clone()) {
+            let Some(parent) = parents.get(&root) else {
+                break;
+            };
+            root = parent.clone();
+        }
+        let Some(root_index) = before
+            .iter()
+            .position(|item| item.item.id.to_string() == root)
+        else {
+            return;
+        };
+        let root_at = grid_slot(root_index, rect)
+            + self.node_offsets.get(&root).copied().unwrap_or(Vec2::ZERO);
+        self.remember_layout();
+        self.expanded_families.insert(root.clone());
+        let items = self.visible_items();
+        self.rebase_visible_offsets(&before, &items, rect);
+        let children = items
+            .iter()
+            .filter_map(|item| {
+                let parent = item.item.parent_id?.to_string();
+                present
+                    .contains(&parent)
+                    .then(|| (parent, item.item.id.to_string()))
+            })
+            .fold(
+                std::collections::BTreeMap::<String, Vec<String>>::new(),
+                |mut children, (parent, child)| {
+                    children.entry(parent).or_default().push(child);
+                    children
+                },
+            );
+        let spacing = TreeSpacing {
+            leaf_gap: self.theme.layout.leaf_gap,
+            row_gap: self.theme.layout.row_gap,
+            axis: self.theme.layout.tree_axis,
+        };
+        let arranged = geometry::tree_positions_at_levels(
+            &[root.clone()],
+            &children,
+            &HashMap::new(),
+            spacing,
+        );
+        let Some(root_target) = arranged.get(&root).copied() else {
+            return;
+        };
+        for (index, item) in items.iter().enumerate() {
+            let id = item.item.id.to_string();
+            if let Some(at) = arranged.get(&id) {
+                self.node_offsets
+                    .insert(id, root_at + *at - root_target - grid_slot(index, rect));
+            }
+        }
+        self.focus_mode = false;
+        self.save_layout();
+        self.message =
+            Some("Connected task family arranged; other families stayed put.".to_owned());
     }
 
     /// Rearranges visible nodes so relationships flow one way, down or right.
@@ -1929,7 +2137,7 @@ impl TodoGui {
         };
         let arranged = geometry::layered_positions(&ids, &edges, spacing);
         let origin = grid_slot(0, rect);
-        self.layout_undo = Some(self.node_offsets.clone());
+        self.remember_layout();
         for (index, id) in ids.iter().enumerate() {
             let Some(target) = arranged.get(id) else {
                 continue;
@@ -1947,6 +2155,8 @@ impl TodoGui {
         self.relax_if_enabled(rect);
         self.timeline_origin = None;
         self.focus_mode = false;
+        self.graph_pan = Vec2::ZERO;
+        self.graph_zoom = 1.0;
         self.group_labels.clear();
         self.message = Some("Layout normalized. Undo layout restores the previous one.".to_owned());
     }
@@ -2017,11 +2227,52 @@ impl TodoGui {
         }
     }
 
-    /// Restores the arrangement captured before the last normalize.
+    /// Captures one reversible graph action, including collapsed-family state.
+    fn remember_layout(&mut self) {
+        self.layout_undo = Some(LayoutUndo {
+            offsets: self.node_offsets.clone(),
+            expanded_families: self.expanded_families.clone(),
+        });
+    }
+
+    /// Visibility changes reorder grid slots; keep already-visible cards at
+    /// their drawn graph positions while the newly revealed cards join them.
+    fn rebase_visible_offsets(&mut self, before: &[StoredItem], after: &[StoredItem], rect: Rect) {
+        let prior = before
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                let id = item.item.id.to_string();
+                let at = grid_slot(index, rect)
+                    + self.node_offsets.get(&id).copied().unwrap_or(Vec2::ZERO);
+                (id, at)
+            })
+            .collect::<HashMap<_, _>>();
+        for (index, item) in after.iter().enumerate() {
+            let id = item.item.id.to_string();
+            if let Some(at) = prior.get(&id) {
+                self.node_offsets.insert(id, *at - grid_slot(index, rect));
+            }
+        }
+    }
+
+    fn toggle_family_expanded(&mut self, id: &str, rect: Rect) {
+        let before = self.visible_items();
+        self.remember_layout();
+        if !self.expanded_families.remove(id) {
+            self.expanded_families.insert(id.to_owned());
+        }
+        let after = self.visible_items();
+        self.rebase_visible_offsets(&before, &after, rect);
+        self.save_layout();
+    }
+
+    /// Restores positions and expansion together so a local layout is undoable.
     fn undo_layout(&mut self) {
         match self.layout_undo.take() {
-            Some(offsets) => {
-                self.node_offsets = offsets;
+            Some(previous) => {
+                self.node_offsets = previous.offsets;
+                self.expanded_families = previous.expanded_families;
                 self.timeline_origin = None;
                 self.save_layout();
                 self.message = Some("Previous layout restored.".to_owned());
@@ -2030,7 +2281,6 @@ impl TodoGui {
         }
     }
 
-    /// Returns the items the graph is currently drawing, after state and tag filters.
     /// Searches what a person can actually see or say: the title, either
     /// rendering of the identifier, and the effective (inherited) tags.
     fn search_matches(&self, item: &StoredItem) -> bool {
@@ -2056,7 +2306,19 @@ impl TodoGui {
         }
     }
 
+    /// Returns the items the graph is currently drawing: the explicit filters,
+    /// then the child-depth collapse that hides distant descendants.
     fn visible_items(&self) -> Vec<StoredItem> {
+        limit_child_depth(
+            self.filtered_items(),
+            self.theme.parent.child_depth,
+            &self.expanded_families,
+            self.selected.as_deref(),
+        )
+    }
+
+    /// Applies only the explicit filters; child-depth collapse is a view layer.
+    fn filtered_items(&self) -> Vec<StoredItem> {
         self.items
             .iter()
             .filter(|item| {
@@ -3030,7 +3292,9 @@ impl eframe::App for TodoGui {
         }
         if self.show_inspector {
             egui::Panel::right("inspector")
-                .default_size(300.0)
+                .default_size(280.0)
+                .min_size(220.0)
+                .max_size(480.0)
                 .resizable(true)
                 .show(ui, |ui| self.draw_inspector(ui));
         }
@@ -3040,6 +3304,7 @@ impl eframe::App for TodoGui {
 
 fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
     let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::drag());
+    let painter = ui.painter_at(rect);
     // Dragging empty canvas moves the view. Cards are interacted with after this,
     // so a drag that starts on a card moves the card rather than the canvas.
     if response.dragged() {
@@ -3048,7 +3313,6 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
     if ui.input(|input| input.pointer.middle_down()) {
         app.graph_pan += ui.input(|input| input.pointer.delta());
     }
-    let painter = ui.painter_at(rect);
     if app.normalize_requested {
         app.normalize_requested = false;
         app.normalize_layout(rect);
@@ -3113,51 +3377,6 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
     {
         draw_timeline_ruler(&painter, rect, origin, app);
     }
-    let boxes = if app.show_parent_regions
-        && app.theme.parent.show_regions
-        && app.theme.parent.region_style == ParentRegionStyle::Box
-    {
-        container_boxes(&items, &positions, &app.theme, app.graph_zoom)
-    } else {
-        HashMap::new()
-    };
-    if !boxes.is_empty() {
-        // Outermost first, so a nested container stays visible inside its ancestor.
-        let mut ordered = boxes.iter().collect::<Vec<_>>();
-        ordered.sort_by(|left, right| {
-            (right.1.area())
-                .partial_cmp(&left.1.area())
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        for (id, box_rect) in ordered {
-            let Some(item) = items
-                .iter()
-                .find(|candidate| candidate.item.id.to_string() == *id)
-            else {
-                continue;
-            };
-            let color = node_tag_color(item, &app.theme, &palette, &effective)
-                .unwrap_or(Color32::from_gray(150));
-            let fill = Color32::from_rgba_unmultiplied(
-                color.r(),
-                color.g(),
-                color.b(),
-                app.theme.parent.fill_alpha,
-            );
-            let stroke = Stroke::new(
-                app.theme.parent.stroke_width,
-                Color32::from_rgba_unmultiplied(
-                    color.r(),
-                    color.g(),
-                    color.b(),
-                    app.theme.parent.stroke_alpha,
-                ),
-            );
-            let rounding = app.theme.parent.corner_radius * app.graph_zoom;
-            painter.rect_filled(*box_rect, rounding, fill);
-            painter.rect_stroke(*box_rect, rounding, stroke, egui::StrokeKind::Outside);
-        }
-    }
     for (name, at) in &app.group_labels {
         let center = rect.center();
         let drawn = center + (*at - center) * app.graph_zoom + app.graph_pan;
@@ -3169,39 +3388,98 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
             Color32::from_gray(170),
         );
     }
-    if app.show_parent_regions
+    let child_index = child_index(&items);
+    // Every overlay must use the center of the card that is actually drawn. A
+    // parent container used to move its card into a header after clouds had
+    // already used the old graph position, leaving a visible orphaned circle.
+    let layouts = node_layouts(&painter, app, &items, &positions, &child_index);
+    let boxes = if !app.focus_mode
+        && app.show_parent_regions
         && app.theme.parent.show_regions
-        && app.theme.parent.region_style == ParentRegionStyle::Hull
+        && app.theme.parent.region_style == ParentRegionStyle::Box
     {
-        draw_parent_regions(
-            &painter,
+        family_boxes(
             &items,
-            &positions,
-            app.graph_zoom,
+            &layouts,
             &app.theme,
-            &palette,
-            &effective,
-        );
-    }
+            app.graph_zoom,
+            &app.expanded_families,
+        )
+    } else {
+        HashMap::new()
+    };
+    let rendered_positions = layouts
+        .iter()
+        .map(|(id, layout)| (id.clone(), layout.rect.center()))
+        .collect::<HashMap<_, _>>();
     if app.show_tag_constellation {
         draw_tag_constellation(
             &painter,
             &items,
-            &positions,
+            &rendered_positions,
             app.graph_zoom,
             &app.theme,
             &palette,
             &effective,
         );
     }
+    // Tag clouds are ambient context. Family containment is the structural
+    // reading of the graph, so it is painted above the clouds before edges and
+    // cards make the parent-to-child path explicit.
+    if app.show_parent_regions && app.theme.parent.show_regions {
+        if app.theme.parent.region_style == ParentRegionStyle::Hull {
+            draw_parent_regions(
+                &painter,
+                &items,
+                &positions,
+                app.graph_zoom,
+                &app.theme,
+                &palette,
+                &effective,
+            );
+        } else if !boxes.is_empty() {
+            draw_family_boxes(&painter, app, &items, &boxes, &palette, &effective);
+            for (id, family) in &boxes {
+                if let Some(parent) = layouts.get(id) {
+                    draw_board_attachment(&painter, parent.rect, family.well, app.graph_zoom);
+                }
+                if family.oversized {
+                    let chip = Rect::from_min_size(
+                        family.body.right_bottom()
+                            - Vec2::new(150.0 * app.graph_zoom, 31.0 * app.graph_zoom),
+                        Vec2::new(140.0, 25.0) * app.graph_zoom,
+                    );
+                    let button = ui.interact(
+                        chip,
+                        ui.make_persistent_id(("family-board", id)),
+                        Sense::click(),
+                    );
+                    painter.rect_filled(chip, 7.0, Color32::from_rgb(62, 67, 82));
+                    painter.text(
+                        chip.center(),
+                        Align2::CENTER_CENTER,
+                        if family.capped {
+                            format!("{} children · open", family.descendant_count)
+                        } else {
+                            "Compact board".to_owned()
+                        },
+                        FontId::proportional(11.0 * app.graph_zoom),
+                        Color32::WHITE,
+                    );
+                    if button.clicked() {
+                        app.toggle_family_expanded(id, rect);
+                        ui.ctx().request_repaint();
+                    }
+                }
+            }
+        }
+    }
     if app.show_focus_window && app.theme.focus.show_frame {
+        let today = Local::now().date_naive();
         let active = items
             .iter()
-            .filter(|item| {
-                item.item.state == ItemState::Active
-                    || holding_active.contains(&item.item.id.to_string())
-            })
-            .filter_map(|item| positions.get(&item.item.id.to_string()).copied())
+            .filter(|item| focus_is_active(item, &holding_active, &app.theme.focus, today))
+            .filter_map(|item| rendered_positions.get(&item.item.id.to_string()).copied())
             .collect::<Vec<_>>();
         if let Some(bounds) = bounds_for_points(&active, Vec2::new(105.0, 55.0) * app.graph_zoom) {
             painter.rect_stroke(
@@ -3219,10 +3497,8 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
             );
         }
     }
-    let child_index = child_index(&items);
     // Cards are sized before any edge is drawn, so an arrow can be aimed at the
     // rectangle a card actually occupies rather than at an assumed size.
-    let layouts = node_layouts(&painter, app, &items, &positions, &boxes, &child_index);
     let rect_of = |id: &str| layouts.get(id).map(|layout| layout.rect);
     let mut clicked = None;
     for item in &items {
@@ -3232,14 +3508,13 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
         if show_hierarchy
             && let Some(parent) = item.item.parent_id.and_then(|id| rect_of(&id.to_string()))
         {
-            let (start, end) = geometry::edge_between(parent, to_rect, edge_gap);
-            draw_edge(
+            draw_family_link(
                 &painter,
-                start,
-                end,
-                Color32::from_rgb(82, 156, 112),
-                &app.theme,
+                parent,
+                to_rect,
+                ancestor_depth(item, &items),
                 app.graph_zoom,
+                app.theme.layout.tree_axis,
             );
         }
         if show_dependencies {
@@ -3290,6 +3565,26 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
             }
         }
     }
+    let hidden_descendants = if app.theme.parent.child_depth == 0 {
+        HashMap::new()
+    } else {
+        let filtered = app.filtered_items();
+        let all_children = crate::child_index(&filtered);
+        let visible_ids = items
+            .iter()
+            .map(|item| item.item.id.to_string())
+            .collect::<std::collections::HashSet<_>>();
+        all_children
+            .keys()
+            .map(|parent| {
+                let hidden = collect_subtree(parent, &all_children)
+                    .into_iter()
+                    .filter(|id| id != parent && !visible_ids.contains(id))
+                    .count();
+                (parent.clone(), hidden)
+            })
+            .collect::<HashMap<_, _>>()
+    };
     for item in &items {
         let id = item.item.id.to_string();
         let Some(layout) = layouts.get(&id).cloned() else {
@@ -3303,9 +3598,14 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
             ..
         } = layout;
         let response = ui.interact(node, ui.make_persistent_id(&id), Sense::click_and_drag());
+        response.context_menu(|ui| {
+            if ui.button("Normalize connected family (G)").clicked() {
+                app.normalize_family(rect, &id);
+                ui.close();
+            }
+        });
         let selected = app.selected.as_deref() == Some(id.as_str());
         let holds_active = holding_active.contains(&id);
-        let reads_active = item.item.state == ItemState::Active || holds_active;
         let accent = node_tag_color(item, &app.theme, &palette, &effective);
         let status = status_color(item, holds_active);
         let weight = item_weight(item, &child_index, &app.theme);
@@ -3319,11 +3619,25 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
             true,
         )
         .unwrap_or(status);
+        // A parent is the visible tab of its own family body. Sharing one opaque
+        // fill joins the two pieces without a translucent overlap seam.
+        let fill = if boxes.contains_key(&id) {
+            family_colors(accent.unwrap_or(Color32::from_gray(150))).0
+        } else {
+            fill
+        };
         // While focus mode is on, work that is not active stays drawn but quiet, so
         // it reads as context rather than as part of what is being worked on.
         // A search result reuses the focus-mode treatment: non-matches stay drawn
         // but quiet, so edges and structure survive the query instead of vanishing.
-        let exiled = (app.focus_mode && !reads_active) || !app.search_matches(item);
+        let exiled = (app.focus_mode
+            && !focus_is_active(
+                item,
+                &holding_active,
+                &app.theme.focus,
+                Local::now().date_naive(),
+            ))
+            || !app.search_matches(item);
         let dim = |color: Color32| {
             if exiled {
                 Color32::from_rgba_unmultiplied(
@@ -3409,6 +3723,21 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
             &app.theme,
             app.graph_zoom,
         );
+        if boxes.contains_key(&id)
+            && app.theme.parent.header_style == FamilyHeaderStyle::AttachedTab
+            && app.theme.node.shape == NodeShape::RoundedRect
+        {
+            // The parent card is the tab itself. Remove its lower seam where
+            // the opaque family body rises behind it.
+            painter.line_segment(
+                [
+                    node.left_bottom() + Vec2::new(app.theme.node.rounding() * app.graph_zoom, 0.0),
+                    node.right_bottom()
+                        - Vec2::new(app.theme.node.rounding() * app.graph_zoom, 0.0),
+                ],
+                Stroke::new(outline.width + 1.0, fill),
+            );
+        }
         if app.theme.node.show_meta_line {
             let title_top = node.top() + padding;
             painter.galley(
@@ -3430,6 +3759,41 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
         } else {
             let anchor = node.center() - title_galley.size() / 2.0;
             painter.galley(anchor, title_galley, dim(Color32::WHITE));
+        }
+        if let Some(hidden) = hidden_descendants.get(&id)
+            && (*hidden > 0 || app.expanded_families.contains(&id))
+        {
+            let badge = Rect::from_center_size(
+                node.right_top() + Vec2::new(8.0, -7.0),
+                Vec2::new(31.0, 24.0),
+            );
+            let toggle = ui.interact(
+                badge,
+                ui.make_persistent_id(("family-expand", &id)),
+                Sense::click(),
+            );
+            painter.rect_filled(badge, 8.0, Color32::from_rgb(61, 68, 89));
+            painter.rect_stroke(
+                badge,
+                8.0,
+                Stroke::new(1.5, Color32::LIGHT_GRAY),
+                egui::StrokeKind::Outside,
+            );
+            painter.text(
+                badge.center(),
+                Align2::CENTER_CENTER,
+                if app.expanded_families.contains(&id) {
+                    "−".to_owned()
+                } else {
+                    format!("+{hidden}")
+                },
+                FontId::proportional(12.0),
+                Color32::WHITE,
+            );
+            if toggle.clicked() {
+                app.toggle_family_expanded(&id, rect);
+                ui.ctx().request_repaint();
+            }
         }
         if response.drag_started()
             && let Some(pointer) = response.interact_pointer_pos()
@@ -3481,6 +3845,20 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
     }
     if let Some(id) = clicked {
         app.select(id);
+    }
+    if !ui.ctx().egui_wants_keyboard_input()
+        && ui.input(|input| input.key_pressed(egui::Key::G))
+        && let Some(pointer) = ui.input(|input| input.pointer.hover_pos())
+        && rect.contains(pointer)
+    {
+        if let Some((id, _)) = layouts
+            .iter()
+            .find(|(_, layout)| layout.rect.contains(pointer))
+        {
+            app.normalize_family(rect, id);
+        } else {
+            app.normalize_layout(rect);
+        }
     }
     if response.clicked() {
         app.drag_anchor = None;
@@ -3571,6 +3949,70 @@ fn draw_node_body(
             painter.rect_stroke(node, rounding, outline, egui::StrokeKind::Outside);
         }
     }
+}
+
+/// The card owns its board even if its position is between its children.
+/// A short stalk ending at the well is distinct from dependency arrows.
+fn draw_board_attachment(painter: &egui::Painter, parent: Rect, well: Rect, zoom: f32) {
+    let toward = well.center();
+    let start = geometry::boundary_point(parent, toward);
+    let end = geometry::boundary_point(well, parent.center());
+    if (end - start).length() < 3.0 * zoom {
+        return;
+    }
+    let color = Color32::from_rgb(147, 174, 218);
+    painter.line_segment([start, end], Stroke::new(3.0 * zoom, color));
+    painter.circle_stroke(end, 4.0 * zoom, Stroke::new(1.6 * zoom, color));
+}
+
+/// Family lines bend through the child's compartment and end in an open circle.
+/// Dependencies retain straight arrows, so the two relationships stay distinct.
+fn draw_family_link(
+    painter: &egui::Painter,
+    parent: Rect,
+    child: Rect,
+    depth: usize,
+    zoom: f32,
+    axis: geometry::TreeAxis,
+) {
+    let generation = f32::from(u8::try_from(depth.saturating_sub(1)).unwrap_or(u8::MAX));
+    let width = (6.0 - generation * 1.5).max(1.5) * zoom;
+    let radius = 4.0 * zoom;
+    let color = Color32::from_rgb(147, 174, 218);
+    let (start, end, elbow) = match axis {
+        geometry::TreeAxis::Down if child.top() > parent.bottom() => {
+            let start = parent.center_bottom();
+            let end = child.center_top() - Vec2::new(0.0, radius + 2.0 * zoom);
+            (start, end, (start.y + end.y) * 0.5)
+        }
+        geometry::TreeAxis::Right if child.left() > parent.right() => {
+            let start = parent.right_center();
+            let end = child.left_center() - Vec2::new(radius + 2.0 * zoom, 0.0);
+            (start, end, (start.x + end.x) * 0.5)
+        }
+        _ => {
+            let (start, end) = geometry::edge_between(parent, child, radius + 2.0 * zoom);
+            painter.line_segment([start, end], Stroke::new(width, color));
+            painter.circle_stroke(end, radius, Stroke::new(1.6 * zoom, color));
+            return;
+        }
+    };
+    let path = match axis {
+        geometry::TreeAxis::Down => vec![
+            start,
+            egui::pos2(start.x, elbow),
+            egui::pos2(end.x, elbow),
+            end,
+        ],
+        geometry::TreeAxis::Right => vec![
+            start,
+            egui::pos2(elbow, start.y),
+            egui::pos2(elbow, end.y),
+            end,
+        ],
+    };
+    painter.add(egui::Shape::line(path, Stroke::new(width, color)));
+    painter.circle_stroke(end, radius, Stroke::new(1.6 * zoom, color));
 }
 
 /// Returns the color a typed relation is drawn in.
@@ -3742,6 +4184,158 @@ fn ids_holding_active_work(items: &[StoredItem]) -> std::collections::HashSet<St
     holders
 }
 
+/// One classification drives placement, framing, and dimming in Focus mode.
+fn focus_is_active(
+    item: &StoredItem,
+    holding: &std::collections::HashSet<String>,
+    theme: &theme::FocusTheme,
+    today: NaiveDate,
+) -> bool {
+    let deferred = theme.future_includes_deferred
+        && (item.item.defer_until.is_some_and(|date| date > today)
+            || item.item.scheduled_on.is_some_and(|date| date > today));
+    !deferred
+        && (item.item.state == ItemState::Active || holding.contains(&item.item.id.to_string()))
+}
+
+/// Returns hierarchy rows that satisfy containment and visible dependencies.
+///
+/// Parent-to-child remains a precedence edge, while a prerequisite-to-dependent
+/// edge adds only the vertical room it needs. The tree renderer still chooses
+/// sibling placement, preserving family readability instead of flattening the
+/// graph into a dependency diagram.
+fn hierarchy_levels(
+    items: &[StoredItem],
+    visible: &std::collections::HashSet<String>,
+) -> HashMap<String, usize> {
+    let mut successors: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+        std::collections::BTreeMap::new();
+    let mut indegree = visible
+        .iter()
+        .map(|id| (id.clone(), 0_usize))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    for item in items {
+        let id = item.item.id.to_string();
+        let mut predecessors = item
+            .item
+            .parent_id
+            .map(|parent| parent.to_string())
+            .into_iter()
+            .chain(item.dependencies.iter().map(ToString::to_string))
+            .filter(|predecessor| visible.contains(predecessor) && predecessor != &id)
+            .collect::<Vec<_>>();
+        predecessors.sort();
+        predecessors.dedup();
+        for predecessor in predecessors {
+            if successors
+                .entry(predecessor)
+                .or_default()
+                .insert(id.clone())
+            {
+                *indegree.entry(id.clone()).or_default() += 1;
+            }
+        }
+    }
+    let mut ready = indegree
+        .iter()
+        .filter(|(_, count)| **count == 0)
+        .map(|(id, _)| id.clone())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut levels = visible
+        .iter()
+        .map(|id| (id.clone(), 0_usize))
+        .collect::<HashMap<_, _>>();
+    while let Some(id) = ready.first().cloned() {
+        ready.remove(&id);
+        let level = levels.get(&id).copied().unwrap_or_default();
+        if let Some(next_ids) = successors.get(&id) {
+            for next in next_ids {
+                let next_level = levels.entry(next.clone()).or_default();
+                *next_level = (*next_level).max(level.saturating_add(1));
+                if let Some(count) = indegree.get_mut(next) {
+                    *count = count.saturating_sub(1);
+                    if *count == 0 {
+                        ready.insert(next.clone());
+                    }
+                }
+            }
+        }
+    }
+    levels
+}
+
+/// Orders whole family boards when a dependency crosses their boundaries.
+/// Dependencies inside a family are already handled by `hierarchy_levels`.
+fn family_dependency_bands(
+    items: &[StoredItem],
+    roots: &[String],
+    children: &std::collections::BTreeMap<String, Vec<String>>,
+) -> HashMap<String, usize> {
+    let mut owner = HashMap::new();
+    for root in roots {
+        let mut pending = vec![root.as_str()];
+        while let Some(id) = pending.pop() {
+            if owner.contains_key(id) {
+                continue;
+            }
+            owner.insert(id.to_owned(), root.clone());
+            if let Some(next) = children.get(id) {
+                pending.extend(next.iter().map(String::as_str));
+            }
+        }
+    }
+    let mut successors: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+        std::collections::BTreeMap::new();
+    let mut indegree = roots
+        .iter()
+        .map(|id| (id.clone(), 0_usize))
+        .collect::<HashMap<_, _>>();
+    for item in items {
+        let id = item.item.id.to_string();
+        let Some(to) = owner.get(&id) else { continue };
+        for dependency in &item.dependencies {
+            let Some(from) = owner.get(&dependency.to_string()) else {
+                continue;
+            };
+            if from != to
+                && successors
+                    .entry(from.clone())
+                    .or_default()
+                    .insert(to.clone())
+            {
+                *indegree.entry(to.clone()).or_default() += 1;
+            }
+        }
+    }
+    let mut ready = roots
+        .iter()
+        .filter(|id| indegree.get(*id) == Some(&0))
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut bands = HashMap::new();
+    while let Some(id) = ready.pop_first() {
+        let band = bands.get(&id).copied().unwrap_or(0_usize);
+        if let Some(next) = successors.get(&id) {
+            for dependent in next {
+                let level = bands.entry(dependent.clone()).or_insert(0);
+                *level = (*level).max(band + 1);
+                if let Some(count) = indegree.get_mut(dependent) {
+                    *count -= 1;
+                    if *count == 0 {
+                        ready.insert(dependent.clone());
+                    }
+                }
+            }
+        }
+    }
+    // A cross-family cycle cannot be drawn as a one-way hierarchy. Keep its
+    // members present in the first band rather than chasing levels forever.
+    for root in roots {
+        bands.entry(root.clone()).or_insert(0);
+    }
+    bands
+}
+
 /// Returns each task's visible children, keyed by parent id.
 fn child_index(items: &[StoredItem]) -> HashMap<String, Vec<String>> {
     let mut children: HashMap<String, Vec<String>> = HashMap::new();
@@ -3754,6 +4348,225 @@ fn child_index(items: &[StoredItem]) -> HashMap<String, Vec<String>> {
         }
     }
     children
+}
+
+/// Collapses only the view, preserving active and selected ancestor paths.
+/// An expanded parent reveals its complete subtree regardless of the global cap.
+fn limit_child_depth(
+    eligible: Vec<StoredItem>,
+    limit: usize,
+    expanded: &std::collections::HashSet<String>,
+    selected: Option<&str>,
+) -> Vec<StoredItem> {
+    if limit == 0 {
+        return eligible;
+    }
+    let present = eligible
+        .iter()
+        .map(|item| item.item.id.to_string())
+        .collect::<std::collections::HashSet<_>>();
+    let parent_of = eligible
+        .iter()
+        .filter_map(|item| {
+            let parent = item.item.parent_id?.to_string();
+            present
+                .contains(&parent)
+                .then(|| (item.item.id.to_string(), parent))
+        })
+        .collect::<HashMap<_, _>>();
+    let mut revealed = std::collections::HashSet::new();
+    for item in &eligible {
+        let id = item.item.id.to_string();
+        if item.item.state != ItemState::Active && selected != Some(id.as_str()) {
+            continue;
+        }
+        let mut cursor = id;
+        while revealed.insert(cursor.clone()) {
+            let Some(parent) = parent_of.get(&cursor) else {
+                break;
+            };
+            cursor = parent.clone();
+        }
+    }
+    eligible
+        .into_iter()
+        .filter(|item| {
+            let id = item.item.id.to_string();
+            if revealed.contains(&id) {
+                return true;
+            }
+            let mut cursor = id;
+            let mut depth = 0;
+            let mut seen = std::collections::HashSet::new();
+            while let Some(parent) = parent_of.get(&cursor) {
+                if !seen.insert(cursor.clone()) {
+                    break;
+                }
+                depth += 1;
+                if expanded.contains(parent) {
+                    return true;
+                }
+                cursor = parent.clone();
+            }
+            depth <= limit
+        })
+        .collect()
+}
+
+/// Family body and the descendant space it encloses.
+#[derive(Clone, Copy)]
+struct FamilyBox {
+    body: Rect,
+    well: Rect,
+    oversized: bool,
+    capped: bool,
+    descendant_count: usize,
+}
+
+/// A family uses one body, with the real parent card projecting as its tab.
+/// Each filled part is opaque, so overlapping generations keep one color.
+fn draw_family_boxes(
+    painter: &egui::Painter,
+    app: &TodoGui,
+    items: &[StoredItem],
+    boxes: &HashMap<String, FamilyBox>,
+    palette: &TagPalette,
+    effective: &HashMap<String, Vec<String>>,
+) {
+    // Complete each ancestor before its descendants. Painting all outer frames
+    // first would let an ancestor's later well wash over a nested family.
+    let mut ordered = boxes.iter().collect::<Vec<_>>();
+    ordered.sort_by(|left, right| {
+        (right.1.body.area())
+            .partial_cmp(&left.1.body.area())
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    for (id, family) in ordered {
+        let Some(item) = items
+            .iter()
+            .find(|candidate| candidate.item.id.to_string() == *id)
+        else {
+            continue;
+        };
+        let accent =
+            node_tag_color(item, &app.theme, palette, effective).unwrap_or(Color32::from_gray(150));
+        let (fill, well_fill, edge) = family_colors(accent);
+        let zoom = app.graph_zoom;
+        let rounding = app.theme.parent.corner_radius * zoom;
+        let stroke = Stroke::new((app.theme.parent.stroke_width * zoom).max(1.0), edge);
+        match app.theme.parent.well_fill {
+            FamilyWellFill::Transparent => {
+                draw_family_ring(painter, family.body, family.well, rounding, fill);
+                // The mesh leaves a true hole; a thin path smooths its inside
+                // edge without laying a dark fill over the tag clouds below.
+                painter.rect_stroke(
+                    family.well,
+                    rounding * 0.7,
+                    Stroke::new(zoom.max(1.0), fill),
+                    egui::StrokeKind::Outside,
+                );
+            }
+            FamilyWellFill::Dark => {
+                painter.rect_filled(family.body, rounding, fill);
+                painter.rect_filled(family.well, rounding * 0.7, well_fill);
+            }
+        }
+        painter.rect_stroke(family.body, rounding, stroke, egui::StrokeKind::Outside);
+        if app.theme.parent.child_style == FamilyChildStyle::RecessedBoard {
+            painter.rect_stroke(
+                family.well,
+                rounding * 0.7,
+                Stroke::new((1.5 * zoom).max(1.0), edge),
+                egui::StrokeKind::Inside,
+            );
+        }
+    }
+}
+
+/// Tessellates the area between two rounded rectangles. The inner rectangle is
+/// never painted, so transparency exposes the actual graph underneath it.
+fn draw_family_ring(
+    painter: &egui::Painter,
+    body: Rect,
+    well: Rect,
+    rounding: f32,
+    color: Color32,
+) {
+    painter.add(egui::Shape::mesh(family_ring_mesh(
+        body, well, rounding, color,
+    )));
+}
+
+fn family_ring_mesh(body: Rect, well: Rect, rounding: f32, color: Color32) -> egui::Mesh {
+    let outer = rounded_rect_path(body, rounding);
+    let inner = rounded_rect_path(well, rounding * 0.7);
+    let mut mesh = egui::Mesh::default();
+    let Some(count) = u32::try_from(outer.len()).ok() else {
+        return mesh;
+    };
+    for (outside, inside) in outer.into_iter().zip(inner) {
+        mesh.colored_vertex(outside, color);
+        mesh.colored_vertex(inside, color);
+    }
+    for index in 0..count {
+        let current = index * 2;
+        let next = ((index + 1) % count) * 2;
+        mesh.add_triangle(current, current + 1, next);
+        mesh.add_triangle(current + 1, next + 1, next);
+    }
+    mesh
+}
+
+fn rounded_rect_path(rect: Rect, rounding: f32) -> Vec<Pos2> {
+    let radius = rounding
+        .max(0.0)
+        .min(rect.width() / 2.0)
+        .min(rect.height() / 2.0);
+    let corners = [
+        (
+            egui::pos2(rect.right() - radius, rect.top() + radius),
+            -std::f32::consts::FRAC_PI_2,
+        ),
+        (
+            egui::pos2(rect.right() - radius, rect.bottom() - radius),
+            0.0,
+        ),
+        (
+            egui::pos2(rect.left() + radius, rect.bottom() - radius),
+            std::f32::consts::FRAC_PI_2,
+        ),
+        (
+            egui::pos2(rect.left() + radius, rect.top() + radius),
+            std::f32::consts::PI,
+        ),
+    ];
+    let mut path = Vec::with_capacity(20);
+    for (center, start) in corners {
+        for step in 0_u8..=4 {
+            let angle = start + f32::from(step) * std::f32::consts::FRAC_PI_2 / 4.0;
+            path.push(center + Vec2::new(angle.cos(), angle.sin()) * radius);
+        }
+    }
+    path
+}
+
+fn family_colors(accent: Color32) -> (Color32, Color32, Color32) {
+    let blend = |base: u8, tint: u8| -> u8 {
+        u8::try_from((u16::from(base) * 2 + u16::from(tint)) / 3).unwrap_or(u8::MAX)
+    };
+    (
+        Color32::from_rgb(
+            blend(34, accent.r()),
+            blend(43, accent.g()),
+            blend(60, accent.b()),
+        ),
+        Color32::from_rgb(28, 36, 50),
+        Color32::from_rgb(
+            blend(184, accent.r()),
+            blend(199, accent.g()),
+            blend(219, accent.b()),
+        ),
+    )
 }
 
 fn draw_parent_regions(
@@ -3930,6 +4743,13 @@ fn collect_subtree(root: &str, children: &HashMap<String, Vec<String>>) -> Vec<S
     found
 }
 
+/// One disconnected body of a tag family in the current visible graph.
+struct TagCloud {
+    path: String,
+    points: Vec<Pos2>,
+    color: Color32,
+}
+
 fn draw_tag_constellation(
     painter: &egui::Painter,
     items: &[StoredItem],
@@ -3947,72 +4767,152 @@ fn draw_tag_constellation(
         };
         let empty = Vec::new();
         let carried = effective.get(&id).unwrap_or(&empty);
-        for tag in carried {
-            let segments = tag.split('/').collect::<Vec<_>>();
-            for depth in 2..=segments.len() {
-                if let Some(prefix) = segments.get(..depth) {
-                    groups.entry(prefix.join("/")).or_default().push(position);
-                }
-            }
-        }
+        // A card has one cloud family: the deepest tag is already what its accent
+        // represents. Drawing every ancestor as another cloud made one card blend
+        // several colors and obscured where neighboring families should repel.
+        let tag = carried
+            .iter()
+            .max_by_key(|tag| tag.matches('/').count())
+            .cloned()
+            .unwrap_or_else(|| "(untagged)".to_owned());
+        groups.entry(tag).or_default().push(position);
     }
     let mut paths = groups.keys().cloned().collect::<Vec<_>>();
-    paths.sort_by_key(|path| path.matches('/').count());
+    paths.sort();
     let half_size = {
         let (width, height) = theme.node.size();
         Vec2::new(width / 2.0 + 14.0, height / 2.0 + 10.0) * zoom
     };
+    let mut clouds = Vec::new();
     for path in paths {
         let Some(points) = groups.get(&path) else {
             continue;
         };
-        let color = palette.color(&path, &theme.tag);
+        let color = if path == "(untagged)" {
+            Color32::from_gray(118)
+        } else {
+            palette.color(&path, &theme.tag)
+        };
+        for cluster in geometry::cluster_points(points, theme.tag.cluster_distance * zoom) {
+            if cluster.len() < theme.tag.min_region_members
+                && theme.tag.region_shape != RegionShape::Cloud
+            {
+                continue;
+            }
+            clouds.push(TagCloud {
+                path: path.clone(),
+                points: cluster,
+                color,
+            });
+        }
+    }
+    if clouds.is_empty() {
+        return;
+    }
+    if theme.tag.region_shape != RegionShape::Cloud {
+        draw_legacy_tag_regions(painter, &clouds, half_size, theme, zoom);
+        return;
+    }
+    draw_clean_tag_clouds(painter, &clouds, half_size, theme, zoom);
+}
+
+/// Draws the older rectangle and hull modes without changing their saved meaning.
+fn draw_legacy_tag_regions(
+    painter: &egui::Painter,
+    clouds: &[TagCloud],
+    half_size: Vec2,
+    theme: &Theme,
+    zoom: f32,
+) {
+    for cloud in clouds {
+        let Some(bounds) = bounds_for_points(&cloud.points, half_size) else {
+            continue;
+        };
         let fill = Color32::from_rgba_unmultiplied(
-            color.r(),
-            color.g(),
-            color.b(),
+            cloud.color.r(),
+            cloud.color.g(),
+            cloud.color.b(),
             theme.tag.region_fill_alpha,
         );
         let stroke = Stroke::new(
             1.0,
             Color32::from_rgba_unmultiplied(
-                color.r(),
-                color.g(),
-                color.b(),
+                cloud.color.r(),
+                cloud.color.g(),
+                cloud.color.b(),
                 theme.tag.region_stroke_alpha,
             ),
         );
-        // One region per cluster of nearby members, so a tag spread over two
-        // distant bodies of work draws two regions instead of one that spans the
-        // canvas and appears to contain everything between them.
-        for cluster in geometry::cluster_points(points, theme.tag.cluster_distance * zoom) {
-            if cluster.len() < theme.tag.min_region_members {
-                continue;
+        if theme.tag.region_shape == RegionShape::Hull {
+            let corners = node_corners(&cloud.points, half_size);
+            let hull = geometry::convex_hull(&corners);
+            let padded = geometry::expand_path(&hull, theme.tag.region_padding);
+            let outline = geometry::smooth_closed_path(&padded, theme.tag.region_smoothing);
+            if outline.len() >= 3 {
+                painter.add(egui::Shape::convex_polygon(outline, fill, stroke));
             }
-            let Some(bounds) = bounds_for_points(&cluster, half_size) else {
-                continue;
-            };
-            let drawn = if theme.tag.region_shape == RegionShape::Hull {
-                let corners = node_corners(&cluster, half_size);
-                let hull = geometry::convex_hull(&corners);
-                let padded = geometry::expand_path(&hull, theme.tag.region_padding);
-                let outline = geometry::smooth_closed_path(&padded, theme.tag.region_smoothing);
-                if outline.len() >= 3 {
-                    painter.add(egui::Shape::convex_polygon(outline, fill, stroke));
-                    true
-                } else {
-                    false
-                }
-            } else {
-                false
-            };
-            if !drawn {
-                painter.rect_filled(bounds.expand(16.0), 18.0, fill);
-                painter.rect_stroke(bounds.expand(16.0), 18.0, stroke, egui::StrokeKind::Outside);
+        } else {
+            painter.rect_filled(bounds.expand(16.0), 18.0, fill);
+            painter.rect_stroke(bounds.expand(16.0), 18.0, stroke, egui::StrokeKind::Outside);
+        }
+        draw_region_label(painter, bounds, &cloud.path, cloud.color, theme, zoom);
+    }
+}
+
+/// Draws smooth individual clouds and soft links for one tag family.
+///
+/// Each tagged task gets a circle even when it has no neighbor. Links are painted
+/// first and circles cap their ends, making a clean tube between matching tags
+/// instead of the pixel grid a sampled metaball field would require.
+fn draw_clean_tag_clouds(
+    painter: &egui::Painter,
+    clouds: &[TagCloud],
+    half_size: Vec2,
+    theme: &Theme,
+    zoom: f32,
+) {
+    let context = painter.ctx();
+    let backdrop = context.style_of(context.theme()).visuals.panel_fill;
+    for cloud in clouds {
+        let radius = half_size.length() + theme.tag.region_padding * zoom;
+        let fill = cloud_pastel(cloud.color, backdrop);
+        // The opaque pastel is pre-blended with the canvas once, so overlapping
+        // circles and their tube stay one continuous color rather than darkening.
+        let tube = Stroke::new(radius * 1.15, fill);
+        for (from, to) in geometry::minimum_spanning_links(&cloud.points) {
+            // Clouds are now behind the family layer and cards, so a tag can span
+            // one broad body of work without being mistaken for its foreground
+            // relationship arrow. Separate truly distant constellations instead.
+            if (to - from).length() <= radius * 7.0 {
+                painter.line_segment([from, to], tube);
             }
-            draw_region_label(painter, bounds, &path, color, theme, zoom);
+        }
+        for point in &cloud.points {
+            painter.circle_filled(*point, radius, fill);
+        }
+        if cloud.points.len() >= 2
+            && let Some(bounds) = bounds_for_points(&cloud.points, half_size)
+        {
+            draw_region_label(painter, bounds, &cloud.path, cloud.color, theme, zoom);
         }
     }
+}
+
+/// Returns a fully opaque, low-saturation version of a tag color over `backdrop`.
+///
+/// Opacity would be composited once per circle and make a shared cloud darker at
+/// its joins. Pre-blending once keeps the deliberately clean circle geometry while
+/// making every overlap read as the same continuous body.
+fn cloud_pastel(color: Color32, backdrop: Color32) -> Color32 {
+    fn blend(channel: u8, backdrop: u8) -> u8 {
+        let mixed = (u16::from(channel) * 16 + u16::from(backdrop) * 84) / 100;
+        u8::try_from(mixed).map_or(u8::MAX, |value| value)
+    }
+    Color32::from_rgb(
+        blend(color.r(), backdrop.r()),
+        blend(color.g(), backdrop.g()),
+        blend(color.b(), backdrop.b()),
+    )
 }
 
 /// Draws a region's label above it, clipped to the width the region can hold.
@@ -4109,7 +5009,6 @@ fn node_layouts(
     app: &TodoGui,
     items: &[StoredItem],
     positions: &HashMap<String, Pos2>,
-    boxes: &HashMap<String, Rect>,
     child_index: &HashMap<String, Vec<String>>,
 ) -> HashMap<String, NodeLayout> {
     let mut layouts = HashMap::new();
@@ -4145,12 +5044,7 @@ fn node_layouts(
         let height = needed
             .max(node_height * zoom)
             .min(app.theme.node.max_height * zoom);
-        // A container's card is its box header: the parent is the box, rather than
-        // a separate card floating inside a labeled region.
-        let rect = match boxes.get(&id) {
-            Some(box_rect) => container_header(*box_rect, &app.theme, app.graph_zoom),
-            None => Rect::from_center_size(*center, Vec2::new(node_width * zoom, height)),
-        };
+        let rect = Rect::from_center_size(*center, Vec2::new(node_width * zoom, height));
         layouts.insert(
             id,
             NodeLayout {
@@ -4164,58 +5058,124 @@ fn node_layouts(
     layouts
 }
 
-/// Returns the box each parent task encloses its subtree in, keyed by parent id.
+/// Builds each family around the measured cards, from innermost to outermost.
 ///
-/// The box is sized to the descendants, with room above for the parent's own card,
-/// which is drawn as its header: the parent is the container, not a separate node
-/// floating inside a labeled region. Parents with no visible descendants get no
-/// box and stay ordinary cards.
-fn container_boxes(
+/// A child family occupies space in its parent's well. The parent card keeps its
+/// graph position and projects above the body as the real attached tab.
+fn family_boxes(
     items: &[StoredItem],
-    positions: &HashMap<String, Pos2>,
+    layouts: &HashMap<String, NodeLayout>,
     theme: &Theme,
     zoom: f32,
-) -> HashMap<String, Rect> {
+    expanded: &std::collections::HashSet<String>,
+) -> HashMap<String, FamilyBox> {
     let children = child_index(items);
-    let (width, height) = theme.node.size();
-    let half = Vec2::new(width / 2.0, height / 2.0) * zoom;
     let mut boxes = HashMap::new();
-    for item in items {
+    let mut ordered = items.iter().collect::<Vec<_>>();
+    ordered.sort_by_key(|item| std::cmp::Reverse(ancestor_depth(item, items)));
+    for item in ordered {
         let id = item.item.id.to_string();
-        let subtree = collect_subtree(&id, &children);
-        let descendants = subtree
+        let descendants = collect_subtree(&id, &children)
             .iter()
             .filter(|member| **member != id)
-            .filter_map(|member| positions.get(member).copied())
+            .filter_map(|member| layouts.get(member).map(|layout| layout.rect))
             .collect::<Vec<_>>();
         if descendants.len() < theme.parent.min_descendants.max(1) {
             continue;
         }
-        let Some(bounds) = bounds_for_points(&descendants, half) else {
+        let Some(parent) = layouts.get(&id).map(|layout| layout.rect) else {
             continue;
         };
-        let depth = ancestor_depth(item, items);
-        let nesting = f32::from(u8::try_from(depth).unwrap_or(u8::MAX)) * theme.parent.nest_padding;
-        let padding = (theme.parent.padding + nesting) * zoom;
-        let header = theme.node.height.max(theme.parent.header_height) * zoom;
-        boxes.insert(
-            id,
-            Rect::from_min_max(
-                bounds.left_top() - Vec2::new(padding, padding + header),
-                bounds.right_bottom() + Vec2::new(padding, padding),
-            ),
+        let descendant_count = descendants.len();
+        let child_bounds = descendants
+            .into_iter()
+            .fold(Rect::NOTHING, |bounds, rect| bounds.union(rect));
+        let child_bounds = collect_subtree(&id, &children)
+            .into_iter()
+            .filter(|member| member != &id)
+            .filter_map(|member| boxes.get(&member).map(|family: &FamilyBox| family.body))
+            .fold(child_bounds, |bounds, rect| bounds.union(rect));
+        let family = bounded_family_box(
+            parent,
+            child_bounds,
+            theme,
+            zoom,
+            expanded.contains(&id),
+            descendant_count,
         );
+        boxes.insert(id, family);
     }
     boxes
 }
 
-/// Returns the header strip of a container box, where the parent's card is drawn.
-fn container_header(box_rect: Rect, theme: &Theme, zoom: f32) -> Rect {
-    let header = theme.node.height.max(theme.parent.header_height) * zoom;
-    Rect::from_min_max(
-        box_rect.left_top(),
-        egui::pos2(box_rect.right(), box_rect.top() + header),
-    )
+/// The visible band is the gap between `body` and `well`, so `body` is grown
+/// from the well alone and is one `padding` thick on every side.
+///
+/// Taking the union with the parent card unconditionally, as an earlier version
+/// did, made that band as thick as the parent-to-child distance: a card placed
+/// far from its children turned the frame into an opaque slab spanning the gap.
+/// The card is folded in only when it is close enough to read as the frame's
+/// tab; at any greater distance the attachment stalk carries the relationship
+/// and the frame stays a tight border around the children.
+fn family_box(parent: Rect, children: Rect, theme: &Theme, zoom: f32) -> FamilyBox {
+    let well = children.expand((theme.parent.padding + theme.parent.nest_padding) * zoom);
+    let side = theme.parent.padding * zoom;
+    let body = well.expand(side);
+    let overlap = (parent.height() * 0.18).min(14.0 * zoom);
+    let top = match theme.parent.header_style {
+        FamilyHeaderStyle::Header => parent.top(),
+        FamilyHeaderStyle::AttachedTab => parent.bottom() - overlap,
+    };
+    // Folding the card in can only ever thicken the band by the distance to it,
+    // so the reach is one card height: the band stays within the card, which is
+    // the rule this frame is supposed to obey.
+    let body = if parent.expand(parent.height()).intersects(body) {
+        Rect::from_min_max(
+            egui::pos2(parent.left().min(body.left()), top.min(body.top())),
+            egui::pos2(
+                parent.right().max(body.right()),
+                parent.bottom().max(body.bottom()),
+            ),
+        )
+    } else {
+        body
+    };
+    FamilyBox {
+        body,
+        well,
+        oversized: false,
+        capped: false,
+        descendant_count: 0,
+    }
+}
+
+/// A distant descendant becomes a continuation, not a giant opaque bridge.
+/// The child card and its family link remain visible outside the compact board.
+fn bounded_family_box(
+    parent: Rect,
+    children: Rect,
+    theme: &Theme,
+    zoom: f32,
+    expanded: bool,
+    count: usize,
+) -> FamilyBox {
+    let mut family = family_box(parent, children, theme, zoom);
+    let max_size = parent.size() * theme.parent.max_board_span.max(1.0);
+    family.oversized = family.body.width() > max_size.x || family.body.height() > max_size.y;
+    family.descendant_count = count;
+    if family.oversized && !expanded {
+        let body = Rect::from_min_size(
+            egui::pos2(
+                parent.center().x - max_size.x / 2.0,
+                parent.bottom() - 10.0 * zoom,
+            ),
+            max_size,
+        );
+        family.body = body;
+        family.well = body.shrink(theme.parent.padding * zoom);
+        family.capped = true;
+    }
+    family
 }
 
 /// Orders two tasks by the chosen sort, breaking ties on title for stability.
@@ -4271,6 +5231,41 @@ fn sort_items(
         // Identifiers are time-ordered, so comparing them is capture order.
         SortBy::Created => left.item.id.to_string().cmp(&right.item.id.to_string()),
     }
+}
+
+/// Orders the labels a grouping exposes in the order people expect to scan them.
+///
+/// Group keys are rendered strings because they become column headings. Their
+/// lexical order is fine for names, but it makes a time board read "later" before
+/// "overdue" and a priority board put "critical" after "high".
+fn compare_group_labels(grouping: GroupBy, left: &str, right: &str) -> std::cmp::Ordering {
+    let rank = |label: &str| match grouping {
+        GroupBy::Time => match label {
+            "overdue" => 0,
+            "today" => 1,
+            "this week" => 2,
+            "later" => 3,
+            "(undated)" => 4,
+            _ => 5,
+        },
+        GroupBy::Priority => match label {
+            "critical" => 0,
+            "high" => 1,
+            "normal" => 2,
+            "low" => 3,
+            _ => 4,
+        },
+        GroupBy::State => match label {
+            "active" => 0,
+            "inbox" => 1,
+            "done" => 2,
+            "canceled" => 3,
+            "void" => 4,
+            _ => 5,
+        },
+        GroupBy::None | GroupBy::Hierarchy | GroupBy::Tag | GroupBy::Sequence => 0,
+    };
+    rank(left).cmp(&rank(right)).then_with(|| left.cmp(right))
 }
 
 /// Returns the lifecycle color for a task.
@@ -4396,8 +5391,13 @@ fn short_title(title: &str) -> String {
     reason = "test fixtures use direct setup and assertion values"
 )]
 mod tests {
-    use super::{collect_subtree, matches_query};
-    use std::collections::HashMap;
+    use super::{
+        GroupBy, bounded_family_box, collect_subtree, compare_group_labels, family_box,
+        family_dependency_bands, family_ring_mesh, focus_is_active, hierarchy_levels,
+        limit_child_depth, matches_query,
+    };
+    use eframe::egui::{Color32, Pos2, Rect, pos2, vec2};
+    use std::collections::{HashMap, HashSet};
     use todo_core::{ItemState, Priority};
     use todo_store::StoredItem;
 
@@ -4449,12 +5449,214 @@ mod tests {
     }
 
     #[test]
+    fn attached_parent_card_projects_from_a_body_containing_the_children() {
+        let parent = Rect::from_min_size(pos2(100.0, 20.0), vec2(150.0, 58.0));
+        let child = Rect::from_min_size(pos2(300.0, 150.0), vec2(150.0, 70.0));
+        let family = family_box(parent, child, &super::Theme::default(), 1.0);
+        assert!(family.body.top() > parent.top());
+        assert!(family.body.top() < parent.bottom());
+        assert!(family.body.contains(parent.center_bottom()));
+        assert!(family.well.contains(child.min));
+        assert!(family.well.contains(child.max));
+        assert!(family.body.contains(family.well.min));
+        assert!(family.body.contains(family.well.max));
+    }
+
+    #[test]
+    fn a_wide_family_uses_a_bounded_board_until_expanded() {
+        let parent = Rect::from_min_size(pos2(100.0, 20.0), vec2(150.0, 58.0));
+        // Children spread far apart, which is what legitimately needs capping.
+        let children = Rect::from_min_size(pos2(120.0, 140.0), vec2(1600.0, 400.0));
+        let theme = super::Theme::default();
+        let compact = bounded_family_box(parent, children, &theme, 1.0, false, 9);
+        let expanded = bounded_family_box(parent, children, &theme, 1.0, true, 9);
+        assert!(compact.capped);
+        assert!(compact.body.width() <= parent.width() * theme.parent.max_board_span);
+        assert!(compact.body.height() <= parent.height() * theme.parent.max_board_span);
+        assert!(expanded.body.contains(children.center()));
+    }
+
+    /// One far-away child used to trip the cap only because the frame had
+    /// stretched to reach it. With the band fixed, the frame stays small and
+    /// there is nothing to cap.
+    #[test]
+    fn a_single_distant_child_no_longer_needs_capping() {
+        let parent = Rect::from_min_size(pos2(100.0, 20.0), vec2(150.0, 58.0));
+        let child = Rect::from_min_size(pos2(900.0, 900.0), vec2(150.0, 70.0));
+        let theme = super::Theme::default();
+        let compact = bounded_family_box(parent, child, &theme, 1.0, false, 1);
+        assert!(!compact.capped);
+        assert!(compact.well.contains(child.center()));
+    }
+
+    #[test]
+    fn a_distant_parent_does_not_thicken_the_family_band() {
+        let theme = super::Theme::default();
+        let side = theme.parent.padding;
+        let child = Rect::from_min_size(pos2(900.0, 900.0), vec2(150.0, 70.0));
+        // Far enough that an earlier version spanned the whole gap with fill.
+        let parent = Rect::from_min_size(pos2(100.0, 20.0), vec2(150.0, 58.0));
+        let family = family_box(parent, child, &theme, 1.0);
+        for band in [
+            family.well.left() - family.body.left(),
+            family.body.right() - family.well.right(),
+            family.well.top() - family.body.top(),
+            family.body.bottom() - family.well.bottom(),
+        ] {
+            assert!(
+                (band - side).abs() < 0.01,
+                "band {band} should be one padding ({side})"
+            );
+        }
+    }
+
+    #[test]
+    fn an_adjacent_parent_is_still_folded_into_its_frame() {
+        let theme = super::Theme::default();
+        let child = Rect::from_min_size(pos2(100.0, 140.0), vec2(150.0, 70.0));
+        let parent = Rect::from_min_size(pos2(100.0, 20.0), vec2(150.0, 58.0));
+        let family = family_box(parent, child, &theme, 1.0);
+        assert!(family.body.contains(parent.center_bottom()));
+    }
+
+    #[test]
+    fn low_child_depth_can_expand_and_reveals_active_paths() {
+        let items = vec![
+            task("1", None, ItemState::Inbox),
+            task("2", Some("1"), ItemState::Inbox),
+            task("3", Some("2"), ItemState::Inbox),
+            task("4", Some("2"), ItemState::Active),
+        ];
+        let ids = |shown: Vec<StoredItem>| {
+            shown
+                .iter()
+                .map(|item| item.item.title.clone())
+                .collect::<Vec<_>>()
+        };
+        let collapsed = ids(limit_child_depth(items.clone(), 1, &HashSet::new(), None));
+        assert!(collapsed.contains(&"task 4".to_owned()));
+        assert!(!collapsed.contains(&"task 3".to_owned()));
+        let root = items.first().map(|item| item.item.id.to_string()).unwrap();
+        let expanded = ids(limit_child_depth(
+            items.clone(),
+            1,
+            &HashSet::from([root]),
+            None,
+        ));
+        assert_eq!(expanded.len(), items.len());
+        assert_eq!(
+            ids(limit_child_depth(items.clone(), 0, &HashSet::new(), None)).len(),
+            items.len()
+        );
+    }
+
+    #[test]
+    fn focus_uses_the_same_active_rule_for_holding_and_deferred_tasks() {
+        let today = chrono::NaiveDate::from_ymd_opt(2026, 9, 29).unwrap();
+        let mut parent = task("1", None, ItemState::Inbox);
+        let id = parent.item.id.to_string();
+        let holding = HashSet::from([id]);
+        let theme = super::Theme::default();
+        assert!(focus_is_active(&parent, &holding, &theme.focus, today));
+        parent.item.defer_until = chrono::NaiveDate::from_ymd_opt(2026, 10, 1);
+        assert!(!focus_is_active(&parent, &holding, &theme.focus, today));
+    }
+
+    #[test]
+    fn transparent_family_ring_leaves_the_child_space_open() {
+        let body = Rect::from_min_max(pos2(0.0, 0.0), pos2(300.0, 240.0));
+        let well = Rect::from_min_max(pos2(25.0, 70.0), pos2(275.0, 215.0));
+        let mesh = family_ring_mesh(body, well, 10.0, Color32::WHITE);
+        let covers = |point: Pos2| {
+            mesh.indices.chunks_exact(3).any(|triangle| {
+                let vertices = triangle
+                    .iter()
+                    .filter_map(|index| usize::try_from(*index).ok())
+                    .filter_map(|index| mesh.vertices.get(index).map(|vertex| vertex.pos))
+                    .collect::<Vec<_>>();
+                let [a, b, c] = vertices.as_slice() else {
+                    return false;
+                };
+                let cross = |first: Pos2, second: Pos2| {
+                    (second.x - first.x) * (point.y - first.y)
+                        - (second.y - first.y) * (point.x - first.x)
+                };
+                let sides = [cross(*a, *b), cross(*b, *c), cross(*c, *a)];
+                sides.iter().all(|side| *side >= 0.0) || sides.iter().all(|side| *side <= 0.0)
+            })
+        };
+        assert!(covers(pos2(10.0, 120.0)));
+        assert!(!covers(well.center()));
+    }
+
+    #[test]
     fn a_parent_of_active_work_holds_active_work() {
         let items = vec![
             task("1", None, ItemState::Inbox),
             task("2", Some("1"), ItemState::Active),
         ];
         assert!(holds(&items, "1"));
+    }
+
+    #[test]
+    fn hierarchy_levels_place_dependents_after_their_prerequisites() {
+        let root = task("1", None, ItemState::Inbox);
+        let prerequisite = task("2", Some("1"), ItemState::Inbox);
+        let mut dependent = task("3", None, ItemState::Inbox);
+        dependent.dependencies = vec![prerequisite.item.id];
+        let prerequisite_id = prerequisite.item.id.to_string();
+        let dependent_id = dependent.item.id.to_string();
+        let items = vec![root, prerequisite, dependent];
+        let visible = items
+            .iter()
+            .map(|item| item.item.id.to_string())
+            .collect::<std::collections::HashSet<_>>();
+        let levels = hierarchy_levels(&items, &visible);
+        let prerequisite_level = levels.get(&prerequisite_id);
+        let dependent_level = levels.get(&dependent_id);
+        assert!(matches!(
+            (prerequisite_level, dependent_level),
+            (Some(prerequisite), Some(dependent)) if dependent > prerequisite
+        ));
+    }
+
+    #[test]
+    fn cross_family_dependency_places_the_dependent_family_later() {
+        let root = task("1", None, ItemState::Inbox);
+        let prerequisite = task("2", Some("1"), ItemState::Inbox);
+        let mut dependent = task("3", None, ItemState::Inbox);
+        dependent.dependencies = vec![prerequisite.item.id];
+        let first = root.item.id.to_string();
+        let second = dependent.item.id.to_string();
+        let children = std::collections::BTreeMap::from([(
+            first.clone(),
+            vec![prerequisite.item.id.to_string()],
+        )]);
+        let bands = family_dependency_bands(
+            &[root, prerequisite, dependent],
+            &[first.clone(), second.clone()],
+            &children,
+        );
+        assert!(
+            matches!((bands.get(&first), bands.get(&second)), (Some(before), Some(after)) if after > before)
+        );
+    }
+
+    #[test]
+    fn time_columns_follow_the_working_day() {
+        let mut labels = vec!["later", "(undated)", "today", "overdue", "this week"];
+        labels.sort_by(|left, right| compare_group_labels(GroupBy::Time, left, right));
+        assert_eq!(
+            labels,
+            vec!["overdue", "today", "this week", "later", "(undated)"]
+        );
+    }
+
+    #[test]
+    fn priority_columns_put_critical_work_first() {
+        let mut labels = vec!["low", "critical", "normal", "high"];
+        labels.sort_by(|left, right| compare_group_labels(GroupBy::Priority, left, right));
+        assert_eq!(labels, vec!["critical", "high", "normal", "low"]);
     }
 
     #[test]
