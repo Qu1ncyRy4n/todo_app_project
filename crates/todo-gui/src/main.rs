@@ -3470,7 +3470,11 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
         } else if !boxes.is_empty() {
             draw_family_boxes(&painter, app, &items, &boxes, &palette, &effective);
             for (id, family) in &boxes {
-                if let Some(parent) = layouts.get(id) {
+                // An open family has no drawn well to attach to; its family
+                // links already run to the cards themselves.
+                if let Some(parent) = layouts.get(id)
+                    && !app.expanded_families.contains(id)
+                {
                     draw_board_attachment(&painter, parent.rect, family.well, app.graph_zoom);
                 }
                 if family.oversized {
@@ -4471,6 +4475,7 @@ fn draw_family_boxes(
             .partial_cmp(&left.1.body.area())
             .unwrap_or(std::cmp::Ordering::Equal)
     });
+    let children = child_index(items);
     for (id, family) in ordered {
         let Some(item) = items
             .iter()
@@ -4484,6 +4489,15 @@ fn draw_family_boxes(
         let zoom = app.graph_zoom;
         let rounding = app.theme.parent.corner_radius * zoom;
         let stroke = Stroke::new((app.theme.parent.stroke_width * zoom).max(1.0), edge);
+        // Once a family is open its own cards carry the structure, so the fill
+        // is only clutter over them. The boundary returns as a dashed outline
+        // while the family is being moved, which is when its extent matters.
+        if app.expanded_families.contains(id) {
+            if dragging_family(app, id, &children) {
+                draw_dashed_rect(painter, family.body, rounding, stroke);
+            }
+            continue;
+        }
         match app.theme.parent.well_fill {
             FamilyWellFill::Transparent => {
                 draw_family_ring(painter, family.body, family.well, rounding, fill);
@@ -4511,6 +4525,28 @@ fn draw_family_boxes(
             );
         }
     }
+}
+
+/// True while the pointer is dragging this family's parent or any descendant.
+fn dragging_family(app: &TodoGui, id: &str, children: &HashMap<String, Vec<String>>) -> bool {
+    app.drag_anchor
+        .as_ref()
+        .is_some_and(|anchor| collect_subtree(id, children).contains(&anchor.id))
+}
+
+/// Outlines a rounded rectangle with dashes, reusing the rounded path the solid
+/// frames are built from so an open family keeps the shape it had when filled.
+fn draw_dashed_rect(painter: &egui::Painter, rect: Rect, rounding: f32, stroke: Stroke) {
+    let mut path = rounded_rect_path(rect, rounding);
+    if let Some(first) = path.first().copied() {
+        path.push(first);
+    }
+    painter.add(egui::Shape::dashed_line(
+        &path,
+        stroke,
+        6.0 * stroke.width,
+        4.0 * stroke.width,
+    ));
 }
 
 /// Tessellates the area between two rounded rectangles. The inner rectangle is
