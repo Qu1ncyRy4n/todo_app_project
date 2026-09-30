@@ -3248,10 +3248,10 @@ impl eframe::App for TodoGui {
                 }
                 ui.separator();
                 if ui.button("−").clicked() {
-                    self.graph_zoom = (self.graph_zoom / 1.2).max(0.4);
+                    self.graph_zoom = (self.graph_zoom / 1.2).max(0.2);
                 }
                 if ui.button("+").clicked() {
-                    self.graph_zoom = (self.graph_zoom * 1.2).min(2.5);
+                    self.graph_zoom = (self.graph_zoom * 1.2).min(4.0);
                 }
                 if ui.button("Reset view").clicked() {
                     self.graph_zoom = 1.0;
@@ -3352,6 +3352,20 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
     }
     if ui.input(|input| input.pointer.middle_down()) {
         app.graph_pan += ui.input(|input| input.pointer.delta());
+    }
+    // Scrolling zooms about the pointer rather than the viewport center, so the
+    // card under the cursor stays under it. Gated on hover, or scrolling either
+    // sidebar would move the graph.
+    if response.hovered()
+        && let Some(pointer) = ui.input(|input| input.pointer.hover_pos())
+    {
+        let scroll = ui.input(|input| input.smooth_scroll_delta.y + input.zoom_delta().ln_1p());
+        if scroll.abs() > f32::EPSILON {
+            let previous = app.graph_zoom;
+            app.graph_zoom = (previous * (scroll * 0.004).exp()).clamp(0.2, 4.0);
+            let ratio = app.graph_zoom / previous;
+            app.graph_pan = geometry::zoom_about(app.graph_pan, rect.center(), pointer, ratio);
+        }
     }
     if app.normalize_requested {
         app.normalize_requested = false;

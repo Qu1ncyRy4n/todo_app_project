@@ -721,6 +721,17 @@ pub fn fit_view(bounds: Rect, viewport: Rect, zoom_range: (f32, f32), margin: f3
 /// mid-flight is followed without restarting. `duration` is the time to cover most
 /// of the remaining distance; zero or less snaps, which is how animation is turned
 /// off without a second code path.
+/// Returns the pan that keeps the point under `pointer` fixed while the zoom
+/// changes by `ratio`.
+///
+/// Drawing maps a graph position to `center + (at - center) * zoom + pan`, so
+/// zooming without moving the pan would pull everything toward the viewport
+/// center and slide whatever was under the cursor out from under it.
+pub fn zoom_about(pan: Vec2, center: Pos2, pointer: Pos2, ratio: f32) -> Vec2 {
+    let from_center = pointer - center;
+    from_center - (from_center - pan) * ratio
+}
+
 pub fn ease_toward(current: Vec2, target: Vec2, elapsed: f32, duration: f32) -> Vec2 {
     if duration <= 0.0 || elapsed <= 0.0 {
         return target;
@@ -1085,9 +1096,9 @@ mod tests {
         duration_length, ease_toward, edge_between, expand_path, fit_view, grouped_positions,
         is_settled, layered_positions, minimum_spanning_links, pack_tree_families, relax_overlaps,
         ruler_ticks, separate_groups, shaft_end, smooth_closed_path, timeline_positions,
-        tree_positions, tree_positions_at_levels,
+        tree_positions, tree_positions_at_levels, zoom_about,
     };
-    use eframe::egui::{Rect, Vec2, pos2};
+    use eframe::egui::{Pos2, Rect, Vec2, pos2};
     use std::collections::HashMap;
 
     fn spacing(direction: FlowDirection) -> FlowSpacing {
@@ -2070,5 +2081,21 @@ mod tests {
     fn a_shaft_never_reverses_on_a_short_edge() {
         let end = shaft_end(pos2(0.0, 0.0), pos2(4.0, 0.0), 10.0);
         assert!((end.x - 0.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn zooming_keeps_the_point_under_the_pointer() {
+        let center = Pos2::new(400.0, 300.0);
+        let pointer = Pos2::new(650.0, 180.0);
+        let pan = Vec2::new(30.0, -12.0);
+        let (zoom, ratio) = (1.0_f32, 1.6_f32);
+        // The graph position currently drawn under the pointer.
+        let at = center + (pointer - center - pan) / zoom;
+        let pan = zoom_about(pan, center, pointer, ratio);
+        let drawn = center + (at - center) * (zoom * ratio) + pan;
+        assert!(
+            (drawn - pointer).length() < 0.01,
+            "{drawn:?} should stay at {pointer:?}"
+        );
     }
 }
