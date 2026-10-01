@@ -3,9 +3,163 @@
 Updated: 2026-09-30
 
 The stable names and visual contracts for family frames, anchors, tree lines,
-tag clouds, and the planned Appearance Lab live in
+tag clouds, and the Graph design tree window live in
 [Graph Design Language](gui-graph-design-language.md). Read it before changing
 graph rendering; this pickup focuses on implementation state.
+
+## Visual review, September 30
+
+The current live family rendering was rejected in the app when a bounded board
+was empty while its full-size children remained outside it. Dynamic presentation
+now groups only actual nearby direct children: a cluster below its threshold is
+tree-only, a nearby aligned boxed cluster gets a narrow direct rim join, and a
+remote boxed cluster keeps the ordinary family tree. An explicitly Boxed family
+still draws a true, potentially wide frame around all of its direct children.
+The **Graph design tree** remains a fixed fixture for comparing edge cases; it
+does not read or write ledger state.
+
+The reviewed Dynamic policy is now serialized in `ParentTheme` and exposed in
+the Appearance inspector. The sketch has independent in-memory controls for
+comparison, while the live values are saved via the ordinary theme workflow.
+
+## Pickup: the current family-design decision
+
+The developer rejected the first simple A/B/C sketches because they changed
+the displayed situation between alternatives and did not reproduce the real
+empty-board failure. The design tree is intended to vary one visual rule while
+holding task identities, positions, parenthood, and dependencies fixed. Keep
+that invariant when extending it. Do not infer visual acceptance from unit
+tests or from this document; the next step is review in a running window.
+
+The latest design direction, as stated by the developer:
+
+1. Keep **Dynamic** alongside explicit Box and Tree behavior. When at least
+   `n` children are within a proximity range `m` (both configurable), form a
+   box for that group; other children remain connected by the family tree.
+   A very remote group may need a tree route to its box, controlled by a
+   separate distance threshold.
+2. A parent card normally connects physically to a nearby box rim. The width
+   of that join should be a configurable ratio of card width, including 0–1
+   and values above 1. When the parent is already inside its box, no external
+   join is needed. A disconnected box should be reached by an ordinary family
+   tree, not by another special-purpose connector. Minimize the number of
+   distinct visual primitives.
+3. Nested family frames and child-well background are independent settings.
+   For now the preferred starting appearance has both enabled. Disabling a
+   nested border must not change the membership of the outer family.
+4. The distance/remote behavior in point 1 remains configurable, not a fixed
+   one-off portal treatment.
+
+The live and sketch rule both interpret `n` as a count of *direct* children and
+`m` as a center-to-center distance. Proximity is transitive: A near B and B
+near C join one cluster even when A is farther from C. A box gets a direct rim
+join only when the parent overlaps its horizontal projection and the physical
+gap is no larger than `parent_join_max_gap`. A parent inside its own frame gets
+no extra rim join. Otherwise the existing angular family tree is the sole
+structural route. The remote group never becomes a long, sideways slab merely
+because the distance value is raised.
+
+### Implemented appearance defaults
+
+The developer later authorized live implementation. These are defaults, not
+constants: each is persisted in `[parent]` in `theme.toml` and is editable in
+the Appearance inspector.
+
+| Theme key | Default | Live behavior |
+| --- | --- | --- |
+| `dynamic_min_children` | `3` | A Dynamic direct-child cluster must contain at least this many cards before receiving a frame. |
+| `dynamic_cluster_distance` | `300.0` | Proximity range `m` in display units. |
+| `parent_join_max_gap` | `30.0` | Maximum physical parent-card to frame-rim gap for a direct join. This is the implemented meaning of the reported `30`. |
+| `parent_join_width_ratio` | `0.30` | Direct join width divided by parent-card width. |
+| `child_style` | `nested_family` | Nested family treatment starts enabled. |
+| `well_fill` | `dark` | Child-well background starts enabled. |
+| `child_depth` | `0` | All child generations are visible by default. |
+
+`max_board_span` is retained only so old theme files keep loading. It is no
+longer shown in Appearance or used by Dynamic grouping; `n` and `m` determine
+which child groups receive a frame.
+
+### How to inspect the sketches
+
+1. Restart the app with `./dev gui`; the old running binary will not pick up
+   source edits. Open **Graph design tree** from the toolbar.
+2. **First set · structure** retains the earlier tree/box/hybrid comparison,
+   parent attachment alternatives, child-space alternatives, and remote-child
+   alternatives. It is a historical comparison, not the new preferred rule.
+3. **Next set · dynamic families** is a static comparison fixture. Its controls
+   are independent from the saved live theme; use it to compare alternatives
+   without moving ledger tasks. The five direct children, grandchild,
+   other-family card, and blue dependency arrow must stay fixed as controls
+   move.
+4. Try `n = 3` and `m = 300`, then sweep `m` through the two-group merge point.
+   Observe when a child changes from tree-only to boxed. Try join width `0`,
+   `1`, and above `1`; its ends must stay on the box rim. Turn nested frames
+   and background off independently, then show tag context: an open well must
+   be a true hole, not canvas paint over the tags.
+5. Return to the live ledger and compare a parent with two nearby children,
+   a parent with one distant child, a parent among its children, and a nested
+   family. In the current live Adaptive fallback, an empty frame must not
+   remain near a parent while its children sit outside it. A right-click
+   **Family display → Box** should instead enclose the real children, even if
+   that makes a large frame; **Tree** should show no family frame.
+6. **Tag clouds · decision tree** keeps a work hierarchy and a competing
+   `personal/fun` task fixed while comparing cloud scope, hierarchy color,
+   competing-tag separation, and same-tag neighbor-link density. It is a
+   chooser only: do not treat its settings as live theme behavior.
+7. **Next set · tag hierarchy** is the complex follow-up: it shows the
+   `work/cdint`, `work/cdint/api`, `work/docs`, and `work/ops` branches
+   together, continuing `cdint` through `transport` and `codec` for five
+   levels. Its defaults are hierarchy depth **All**, bounded branch-hue coloring, a
+   foreground `personal/fun` cloud with cutout on and outline off, and five
+   nearest same-path neighbors. It also compares all-within-radius links and
+   optional local gap fill; zero is available to remove cloud rails. It has no
+   parent-rail option. Its settled choices are now live Appearance/theme
+   defaults: full hierarchy, deterministic sibling hue spans relative to each
+   top-level group's wheel span, five nearest
+   neighbors, local gap fill, and cutout of hierarchy layers a task does not
+   carry; outline remains off by default.
+   Ancestor cloud membership includes visible descendants, including the
+   `transport/codec` and `transport/claude` leaves, so the deepest hierarchy
+   has real same-path links to inspect.
+   A deeper cloud must yield to a card's closest carried ancestor field, never
+   to raw canvas white. Cards remain unchanged: multiple independent tags are
+   represented as one repeated diagonal stripe texture in their surrounding
+   circular cloud member, painted above rather than within each ancestor.
+   Ancestor
+   cloud members are padded more heavily than their descendants, keeping the
+   hierarchy's larger parent field readable.
+
+The current sketch cannot prove that parent-inside-box routing, collision
+avoidance, or zoom scaling looks good across arbitrary real graphs. The live
+theme/API names and defaults are now in place; the next review should validate
+those choices against a real ledger and decide whether the direct-child,
+transitive-proximity rule needs to change.
+
+### Code and state map
+
+- `crates/todo-gui/src/appearance_lab.rs`: ledger-free comparison state,
+  both fixed pages, the transitive proximity grouping, and a focused grouping
+  test. The page's controls are in-memory only; it does not mutate the
+  production theme.
+- `crates/todo-gui/src/main.rs`: toolbar toggle and sketch window call;
+  `family_boxes` computes live Dynamic clusters and frame eligibility;
+  `draw_family_tree` and `family_tree_geometry` draw live family routes. The
+  live renderer uses a direct rim join only for a nearby aligned frame and has
+  no detached Outline Anchor.
+- `crates/todo-gui/src/theme.rs`: `ParentTheme::default().child_depth = 0`
+  means **All**. The live `family_view` enum remains Adaptive/Boxed/Connected;
+  `dynamic_min_children`, `dynamic_cluster_distance`,
+  `parent_join_max_gap`, and `parent_join_width_ratio` are persisted theme
+  fields.
+- The developer's `~/Library/Application Support/todo-ledger/theme.toml` was
+  inspected read-only and had no explicit `child_depth` key, so reloading a
+  newly built app should use the new All default. A different theme file with
+  an explicit depth still overrides it.
+
+The current worktree changes are uncommitted. The new sketch file is untracked
+until explicitly staged; do not omit it when preparing a future focused
+commit. Preserve unrelated developer edits and keep the default Git mode of
+commit-only-when-asked.
 
 ## What is implemented in the current worktree
 
@@ -50,11 +204,11 @@ Deletion is deliberately absent from the editor. `todo rm --force` and
   planned prerequisite-to-dependent edges jointly determine vertical rows. This
   keeps dependency arrows flowing down without flattening family structure.
   **Unstack** is available for exceptional wrapped-card collisions.
-- Parent containment boxes wrap nearby descendants and become bounded
-  continuation boards when a child is distant; the parent card stays at its
-  tree-assigned head position. Every tag cloud anchors
-  to the measured card center, including parent cards, so no cloud is left at a
-  former layout position.
+- Parent containment boxes wrap nearby descendants and yield to the family
+  tree when the full child set would exceed the configured frame cap. The
+  parent card stays at its tree-assigned head position. Every tag cloud anchors
+  to the measured card center, including parent cards, so no cloud is left at
+  a former layout position.
 - Time, priority, and state grouping columns use semantic scan order rather than
   alphabetical labels: overdue through undated, critical through low, and active
   through void.
@@ -69,10 +223,11 @@ Deletion is deliberately absent from the editor. `todo rm --force` and
   transparent child space are the defaults. The fixed design demos have been
   removed from the inspector.
 - Child depth is configurable from one to six generations or All; the default
-  is one. A collapsed parent shows an expand badge, while active and selected
-  paths remain visible. Distant child boards are capped relative to the parent
-  card, with a continuation control to open the complete span. A short stalk
-  attaches each parent card to its own child board.
+  is now All. A collapsed parent shows an expand badge, while active and
+  selected paths remain visible. A distant child no longer produces an empty capped
+  board; the family tree continues to its actual card instead. A forced Box
+  draws the complete span. A short stalk attaches a detached parent card to
+  a genuine nearby child outline.
 - The collapsed-family continuation is a small `…` button centered on the
   parent card's child-side edge, where its tree would continue, rather than a
   corner badge. It appears only while children are hidden and reveals them on
@@ -168,13 +323,13 @@ dogfooding notes. Every slice below landed as its own commit with tests.
     reaches the box from the canvas, Escape clears it, Enter selects the first
     match, and non-matching cards dim rather than disappear so edges survive the
     query. Both sidebars toggle off from the toolbar.
-46. Adaptive family display, per TE-0015. A family box contains its children when
-    they fit nearby and becomes a bounded continuation board when one is distant,
-    so a far descendant no longer stretches a dark span across the canvas. A short
-    stalk attaches the parent card to its own board, which reads as ownership even
-    when the card sits among its children.
-47. Configurable child depth from one to six generations, or All, defaulting to
-    one. Collapse is a view layer only: the paths to active and selected work stay
+46. Adaptive family display, per TE-0015. The original implementation used a
+    bounded continuation board when children were distant. Visual review later
+    rejected that board because it could be empty while the children remained
+    outside. Adaptive now omits the frame in that case and keeps the actual
+    family tree. A forced Box still shows literal containment.
+47. Configurable child depth from one to six generations, or All, now defaulting
+    to All. Collapse is a view layer only: the paths to active and selected work stay
     revealed, and any parent can be expanded past the global cap from its badge.
 48. Focus separates its own bands. Wrapped active rows no longer share one Y,
     non-focus cards are placed outside the measured active span, and no family
@@ -231,11 +386,19 @@ Values that carry data or protocol meaning are deliberately not configurable.
 
 ```sh
 ./dev check   # cargo fmt --check, then clippy --workspace --all-targets -D warnings
-./dev test    # 226 tests: 156 todo-gui, 35 todo-core, 22 todo-store, 13 todo-cli
+./dev test    # 227 tests: 157 todo-gui, 35 todo-core, 22 todo-store, 13 todo-cli
 ```
 
-All workspace tests pass, including protocol round trips, view rebuilds from the
-log, and the CLI integration suite.
+`./dev check` passed after the live Dynamic-family update. A full `./dev test` run
+passed all 227 tests before the final rim-attachment guard. The next full run
+failed only `todo-cli`'s `simultaneous_readers_wait_for_the_local_ledger`:
+Turso reported that its temporary `ledger.db` was locked by another process.
+The failure does not implicate the GUI rendering code, but the **current full
+suite is not green** until that test is rerun successfully. The GUI unit tests
+passed in a subsequent focused run of
+`nix develop --command cargo test -p todo-gui --bin todo-gui` (155 passed,
+0 failed) after the Dynamic-family update. Do not silently treat the CLI lock
+as a passing test.
 
 The editor's own coverage is the pure layers only: `geometry.rs`, `theme.rs`,
 `palette.rs`, `tags.rs`, and free functions lifted out of `main.rs` for the
@@ -253,8 +416,8 @@ what to check there first:
   `blue_core` reads better than the `fill_core` default against a dark fill;
 - the three `family_view` states against a real ledger, especially Connected on
   a dense graph;
-- whether the parent-to-board stalk and the continuation chip read clearly at
-  different zoom levels;
+- whether a nearby aligned parent’s direct rim join reads as containment, and
+  whether a remote group remains legible with the ordinary family tree alone;
 - smooth versus card-shaped clouds over a single card, a row of matching cards,
   and overlapping unrelated tags; confirm labels stay with their clouds;
 - scroll-wheel and trackpad zoom on the canvas: it should stop as soon as the
@@ -311,10 +474,10 @@ These were considered and put off deliberately, not overlooked.
    may still need Unstack or manual adjustment.
 7. Tag inheritance walks the ancestor chain per task on each read. Fine at this
    size; an index would be the upgrade if a tree ever gets deep and wide.
-8. The three appearance questions TE-0015 left open after its trial: whether the
-   stalk and continuation shape read at all zooms, whether Focus should regain a
-   thin family breadcrumb, and whether one generation is the right default depth
-   on a large real ledger. All three need eyes on a running window, not a test.
+8. Visually review the new Dynamic experiment before wiring `n`, `m`, and
+   connector width into the live renderer. Separately decide whether Focus
+   should regain a thin family breadcrumb and whether All child depths remains
+   readable on a large real ledger. These need eyes on a running window.
 
 ## Protocol sequence
 

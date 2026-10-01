@@ -434,14 +434,25 @@ pub enum TagColoring {
     GroupHash,
 }
 
+/// How members of one tag-cloud body choose connection partners.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TagCloudLinkMode {
+    /// Each member connects to its nearest configured number of peers.
+    #[default]
+    Nearest,
+    /// Every pair closer than `cloud_link_radius` connects.
+    WithinRadius,
+}
+
 /// A hierarchy-aware color assignment over the tags currently visible.
 ///
 /// The hue wheel is divided evenly between visible top-level groups in
-/// alphabetical order. Each group's sector is then subdivided between its visible
-/// children, so the first child sits nearest the parent hue and the last sits
-/// furthest, while depth continues to darken. Colors are derived only from the
-/// visible tag tree, never from item ids or random state, so the same set of tags
-/// always paints the same way.
+/// alphabetical order. Descendants then divide a configurable portion of their
+/// top-level group's hue span; sorted siblings receive stable offsets within that
+/// related range, while depth can also adjust hue, saturation, and value. Colors are
+/// derived only from the visible tag tree, never from item ids or random state,
+/// so the same set of tags always paints the same way.
 #[derive(Clone, Debug, Default)]
 pub struct TagPalette {
     colors: HashMap<String, Color32>,
@@ -452,7 +463,9 @@ impl TagPalette {
     pub fn build<'a>(paths: impl IntoIterator<Item = &'a str>, theme: &TagTheme) -> Self {
         let mut children: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         let mut roots: BTreeSet<String> = BTreeSet::new();
+        let mut terminal_counts = HashMap::<String, usize>::new();
         for path in paths {
+            *terminal_counts.entry(path.to_owned()).or_default() += 1;
             let mut prefix = String::new();
             for segment in path.split('/') {
                 if prefix.is_empty() {
@@ -467,15 +480,36 @@ impl TagPalette {
             }
         }
         let mut colors = HashMap::new();
-        let count = roots.len();
-        let width = if count == 0 {
-            1.0
-        } else {
-            1.0 / f32::from(u16::try_from(count).unwrap_or(u16::MAX))
-        };
-        for (index, root) in roots.iter().enumerate() {
-            let start = f32::from(u16::try_from(index).unwrap_or(u16::MAX)) * width;
-            assign_sector(root, start, width, 0, &children, theme, &mut colors);
+        let mut weights = HashMap::new();
+        for root in &roots {
+            branch_weight(root, &children, &terminal_counts, &mut weights);
+        }
+        let total_weight = roots
+            .iter()
+            .map(|root| weights.get(root).copied().unwrap_or(1))
+            .sum::<usize>()
+            .max(1);
+        let total_weight = f32::from(u16::try_from(total_weight).unwrap_or(u16::MAX));
+        let mut start = 0.0;
+        for root in &roots {
+            let weight = f32::from(
+                u16::try_from(weights.get(root).copied().unwrap_or(1)).unwrap_or(u16::MAX),
+            );
+            let width = weight / total_weight;
+            let hue = start + width / 2.0;
+            assign_branch(
+                root,
+                hue,
+                width,
+                0,
+                &PaletteTree {
+                    children: &children,
+                    weights: &weights,
+                    theme,
+                },
+                &mut colors,
+            );
+            start += width;
         }
         Self { colors }
     }
@@ -492,39 +526,70 @@ impl TagPalette {
     }
 }
 
-/// Assigns a hue sector to one tag and subdivides it between that tag's children.
-fn assign_sector(
+/// Assigns one root hue, then divides a bounded portion of its hue span between
+/// descendants. The span narrows by branch, preserving relationship without
+/// making sibling differences imperceptible. Sorted paths make offsets stable.
+struct PaletteTree<'a> {
+    children: &'a BTreeMap<String, BTreeSet<String>>,
+    weights: &'a HashMap<String, usize>,
+    theme: &'a TagTheme,
+}
+
+fn assign_branch(
     path: &str,
-    start: f32,
-    width: f32,
+    hue: f32,
+    hue_span: f32,
     depth: usize,
-    children: &BTreeMap<String, BTreeSet<String>>,
-    theme: &TagTheme,
+    tree: &PaletteTree<'_>,
     colors: &mut HashMap<String, Color32>,
 ) {
-    colors.insert(path.to_owned(), theme.shade(start, depth));
-    let Some(next) = children.get(path) else {
+    colors.insert(path.to_owned(), tree.theme.shade(hue, depth));
+    let Some(next) = tree.children.get(path) else {
         return;
     };
-    let count = next.len();
-    if count == 0 {
-        return;
-    }
-    let step = width / f32::from(u16::try_from(count).unwrap_or(u16::MAX));
-    for (index, child) in next.iter().enumerate() {
-        let offset = f32::from(u16::try_from(index).unwrap_or(u16::MAX)) * step;
-        // The first child sits half a step from the parent hue and each later
-        // sibling drifts further, so siblings separate without leaving the sector.
-        assign_sector(
-            child,
-            start + offset + step / 2.0,
-            step,
-            depth + 1,
-            children,
-            theme,
-            colors,
+    let total_weight = next
+        .iter()
+        .map(|child| tree.weights.get(child).copied().unwrap_or(1))
+        .sum::<usize>()
+        .max(1);
+    let total_weight = f32::from(u16::try_from(total_weight).unwrap_or(u16::MAX));
+    let used_span = hue_span * tree.theme.branch_hue_spread;
+    let mut start = hue - used_span / 2.0;
+    for child in next {
+        let weight = f32::from(
+            u16::try_from(tree.weights.get(child).copied().unwrap_or(1)).unwrap_or(u16::MAX),
         );
+        let child_span = used_span * weight / total_weight;
+        let child_hue = start + child_span / 2.0 + hue_span * tree.theme.depth_hue_drift;
+        assign_branch(child, child_hue, child_span, depth + 1, tree, colors);
+        start += child_span;
     }
+}
+
+/// Counts visible terminal tag assignments beneath a path. The palette uses this
+/// as a visual population weight, letting dense visible branches occupy more hue
+/// span than a lone sibling while preserving deterministic path ordering.
+fn branch_weight(
+    path: &str,
+    children: &BTreeMap<String, BTreeSet<String>>,
+    terminal_counts: &HashMap<String, usize>,
+    weights: &mut HashMap<String, usize>,
+) -> usize {
+    if let Some(weight) = weights.get(path) {
+        return *weight;
+    }
+    let own = terminal_counts.get(path).copied().unwrap_or(0);
+    let descendants = children
+        .get(path)
+        .map(|next| {
+            next.iter()
+                .map(|child| branch_weight(child, children, terminal_counts, weights))
+                .sum::<usize>()
+        })
+        .unwrap_or(0);
+    let weight = own.saturating_add(descendants).max(1);
+    weights.insert(path.to_owned(), weight);
+    weight
 }
 
 /// Controls how task weight is computed and shown.
@@ -736,12 +801,11 @@ pub enum FamilyWellFill {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FamilyView {
-    /// Contain children that sit nearby, and fall back to a bounded board when
-    /// one is distant. The reading adapts to where the work actually is.
+    /// Contain children that sit nearby, and fall back to the family tree when
+    /// the frame would be too large or detached from its parent.
     #[default]
     Adaptive,
-    /// Frame every family, never capping into a board. Containment is the
-    /// structure, and a sprawling family is allowed to sprawl.
+    /// Frame every family, even if the full child span is wide.
     Boxed,
     /// Draw no frames at all. Families read only through their links, which
     /// suits a dense graph where boxes would tile over each other.
@@ -784,7 +848,16 @@ pub struct ParentTheme {
     pub child_style: FamilyChildStyle,
     /// Visible generations below a root; zero means all generations.
     pub child_depth: usize,
-    /// Maximum compact board width and height, in parent-card dimensions.
+    /// Direct children required before Dynamic draws a family box.
+    pub dynamic_min_children: usize,
+    /// Center-to-center distance that joins direct children into one Dynamic box.
+    pub dynamic_cluster_distance: f32,
+    /// Maximum card-to-rim gap for a Dynamic box to use a direct parent join.
+    pub parent_join_max_gap: f32,
+    /// Width of a direct parent join, as a fraction of parent-card width.
+    pub parent_join_width_ratio: f32,
+    /// Compatibility key retained so existing themes load. Dynamic grouping
+    /// uses `dynamic_min_children` and `dynamic_cluster_distance` instead.
     pub max_board_span: f32,
     /// Whether the child space is open or filled with a dark inset.
     pub well_fill: FamilyWellFill,
@@ -823,9 +896,13 @@ impl Default for ParentTheme {
             region_style: ParentRegionStyle::Box,
             header_style: FamilyHeaderStyle::AttachedTab,
             child_style: FamilyChildStyle::NestedFamily,
-            child_depth: 1,
+            child_depth: 0,
+            dynamic_min_children: 3,
+            dynamic_cluster_distance: 300.0,
+            parent_join_max_gap: 30.0,
+            parent_join_width_ratio: 0.30,
             max_board_span: 3.0,
-            well_fill: FamilyWellFill::Transparent,
+            well_fill: FamilyWellFill::Dark,
             clip_well_below_attached_tab: true,
             header_height: 18.0,
             nest_padding: 14.0,
@@ -883,6 +960,10 @@ pub struct TagTheme {
     pub min_value: f32,
     /// Ceiling for saturation, so deep tags do not turn garish.
     pub max_saturation: f32,
+    /// Fraction of a top-level group's hue span allocated to sorted sibling branches.
+    pub branch_hue_spread: f32,
+    /// Additional hue drift applied once per hierarchy level, relative to that branch's span.
+    pub depth_hue_drift: f32,
     /// Fill opacity of a tag region, out of 255.
     pub region_fill_alpha: u8,
     /// Outline opacity of a tag region, out of 255.
@@ -915,6 +996,20 @@ pub struct TagTheme {
     pub cluster_distance: f32,
     /// How many tasks a cluster needs before it is drawn as a region.
     pub min_region_members: usize,
+    /// Zero shows all tag hierarchy levels; a positive value limits cloud depth.
+    pub cloud_hierarchy_depth: usize,
+    /// How same-path cloud members choose their neighbors.
+    pub cloud_link_mode: TagCloudLinkMode,
+    /// Nearest peers per member when `cloud_link_mode = "nearest"`; zero draws no rails.
+    pub cloud_neighbor_count: usize,
+    /// Pair distance when `cloud_link_mode = "within_radius"`.
+    pub cloud_link_radius: f32,
+    /// Fill the local convex gaps between three or more same-path cloud members.
+    pub cloud_fill_gaps: bool,
+    /// Carve unrelated cards out of inherited hierarchy clouds.
+    pub cloud_cut_out_unrelated: bool,
+    /// Stroke the cut-out boundary around unrelated cards.
+    pub cloud_cutout_outline: bool,
     /// Whether the full tag path is drawn, rather than the last segment.
     pub label_full_path: bool,
     /// Font size of a region label.
@@ -932,6 +1027,8 @@ impl Default for TagTheme {
             depth_value_step: 0.13,
             min_value: 0.22,
             max_saturation: 0.85,
+            branch_hue_spread: 0.82,
+            depth_hue_drift: 0.04,
             region_fill_alpha: 26,
             region_stroke_alpha: 110,
             node_stripe_width: 7.0,
@@ -945,6 +1042,13 @@ impl Default for TagTheme {
             brightness: 1.15,
             cluster_distance: 420.0,
             min_region_members: 2,
+            cloud_hierarchy_depth: 0,
+            cloud_link_mode: TagCloudLinkMode::Nearest,
+            cloud_neighbor_count: 5,
+            cloud_link_radius: 280.0,
+            cloud_fill_gaps: true,
+            cloud_cut_out_unrelated: true,
+            cloud_cutout_outline: false,
             label_full_path: false,
             label_font_size: 11.0,
             label_min_width: 70.0,
@@ -990,11 +1094,14 @@ impl TagTheme {
 #[cfg(test)]
 mod tests {
     use super::{
-        CloudMemberShape, EdgeTheme, FamilyWellFill, NodeShape, NodeTheme, TagColoring, TagPalette,
-        TagTheme, Theme,
+        CloudMemberShape, EdgeTheme, FamilyWellFill, NodeShape, NodeTheme, TagCloudLinkMode,
+        TagColoring, TagPalette, TagTheme, Theme, branch_weight,
     };
     use eframe::egui::Color32;
-    use std::path::Path;
+    use std::{
+        collections::{BTreeMap, BTreeSet, HashMap},
+        path::Path,
+    };
 
     #[test]
     fn the_example_theme_files_parse() {
@@ -1014,6 +1121,13 @@ mod tests {
     }
 
     #[test]
+    fn all_child_generations_are_visible_by_default() {
+        assert_eq!(Theme::default().parent.child_depth, 0);
+        let parsed: Result<Theme, _> = toml::from_str("[parent]\nshow_regions = true\n");
+        assert!(matches!(parsed, Ok(theme) if theme.parent.child_depth == 0));
+    }
+
+    #[test]
     fn a_theme_round_trips_through_toml() {
         let theme = Theme::default();
         let restored = theme
@@ -1026,10 +1140,49 @@ mod tests {
     fn family_child_space_fill_is_configurable() {
         let parsed: Result<Theme, _> = toml::from_str("[parent]\nwell_fill = \"dark\"\n");
         assert!(matches!(parsed, Ok(theme) if theme.parent.well_fill == FamilyWellFill::Dark));
-        assert_eq!(
-            Theme::default().parent.well_fill,
-            FamilyWellFill::Transparent
+        assert_eq!(Theme::default().parent.well_fill, FamilyWellFill::Dark);
+    }
+
+    #[test]
+    fn dynamic_family_thresholds_are_configurable_with_the_reviewed_defaults() {
+        let defaults = Theme::default();
+        assert_eq!(defaults.parent.dynamic_min_children, 3);
+        assert_eq!(defaults.parent.dynamic_cluster_distance, 300.0);
+        assert_eq!(defaults.parent.parent_join_max_gap, 30.0);
+        assert_eq!(defaults.parent.parent_join_width_ratio, 0.30);
+
+        let parsed: Result<Theme, _> = toml::from_str(
+            "[parent]\ndynamic_min_children = 4\ndynamic_cluster_distance = 420.0\nparent_join_max_gap = 48.0\nparent_join_width_ratio = 0.5\n",
         );
+        assert!(matches!(parsed, Ok(theme)
+            if theme.parent.dynamic_min_children == 4
+                && theme.parent.dynamic_cluster_distance == 420.0
+                && theme.parent.parent_join_max_gap == 48.0
+                && theme.parent.parent_join_width_ratio == 0.5));
+    }
+
+    #[test]
+    fn hierarchical_cloud_controls_are_persisted_with_the_reviewed_defaults() {
+        let defaults = Theme::default();
+        assert_eq!(defaults.tag.cloud_hierarchy_depth, 0);
+        assert_eq!(defaults.tag.cloud_link_mode, TagCloudLinkMode::Nearest);
+        assert_eq!(defaults.tag.cloud_neighbor_count, 5);
+        assert!(defaults.tag.cloud_fill_gaps);
+        assert!(defaults.tag.cloud_cut_out_unrelated);
+        assert!(!defaults.tag.cloud_cutout_outline);
+
+        let parsed: Result<Theme, _> = toml::from_str(
+            "[tag]\ncloud_hierarchy_depth = 3\ncloud_link_mode = \"within_radius\"\ncloud_link_radius = 340.0\ncloud_fill_gaps = false\ncloud_cut_out_unrelated = false\ncloud_cutout_outline = true\nbranch_hue_spread = 0.08\ndepth_hue_drift = -0.01\n",
+        );
+        assert!(matches!(parsed, Ok(theme)
+            if theme.tag.cloud_hierarchy_depth == 3
+                && theme.tag.cloud_link_mode == TagCloudLinkMode::WithinRadius
+                && theme.tag.cloud_link_radius == 340.0
+                && !theme.tag.cloud_fill_gaps
+                && !theme.tag.cloud_cut_out_unrelated
+                && theme.tag.cloud_cutout_outline
+                && theme.tag.branch_hue_spread == 0.08
+                && theme.tag.depth_hue_drift == -0.01));
     }
 
     #[test]
@@ -1131,6 +1284,42 @@ mod tests {
         let third = palette.color("work/c", &theme);
         assert_ne!(first, second);
         assert_ne!(second, third);
+    }
+
+    #[test]
+    fn deep_sibling_leaves_remain_distinguishable() {
+        let theme = TagTheme::default();
+        let palette = TagPalette::build(
+            [
+                "work/cdint/api/transport/codec",
+                "work/cdint/api/transport/claude",
+            ],
+            &theme,
+        );
+        assert_ne!(
+            palette.color("work/cdint/api/transport/codec", &theme),
+            palette.color("work/cdint/api/transport/claude", &theme),
+        );
+    }
+
+    #[test]
+    fn visible_terminal_assignments_weight_a_branchs_hue_budget() {
+        let children = BTreeMap::from([(
+            "work".to_owned(),
+            BTreeSet::from(["work/dense".to_owned(), "work/sparse".to_owned()]),
+        )]);
+        let terminal_counts = HashMap::from([
+            ("work/dense".to_owned(), 5_usize),
+            ("work/sparse".to_owned(), 1_usize),
+        ]);
+        let mut weights = HashMap::new();
+        assert_eq!(
+            branch_weight("work", &children, &terminal_counts, &mut weights),
+            6
+        );
+        let dense = weights.get("work/dense").copied();
+        let sparse = weights.get("work/sparse").copied();
+        assert!(matches!((dense, sparse), (Some(dense), Some(sparse)) if dense > sparse));
     }
 
     #[test]

@@ -583,51 +583,6 @@ pub fn cluster_points(points: &[Pos2], max_distance: f32) -> Vec<Vec<Pos2>> {
         .collect()
 }
 
-/// Connects a cluster with its shortest possible set of links.
-///
-/// The cloud renderer paints these links as soft tubes behind each member's
-/// circle, so a shared tag reads as one organism without a pixelated fill.
-pub fn minimum_spanning_links(points: &[Pos2]) -> Vec<(Pos2, Pos2)> {
-    if points.len() < 2 {
-        return Vec::new();
-    }
-    let mut candidates = Vec::new();
-    for (left_index, left) in points.iter().enumerate() {
-        for (right_index, right) in points.iter().enumerate().skip(left_index + 1) {
-            candidates.push(((*left - *right).length_sq(), left_index, right_index));
-        }
-    }
-    candidates.sort_by(|left, right| {
-        left.0
-            .total_cmp(&right.0)
-            .then_with(|| left.1.cmp(&right.1))
-            .then_with(|| left.2.cmp(&right.2))
-    });
-    let mut parent = (0..points.len()).collect::<Vec<_>>();
-    fn find(parent: &mut [usize], index: usize) -> usize {
-        let mut root = index;
-        while parent.get(root).copied().unwrap_or(root) != root {
-            root = parent.get(root).copied().unwrap_or(root);
-        }
-        root
-    }
-    let mut links = Vec::with_capacity(points.len().saturating_sub(1));
-    for (_, left, right) in candidates {
-        let left_root = find(&mut parent, left);
-        let right_root = find(&mut parent, right);
-        if left_root == right_root {
-            continue;
-        }
-        if let Some(slot) = parent.get_mut(right_root) {
-            *slot = left_root;
-        }
-        if let (Some(first), Some(second)) = (points.get(left), points.get(right)) {
-            links.push((*first, *second));
-        }
-    }
-    links
-}
-
 /// Strength and reach of the overlap relaxation pass.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct OverlapSpacing {
@@ -1094,9 +1049,9 @@ mod tests {
         SeparationSpacing, TimelineAxis, TimelineScale, TimelineSpacing, TreeAxis, TreeSpacing,
         arrowhead_points, banded_positions, boundary_point, centroid, cluster_points, convex_hull,
         duration_length, ease_toward, edge_between, expand_path, fit_view, grouped_positions,
-        is_settled, layered_positions, minimum_spanning_links, pack_tree_families, relax_overlaps,
-        ruler_ticks, separate_groups, shaft_end, smooth_closed_path, timeline_positions,
-        tree_positions, tree_positions_at_levels, zoom_about,
+        is_settled, layered_positions, pack_tree_families, relax_overlaps, ruler_ticks,
+        separate_groups, shaft_end, smooth_closed_path, timeline_positions, tree_positions,
+        tree_positions_at_levels, zoom_about,
     };
     use eframe::egui::{Pos2, Rect, Vec2, pos2};
     use std::collections::HashMap;
@@ -1510,12 +1465,6 @@ mod tests {
         let clusters = cluster_points(&points, 100.0);
         assert_eq!(clusters.len(), 2);
         assert!(clusters.iter().all(|cluster| cluster.len() == 2));
-    }
-
-    #[test]
-    fn cloud_links_connect_every_member_once() {
-        let points = [pos2(0.0, 0.0), pos2(20.0, 0.0), pos2(200.0, 0.0)];
-        assert_eq!(minimum_spanning_links(&points).len(), 2);
     }
 
     #[test]

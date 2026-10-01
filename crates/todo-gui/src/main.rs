@@ -1,5 +1,6 @@
 //! Native graph editor for the local Todo Ledger.
 
+mod appearance_lab;
 mod geometry;
 mod palette;
 mod tags;
@@ -18,7 +19,7 @@ use tags::{TagFilter, TagFilterState};
 use theme::{
     Channel, CloudMemberShape, ConnectorStyle, FamilyChildStyle, FamilyHeaderStyle, FamilyView,
     FamilyWellFill, InspectorTheme, NodeShape, NormalizeStyle, ParentRegionStyle, RegionShape,
-    TagColoring, TagInheritance, TagPalette, Theme,
+    TagCloudLinkMode, TagColoring, TagInheritance, TagPalette, Theme,
 };
 use todo_core::{ItemId, ItemState, NamespacePath, Priority, RelationKind, WeightInputs};
 use todo_store::{
@@ -233,6 +234,7 @@ struct TodoGui {
     show_filters: bool,
     show_inspector: bool,
     show_appearance_lab: bool,
+    appearance_lab: appearance_lab::LabState,
 }
 
 /// A local presentation override for one parent family. It belongs to the GUI
@@ -269,15 +271,6 @@ struct LayoutUndo {
 }
 
 impl TodoGui {
-    fn family_view_for(&self, parent: &str) -> FamilyView {
-        match self.family_presentations.get(parent).copied() {
-            Some(FamilyPresentation::Dynamic) => FamilyView::Adaptive,
-            Some(FamilyPresentation::Box) => FamilyView::Boxed,
-            Some(FamilyPresentation::Tree) => FamilyView::Connected,
-            None => self.theme.parent.family_view,
-        }
-    }
-
     fn new(runtime: Runtime, ledger: Ledger, layout_path: PathBuf, theme_path: PathBuf) -> Self {
         let saved_layout = load_layout(&layout_path);
         let node_offsets = saved_layout
@@ -371,6 +364,7 @@ impl TodoGui {
             show_filters: true,
             show_inspector: true,
             show_appearance_lab: false,
+            appearance_lab: appearance_lab::LabState::default(),
         };
         app.refresh();
         app
@@ -704,6 +698,64 @@ impl TodoGui {
             });
         });
         ui.weak("Card clouds follow each task card and connect with square-ended rails.");
+        ui.add(
+            egui::Slider::new(&mut self.theme.tag.cloud_hierarchy_depth, 0..=8)
+                .custom_formatter(|depth, _| {
+                    if depth == 0.0 {
+                        "All".to_owned()
+                    } else {
+                        format!("{depth:.0}")
+                    }
+                })
+                .text("Cloud hierarchy depth"),
+        );
+        ui.add(
+            egui::Slider::new(&mut self.theme.tag.branch_hue_spread, 0.0..=1.0)
+                .text("Sibling hue span"),
+        );
+        ui.add(
+            egui::Slider::new(&mut self.theme.tag.depth_hue_drift, -0.08..=0.08)
+                .text("Depth hue drift"),
+        );
+        ui.horizontal(|ui| {
+            ui.label("Cloud links");
+            ui.selectable_value(
+                &mut self.theme.tag.cloud_link_mode,
+                TagCloudLinkMode::Nearest,
+                "Nearest",
+            );
+            ui.selectable_value(
+                &mut self.theme.tag.cloud_link_mode,
+                TagCloudLinkMode::WithinRadius,
+                "Within radius",
+            );
+        });
+        ui.add_enabled_ui(
+            self.theme.tag.cloud_link_mode == TagCloudLinkMode::Nearest,
+            |ui| {
+                ui.add(
+                    egui::Slider::new(&mut self.theme.tag.cloud_neighbor_count, 0..=12)
+                        .text("Nearest neighbors"),
+                );
+            },
+        );
+        ui.add_enabled_ui(
+            self.theme.tag.cloud_link_mode == TagCloudLinkMode::WithinRadius,
+            |ui| {
+                ui.add(
+                    egui::Slider::new(&mut self.theme.tag.cloud_link_radius, 20.0..=800.0)
+                        .text("Link radius"),
+                );
+            },
+        );
+        ui.checkbox(&mut self.theme.tag.cloud_fill_gaps, "Fill local cloud gaps");
+        ui.checkbox(
+            &mut self.theme.tag.cloud_cut_out_unrelated,
+            "Cut out unrelated hierarchy clouds",
+        );
+        ui.add_enabled_ui(self.theme.tag.cloud_cut_out_unrelated, |ui| {
+            ui.checkbox(&mut self.theme.tag.cloud_cutout_outline, "Outline cutouts");
+        });
         ui.separator();
         ui.label("Task families");
         egui::ComboBox::from_id_salt("family-header-style")
@@ -761,10 +813,27 @@ impl TodoGui {
             &mut self.theme.parent.clip_well_below_attached_tab,
             "Keep child fill below attached card",
         );
+        ui.label("Dynamic family boxes");
         ui.add(
-            egui::Slider::new(&mut self.theme.parent.max_board_span, 1.0..=8.0)
-                .text("Maximum family span"),
+            egui::Slider::new(&mut self.theme.parent.dynamic_min_children, 1..=12)
+                .text("Children required (n)"),
         );
+        ui.add(
+            egui::Slider::new(
+                &mut self.theme.parent.dynamic_cluster_distance,
+                20.0..=800.0,
+            )
+            .text("Cluster range (m)"),
+        );
+        ui.add(
+            egui::Slider::new(&mut self.theme.parent.parent_join_max_gap, 0.0..=240.0)
+                .text("Parent-to-rim gap"),
+        );
+        ui.add(
+            egui::Slider::new(&mut self.theme.parent.parent_join_width_ratio, 0.0..=1.5)
+                .text("Parent join / card width"),
+        );
+        ui.weak("Dynamic boxes use n and m. A nearby aligned box joins its parent rim; other boxes keep the normal family tree.");
         ui.add(
             egui::Slider::new(&mut self.theme.parent.outline_weight, 1.0..=5.0)
                 .text("Parent outline weight"),
@@ -2556,223 +2625,10 @@ impl TodoGui {
         }
     }
 
-    /// A fixed, ledger-free scene for tuning live presentation values.
+    /// Fixed comparisons for reviewing graph appearance before changing the live renderer.
     fn draw_appearance_lab(&mut self, ctx: &egui::Context) {
-        if !self.show_appearance_lab {
-            return;
-        }
-        egui::Window::new("Appearance Lab")
-            .default_size(Vec2::new(880.0, 610.0))
-            .resizable(true)
-            .show(ctx, |ui| {
-                ui.label("Fixed exemplar — controls in Appearance update this scene live.");
-                ui.weak("tag clouds · parent outline · outline anchor · family tree · dependency arrow · hidden children");
-                let (rect, _) = ui.allocate_exact_size(ui.available_size(), Sense::hover());
-                let painter = ui.painter_at(rect);
-                let scale = appearance_lab_scale(rect.size());
-                let zoom = 0.8 * scale;
-                let origin = rect.left_top() + Vec2::splat(18.0 * scale);
-                let point = |x, y| origin + Vec2::new(x, y) * scale;
-                let size = |width, height| Vec2::new(width, height) * scale;
-                let parent = Rect::from_center_size(point(205.0, 58.0), size(190.0, 64.0));
-                let child_a = Rect::from_center_size(point(112.0, 246.0), size(165.0, 62.0));
-                let child_b = Rect::from_center_size(point(308.0, 246.0), size(165.0, 62.0));
-                let grandchild = Rect::from_center_size(point(308.0, 358.0), size(160.0, 60.0));
-                let detached = Rect::from_center_size(point(575.0, 70.0), size(175.0, 62.0));
-                let remote = Rect::from_center_size(point(700.0, 300.0), size(165.0, 66.0));
-                let well = Rect::from_min_max(point(30.0, 126.0), point(390.0, 405.0));
-                let body = well.expand(18.0 * scale);
-                let nested_well = Rect::from_min_max(point(218.0, 285.0), point(395.0, 405.0));
-                let nested_body = nested_well.expand(12.0 * scale);
-                let tag = Color32::from_rgb(105, 205, 216);
-                let alternate_tag = Color32::from_rgb(226, 139, 98);
-                let (fill, well_fill, edge) = family_colors(tag);
-                let outer_stroke = Stroke::new(
-                    (self.theme.parent.stroke_width * self.theme.parent.outline_weight * zoom)
-                        .max(1.0),
-                    edge,
-                );
-                let rounding = self.theme.parent.corner_radius * zoom;
-
-                // Paint clouds before family structure, as on the real canvas.
-                let draw_cloud = |card: Rect, color: Color32| {
-                    let cloud = cloud_pastel(color, ui.visuals().panel_fill);
-                    let member = card.expand(self.theme.tag.region_padding * zoom);
-                    match self.theme.tag.cloud_member_shape {
-                        CloudMemberShape::Circle => painter.circle_filled(
-                            member.center(),
-                            member.size().length() / 2.0,
-                            cloud,
-                        ),
-                        CloudMemberShape::Card => painter.rect_filled(
-                            member,
-                            app_cloud_rounding(&self.theme, zoom),
-                            cloud,
-                        ),
-                    }
-                };
-                let member_a = child_a.expand(self.theme.tag.region_padding * zoom);
-                let member_b = child_b.expand(self.theme.tag.region_padding * zoom);
-                let cloud = cloud_pastel(tag, ui.visuals().panel_fill);
-                painter.line_segment(
-                    [member_a.center(), member_b.center()],
-                    Stroke::new(member_a.height().min(member_b.height()) * 0.8, cloud),
-                );
-                for card in [parent, child_a, child_b, grandchild] {
-                    draw_cloud(card, tag);
-                }
-                draw_cloud(detached, alternate_tag);
-                draw_cloud(remote, alternate_tag);
-
-                match self.theme.parent.well_fill {
-                    FamilyWellFill::Transparent => {
-                        draw_family_ring(&painter, body, well, rounding, fill);
-                        painter.rect_stroke(
-                            well,
-                            rounding * 0.7,
-                            Stroke::new(zoom.max(1.0), fill),
-                            egui::StrokeKind::Outside,
-                        );
-                    }
-                    FamilyWellFill::Dark => {
-                        painter.rect_filled(body, rounding, fill);
-                        painter.rect_filled(nested_body, rounding * 0.7, well_fill);
-                        painter.rect_filled(well, rounding * 0.7, well_fill);
-                    }
-                }
-                painter.rect_stroke(body, rounding, outer_stroke, egui::StrokeKind::Outside);
-                painter.rect_filled(nested_body, rounding * 0.7, fill);
-                painter.rect_stroke(
-                    nested_body,
-                    rounding * 0.7,
-                    Stroke::new(outer_stroke.width * 0.75, edge),
-                    egui::StrokeKind::Outside,
-                );
-                if self.theme.parent.child_style == FamilyChildStyle::RecessedBoard {
-                    painter.rect_stroke(
-                        well,
-                        rounding * 0.7,
-                        Stroke::new((1.5 * zoom).max(1.0), edge),
-                        egui::StrokeKind::Inside,
-                    );
-                }
-
-                draw_family_tree(
-                    &painter,
-                    parent,
-                    None,
-                    &[child_a, child_b],
-                    0,
-                    zoom,
-                    geometry::TreeAxis::Down,
-                    fill,
-                    self.theme.parent.connector_style,
-                    &[well, nested_well],
-                );
-                draw_family_tree(
-                    &painter,
-                    child_b,
-                    None,
-                    &[grandchild],
-                    1,
-                    zoom,
-                    geometry::TreeAxis::Down,
-                    fill,
-                    self.theme.parent.connector_style,
-                    &[well, nested_well],
-                );
-                // This direct arrow intentionally coexists with a family tree
-                // so the two relationship types can be compared in one scene.
-                let (dependency_start, dependency_end) =
-                    geometry::edge_between(child_a, child_b, 8.0 * scale);
-                draw_edge(
-                    &painter,
-                    dependency_start,
-                    dependency_end,
-                    Color32::from_rgb(75, 142, 210),
-                    &self.theme,
-                    zoom,
-                );
-
-                let remote_well = Rect::from_center_size(point(570.0, 220.0), size(185.0, 82.0));
-                let remote_body = remote_well.expand(12.0 * scale);
-                painter.rect_filled(remote_body, rounding, family_colors(alternate_tag).0);
-                painter.rect_stroke(
-                    remote_body,
-                    rounding,
-                    Stroke::new(outer_stroke.width, family_colors(alternate_tag).2),
-                    egui::StrokeKind::Outside,
-                );
-                draw_board_attachment(
-                    &painter,
-                    detached,
-                    remote_well,
-                    zoom,
-                    family_colors(alternate_tag).0,
-                    self.theme.parent.connector_style,
-                );
-                let (remote_start, remote_end) =
-                    geometry::edge_between(remote_well, remote, 8.0 * scale);
-                draw_edge(
-                    &painter,
-                    remote_start,
-                    remote_end,
-                    Color32::from_rgb(75, 142, 210),
-                    &self.theme,
-                    zoom,
-                );
-
-                for (card, label, selected) in [
-                    (parent, "parent task", true),
-                    (child_a, "child A", false),
-                    (child_b, "child B", false),
-                    (grandchild, "nested child", false),
-                    (detached, "detached parent", false),
-                    (remote, "remote child", false),
-                ] {
-                    let outline = Stroke::new(
-                        (if selected { 3.0 } else { 2.0 }) * scale,
-                        if selected { Color32::GOLD } else { tag },
-                    );
-                    draw_node_body(
-                        &painter,
-                        card,
-                        Color32::from_rgb(65, 70, 97),
-                        outline,
-                        Some(if card == detached || card == remote { alternate_tag } else { tag }),
-                        &self.theme,
-                        scale,
-                    );
-                    painter.text(
-                        card.center(),
-                        Align2::CENTER_CENTER,
-                        label,
-                        FontId::proportional(13.0 * scale),
-                        Color32::WHITE,
-                    );
-                }
-                let hidden_marker = Rect::from_center_size(
-                    parent.center_bottom() + Vec2::new(0.0, 6.0 * scale),
-                    size(26.0, 13.0),
-                );
-                painter.rect_filled(hidden_marker, 7.0 * scale, Color32::from_rgb(61, 68, 89));
-                painter.text(
-                    hidden_marker.center(),
-                    Align2::CENTER_CENTER,
-                    "…",
-                    FontId::proportional(14.0 * scale),
-                    Color32::WHITE,
-                );
-                painter.text(
-                    point(8.0, 430.0),
-                    Align2::LEFT_TOP,
-                    "Gold outline: selected  •  blue arrow: dependency  •  …: hidden children",
-                    FontId::proportional(12.0 * scale),
-                    ui.visuals().weak_text_color(),
-                );
-            });
+        appearance_lab::show(ctx, &mut self.show_appearance_lab, &mut self.appearance_lab);
     }
-
     fn save_layout(&mut self) {
         let layout = LocalGraphLayout {
             node_offsets: self
@@ -3327,14 +3183,6 @@ impl TodoGui {
     }
 }
 
-/// Keeps the complete fixed exemplar visible in a resized lab window. The
-/// lower bound remains large enough for its relationship marks to be useful.
-fn appearance_lab_scale(available: Vec2) -> f32 {
-    (available.x / 840.0)
-        .min(available.y / 470.0)
-        .clamp(0.45, 1.0)
-}
-
 /// Returns the weeks of a month as rows of seven days, Monday first.
 ///
 /// Days outside the month are `None`, so a caller can lay out a grid without
@@ -3578,7 +3426,7 @@ impl eframe::App for TodoGui {
                 ui.separator();
                 ui.toggle_value(&mut self.show_filters, "Filters");
                 ui.toggle_value(&mut self.show_inspector, "Inspector");
-                ui.toggle_value(&mut self.show_appearance_lab, "Appearance Lab");
+                ui.toggle_value(&mut self.show_appearance_lab, "Graph design tree");
                 ui.separator();
                 ui.label("Search");
                 let search = ui.add(
@@ -3813,11 +3661,10 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
             &layouts,
             &app.theme,
             app.graph_zoom,
-            &app.expanded_families,
             &app.family_presentations,
         )
     } else {
-        HashMap::new()
+        Vec::new()
     };
     let rendered_positions = layouts
         .iter()
@@ -3850,54 +3697,6 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
             );
         } else if !boxes.is_empty() {
             draw_family_boxes(&painter, app, &items, &boxes, &palette, &effective);
-            for (id, family) in &boxes {
-                if app.family_view_for(id) == FamilyView::Connected {
-                    continue;
-                }
-                // An open family has no drawn well to attach to; its family
-                // links already run to the cards themselves.
-                if let Some(parent) = layouts.get(id)
-                    && !family.attached_parent
-                    && !app.expanded_families.contains(id)
-                {
-                    draw_board_attachment(
-                        &painter,
-                        parent.rect,
-                        family.well,
-                        app.graph_zoom,
-                        fill_of(id),
-                        connector_style,
-                    );
-                }
-                if family.oversized {
-                    let chip = Rect::from_min_size(
-                        family.body.right_bottom()
-                            - Vec2::new(150.0 * app.graph_zoom, 31.0 * app.graph_zoom),
-                        Vec2::new(140.0, 25.0) * app.graph_zoom,
-                    );
-                    let button = ui.interact(
-                        chip,
-                        ui.make_persistent_id(("family-board", id)),
-                        Sense::click(),
-                    );
-                    painter.rect_filled(chip, 7.0, Color32::from_rgb(62, 67, 82));
-                    painter.text(
-                        chip.center(),
-                        Align2::CENTER_CENTER,
-                        if family.capped {
-                            format!("{} children · open", family.descendant_count)
-                        } else {
-                            "Compact board".to_owned()
-                        },
-                        FontId::proportional(11.0 * app.graph_zoom),
-                        Color32::WHITE,
-                    );
-                    if button.clicked() {
-                        app.toggle_family_expanded(id, rect);
-                        ui.ctx().request_repaint();
-                    }
-                }
-            }
         }
     }
     if app.show_focus_window && app.theme.focus.show_frame {
@@ -3926,7 +3725,7 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
     // Cards are sized before any edge is drawn, so an arrow can be aimed at the
     // rectangle a card actually occupies rather than at an assumed size.
     let rect_of = |id: &str| layouts.get(id).map(|layout| layout.rect);
-    let family_wells = boxes.values().map(|family| family.well).collect::<Vec<_>>();
+    let family_wells = boxes.iter().map(|family| family.well).collect::<Vec<_>>();
     let mut clicked = None;
     if show_hierarchy {
         let mut family_children = HashMap::<String, Vec<Rect>>::new();
@@ -3953,10 +3752,10 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
             draw_family_tree(
                 &painter,
                 parent,
-                boxes.get(&parent_id).and_then(|family| {
-                    (!family.attached_parent)
-                        .then(|| geometry::boundary_point(family.well, parent.center()))
-                }),
+                boxes
+                    .iter()
+                    .find(|family| family.parent_id == parent_id && family.direct_join)
+                    .map(|family| geometry::boundary_point(family.well, parent.center())),
                 &children,
                 depth,
                 app.graph_zoom,
@@ -4100,7 +3899,8 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
         .unwrap_or(status);
         // A parent is the visible tab of its own family body. Sharing one opaque
         // fill joins the two pieces without a translucent overlap seam.
-        let fill = if boxes.contains_key(&id) {
+        let owns_family_box = boxes.iter().any(|family| family.parent_id == id);
+        let fill = if owns_family_box {
             family_colors(accent.unwrap_or(Color32::from_gray(150))).0
         } else {
             fill
@@ -4159,10 +3959,10 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
         // differently colored child keeps the normal outline for contrast.
         let shares_family_fill = accent.is_some_and(|accent| {
             let own_family_fill = family_colors(accent).0;
-            boxes.iter().any(|(parent, family)| {
-                parent != &id
+            boxes.iter().any(|family| {
+                family.parent_id != id
                     && family.well.contains(node.center())
-                    && fill_of(parent) == own_family_fill
+                    && fill_of(&family.parent_id) == own_family_fill
             })
         });
         let border = if !selected && shares_family_fill {
@@ -4224,7 +4024,7 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
             &app.theme,
             app.graph_zoom,
         );
-        if boxes.contains_key(&id)
+        if owns_family_box
             && app.theme.parent.header_style == FamilyHeaderStyle::AttachedTab
             && app.theme.node.shape == NodeShape::RoundedRect
         {
@@ -4303,7 +4103,7 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
         {
             // A container carries its subtree, so every member's starting offset is
             // captured here and each frame places them relative to it.
-            let moving = if boxes.contains_key(&id) {
+            let moving = if owns_family_box {
                 collect_subtree(&id, &child_index)
             } else {
                 vec![id.clone()]
@@ -4452,29 +4252,6 @@ fn draw_node_body(
             painter.rect_stroke(node, rounding, outline, egui::StrokeKind::Outside);
         }
     }
-}
-
-/// The card owns its board even if its position is between its children.
-/// A short stalk ending at the well is distinct from dependency arrows.
-fn draw_board_attachment(
-    painter: &egui::Painter,
-    parent: Rect,
-    well: Rect,
-    zoom: f32,
-    fill: Color32,
-    style: ConnectorStyle,
-) {
-    let toward = well.center();
-    let start = geometry::boundary_point(parent, toward);
-    let end = geometry::boundary_point(well, parent.center());
-    if (end - start).length() < 3.0 * zoom {
-        return;
-    }
-    // A detached parent needs a visually primary bridge to its child outline.
-    // This is the Outline Anchor, intentionally heavier than tree branches.
-    let (casing, core) = connector_strokes(fill, style, 6.0 * zoom, zoom);
-    painter.line_segment([start, end], casing);
-    painter.line_segment([start, end], core);
 }
 
 /// The shared blue every family connector carries, so a link reads as a link
@@ -5095,17 +4872,16 @@ fn limit_child_depth(
 }
 
 /// Family body and the descendant space it encloses.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct FamilyBox {
+    parent_id: String,
     body: Rect,
     well: Rect,
-    /// A card-width structural strip for a nearby parent tab. Keeping it
-    /// separate prevents the child's broad frame from becoming a dark slab.
+    /// A configurable-width structural strip for a nearby parent. Detached
+    /// boxes deliberately have no bespoke anchor: the ordinary family tree
+    /// remains the one visual language for their connection.
     attachment: Option<Rect>,
-    attached_parent: bool,
-    oversized: bool,
-    capped: bool,
-    descendant_count: usize,
+    direct_join: bool,
 }
 
 /// A family uses one body, with the real parent card projecting as its tab.
@@ -5114,7 +4890,7 @@ fn draw_family_boxes(
     painter: &egui::Painter,
     app: &TodoGui,
     items: &[StoredItem],
-    boxes: &HashMap<String, FamilyBox>,
+    boxes: &[FamilyBox],
     palette: &TagPalette,
     effective: &HashMap<String, Vec<String>>,
 ) {
@@ -5123,24 +4899,22 @@ fn draw_family_boxes(
     // flash above and below one another; structural depth is stable instead.
     let mut ordered = boxes.iter().collect::<Vec<_>>();
     ordered.sort_by(|left, right| {
-        let depth = |id: &String| {
+        let depth = |id: &str| {
             items
                 .iter()
-                .find(|item| item.item.id.to_string() == *id)
+                .find(|item| item.item.id.to_string() == id)
                 .map_or(usize::MAX, |item| ancestor_depth(item, items))
         };
-        depth(left.0)
-            .cmp(&depth(right.0))
-            .then_with(|| left.0.cmp(right.0))
+        depth(&left.parent_id)
+            .cmp(&depth(&right.parent_id))
+            .then_with(|| left.parent_id.cmp(&right.parent_id))
+            .then_with(|| left.body.min.x.total_cmp(&right.body.min.x))
     });
     let children = child_index(items);
-    for (id, family) in ordered {
-        if app.family_view_for(id) == FamilyView::Connected {
-            continue;
-        }
+    for family in ordered {
         let Some(item) = items
             .iter()
-            .find(|candidate| candidate.item.id.to_string() == *id)
+            .find(|candidate| candidate.item.id.to_string() == family.parent_id)
         else {
             continue;
         };
@@ -5159,8 +4933,8 @@ fn draw_family_boxes(
         // Once a family is open its own cards carry the structure, so the fill
         // is only clutter over them. The boundary returns as a dashed outline
         // while the family is being moved, which is when its extent matters.
-        if app.expanded_families.contains(id) {
-            if dragging_family(app, id, &children) {
+        if app.expanded_families.contains(&family.parent_id) {
+            if dragging_family(app, &family.parent_id, &children) {
                 draw_dashed_rect(painter, family.body, rounding, stroke);
             }
             continue;
@@ -5486,13 +5260,32 @@ fn collect_subtree(root: &str, children: &HashMap<String, Vec<String>>) -> Vec<S
 }
 
 /// One disconnected body of a tag family in the current visible graph.
+#[derive(Clone)]
 struct TagCloud {
     path: String,
     points: Vec<Pos2>,
     /// The actual measured card bounds, retained so card clouds cover wrapped
     /// cards instead of a generic nominal card size.
-    members: Vec<Rect>,
+    members: Vec<TagCloudMember>,
+    /// Cards that do not carry this hierarchy path. Their nearest valid tag
+    /// field is restored when this cloud crosses them, rather than exposing the
+    /// canvas and making an apparent untagged hole.
+    foreign_members: Vec<TagCloudFallback>,
     color: Color32,
+}
+
+#[derive(Clone)]
+struct TagCloudFallback {
+    rect: Rect,
+    colors: Vec<Color32>,
+}
+
+#[derive(Clone)]
+struct TagCloudMember {
+    rect: Rect,
+    /// Independent leaf-tag colors carried by this card. Several colors are
+    /// rendered as cloud bands, never as a new card decoration.
+    colors: Vec<Color32>,
 }
 
 fn draw_tag_constellation(
@@ -5504,7 +5297,8 @@ fn draw_tag_constellation(
     palette: &TagPalette,
     effective: &HashMap<String, Vec<String>>,
 ) {
-    let mut groups: HashMap<String, Vec<Rect>> = HashMap::new();
+    let mut groups: HashMap<String, Vec<TagCloudMember>> = HashMap::new();
+    let mut cards = Vec::<(Rect, Vec<String>, Vec<Color32>)>::new();
     for item in items {
         let id = item.item.id.to_string();
         let Some(layout) = layouts.get(&id) else {
@@ -5512,15 +5306,40 @@ fn draw_tag_constellation(
         };
         let empty = Vec::new();
         let carried = effective.get(&id).unwrap_or(&empty);
-        // A card has one cloud family: the deepest tag is already what its accent
-        // represents. Drawing every ancestor as another cloud made one card blend
-        // several colors and obscured where neighboring families should repel.
-        let tag = carried
-            .iter()
-            .max_by_key(|tag| tag.matches('/').count())
-            .cloned()
-            .unwrap_or_else(|| "(untagged)".to_owned());
-        groups.entry(tag).or_default().push(layout.rect);
+        let carried = carried.clone();
+        let colors = independent_tag_colors(&carried, palette, &theme.tag);
+        cards.push((layout.rect, carried.clone(), colors.clone()));
+        if carried.is_empty() {
+            groups
+                .entry("(untagged)".to_owned())
+                .or_default()
+                .push(TagCloudMember {
+                    rect: layout.rect,
+                    colors,
+                });
+            continue;
+        }
+        let mut paths = std::collections::HashSet::new();
+        for tag in &carried {
+            let mut prefix = String::new();
+            for (depth, segment) in tag.split('/').enumerate() {
+                if !prefix.is_empty() {
+                    prefix.push('/');
+                }
+                prefix.push_str(segment);
+                let shown =
+                    theme.tag.cloud_hierarchy_depth == 0 || depth < theme.tag.cloud_hierarchy_depth;
+                if shown {
+                    paths.insert(prefix.clone());
+                }
+            }
+        }
+        for path in paths {
+            groups.entry(path).or_default().push(TagCloudMember {
+                rect: layout.rect,
+                colors: colors.clone(),
+            });
+        }
     }
     let mut paths = groups.keys().cloned().collect::<Vec<_>>();
     paths.sort();
@@ -5538,7 +5357,10 @@ fn draw_tag_constellation(
         } else {
             palette.color(&path, &theme.tag)
         };
-        let points = members.iter().map(Rect::center).collect::<Vec<_>>();
+        let points = members
+            .iter()
+            .map(|member| member.rect.center())
+            .collect::<Vec<_>>();
         for cluster in geometry::cluster_points(&points, theme.tag.cluster_distance * zoom) {
             if cluster.len() < theme.tag.min_region_members
                 && theme.tag.region_shape != RegionShape::Cloud
@@ -5549,10 +5371,22 @@ fn draw_tag_constellation(
                 path: path.clone(),
                 members: members
                     .iter()
-                    .copied()
-                    .filter(|member| cluster.contains(&member.center()))
+                    .filter(|member| cluster.contains(&member.rect.center()))
+                    .cloned()
                     .collect(),
                 points: cluster,
+                foreign_members: cards
+                    .iter()
+                    .filter_map(|(rect, tags, colors)| {
+                        let carries_path = tags
+                            .iter()
+                            .any(|tag| tag == &path || tag.starts_with(&(path.clone() + "/")));
+                        (!carries_path).then(|| TagCloudFallback {
+                            rect: *rect,
+                            colors: fallback_tag_colors(tags, colors, &path, palette, &theme.tag),
+                        })
+                    })
+                    .collect(),
                 color,
             });
         }
@@ -5564,7 +5398,41 @@ fn draw_tag_constellation(
         draw_legacy_tag_regions(painter, &clouds, half_size, theme, zoom);
         return;
     }
+    clouds.sort_by(|left, right| {
+        left.path
+            .matches('/')
+            .count()
+            .cmp(&right.path.matches('/').count())
+            .then_with(|| right.members.len().cmp(&left.members.len()))
+            .then_with(|| left.path.cmp(&right.path))
+    });
     draw_clean_tag_clouds(painter, &clouds, theme, zoom);
+    if theme.tag.cloud_cut_out_unrelated {
+        // A deep cloud can legitimately cut through a different hierarchy's
+        // shallow cloud. Redraw leaf clouds last so every task keeps the cloud
+        // of the most specific tag it actually carries.
+        let mut leaves = clouds
+            .iter()
+            .filter(|cloud| {
+                !clouds
+                    .iter()
+                    .any(|other| other.path.starts_with(&(cloud.path.clone() + "/")))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        leaves.sort_by(|left, right| {
+            right
+                .members
+                .len()
+                .cmp(&left.members.len())
+                .then_with(|| left.path.cmp(&right.path))
+        });
+        draw_clean_tag_clouds(painter, &leaves, theme, zoom);
+    }
+    // A mixed field is an item-level fact, not one fact per inherited ancestor.
+    // Draw it once above the solid hierarchy layers so parent circles stay
+    // readable rather than accumulating repeated stripe textures.
+    draw_multi_tag_cloud_members(painter, &cards, theme, zoom);
 }
 
 /// Draws the older rectangle and hull modes without changing their saved meaning.
@@ -5620,26 +5488,36 @@ fn draw_clean_tag_clouds(painter: &egui::Painter, clouds: &[TagCloud], theme: &T
     let backdrop = context.style_of(context.theme()).visuals.panel_fill;
     for cloud in clouds {
         let fill = cloud_pastel(cloud.color, backdrop);
+        let padding = cloud_member_padding(&cloud.path, theme, zoom);
         let members = cloud
             .members
             .iter()
-            .map(|member| member.expand(theme.tag.region_padding * zoom))
+            .map(|member| (member.rect.expand(padding), member.colors.as_slice()))
             .collect::<Vec<_>>();
         let radius = members
             .iter()
-            .map(|member| member.size().length() / 2.0)
+            .map(|(member, _)| member.size().length() / 2.0)
             .fold(0.0_f32, f32::max);
         let rail_width = match theme.tag.cloud_member_shape {
             CloudMemberShape::Circle => radius * 1.15,
             CloudMemberShape::Card => {
-                members.iter().map(Rect::height).sum::<f32>()
+                members
+                    .iter()
+                    .map(|(member, _)| member.height())
+                    .sum::<f32>()
                     / f32::from(u16::try_from(members.len()).unwrap_or(u16::MAX)).max(1.0)
             }
         };
+        if theme.tag.cloud_fill_gaps && cloud.points.len() >= 3 {
+            let outline = geometry::convex_hull(&cloud.points);
+            if outline.len() >= 3 {
+                painter.add(egui::Shape::convex_polygon(outline, fill, Stroke::NONE));
+            }
+        }
         // The opaque pastel is pre-blended with the canvas once, so overlapping
         // circles and their tube stay one continuous color rather than darkening.
         let tube = Stroke::new(rail_width, fill);
-        for (from, to) in geometry::minimum_spanning_links(&cloud.points) {
+        for (from, to) in tag_cloud_links(&cloud.points, theme, zoom) {
             // Clouds are now behind the family layer and cards, so a tag can span
             // one broad body of work without being mistaken for its foreground
             // relationship arrow. Separate truly distant constellations instead.
@@ -5647,18 +5525,120 @@ fn draw_clean_tag_clouds(painter: &egui::Painter, clouds: &[TagCloud], theme: &T
                 painter.line_segment([from, to], tube);
             }
         }
-        for member in &members {
-            match theme.tag.cloud_member_shape {
-                CloudMemberShape::Circle => {
-                    painter.circle_filled(member.center(), member.size().length() / 2.0, fill)
-                }
-                CloudMemberShape::Card => {
-                    painter.rect_filled(*member, app_cloud_rounding(theme, zoom), fill)
-                }
-            };
+        for (member, _) in &members {
+            draw_cloud_member(painter, *member, fill, &[], theme, zoom);
         }
-        if let Some(bounds) = union_rects(&members) {
+        if theme.tag.cloud_cut_out_unrelated {
+            let member_rects = members
+                .iter()
+                .map(|(member, _)| *member)
+                .collect::<Vec<_>>();
+            let cloud_bounds =
+                union_rects(&member_rects).map(|bounds| bounds.expand(rail_width * 0.5));
+            for fallback in &cloud.foreign_members {
+                let foreign = fallback.rect.expand(padding);
+                if !cloud_bounds.is_some_and(|bounds| bounds.intersects(foreign)) {
+                    continue;
+                }
+                let fallback_fill = fallback
+                    .colors
+                    .first()
+                    .map_or(backdrop, |color| cloud_pastel(*color, backdrop));
+                draw_cloud_member(
+                    painter,
+                    foreign,
+                    fallback_fill,
+                    &fallback.colors,
+                    theme,
+                    zoom,
+                );
+                if theme.tag.cloud_cutout_outline {
+                    draw_cloud_member_outline(
+                        painter,
+                        foreign,
+                        fallback.colors.first().copied().unwrap_or(cloud.color),
+                        theme,
+                        zoom,
+                    );
+                }
+            }
+        }
+        let member_rects = members
+            .iter()
+            .map(|(member, _)| *member)
+            .collect::<Vec<_>>();
+        if let Some(bounds) = union_rects(&member_rects) {
             draw_cloud_label(painter, bounds, &cloud.path, cloud.color, theme, zoom);
+        }
+    }
+}
+
+/// Draws one foreground mixed cloud per multi-tag task after the hierarchy has
+/// established its solid ancestor fields. Repeating this texture for every
+/// inherited path makes nested clouds read as a rendering glitch.
+fn draw_multi_tag_cloud_members(
+    painter: &egui::Painter,
+    cards: &[(Rect, Vec<String>, Vec<Color32>)],
+    theme: &Theme,
+    zoom: f32,
+) {
+    let backdrop = painter
+        .ctx()
+        .style_of(painter.ctx().theme())
+        .visuals
+        .panel_fill;
+    for (rect, tags, colors) in cards {
+        if colors.len() < 2 {
+            continue;
+        }
+        let Some(deepest) = tags.iter().max_by_key(|tag| tag.matches('/').count()) else {
+            continue;
+        };
+        let member = rect.expand(cloud_member_padding(deepest, theme, zoom));
+        let fill = colors
+            .first()
+            .map_or(backdrop, |color| cloud_pastel(*color, backdrop));
+        draw_cloud_member(painter, member, fill, colors, theme, zoom);
+    }
+}
+
+/// Selects cloud rails from a configurable local-neighborhood policy.
+fn tag_cloud_links(points: &[Pos2], theme: &Theme, zoom: f32) -> Vec<(Pos2, Pos2)> {
+    match theme.tag.cloud_link_mode {
+        TagCloudLinkMode::Nearest => {
+            if theme.tag.cloud_neighbor_count == 0 {
+                return Vec::new();
+            }
+            let mut links = std::collections::BTreeSet::new();
+            for (index, point) in points.iter().enumerate() {
+                let mut candidates = points
+                    .iter()
+                    .enumerate()
+                    .filter(|(other, _)| *other != index)
+                    .map(|(other, candidate)| (point.distance(*candidate), other))
+                    .collect::<Vec<_>>();
+                candidates
+                    .sort_by(|left, right| left.0.total_cmp(&right.0).then(left.1.cmp(&right.1)));
+                for (_, other) in candidates.into_iter().take(theme.tag.cloud_neighbor_count) {
+                    links.insert((index.min(other), index.max(other)));
+                }
+            }
+            links
+                .into_iter()
+                .filter_map(|(from, to)| Some((*points.get(from)?, *points.get(to)?)))
+                .collect()
+        }
+        TagCloudLinkMode::WithinRadius => {
+            let radius = theme.tag.cloud_link_radius * zoom;
+            let mut links = Vec::new();
+            for (index, from) in points.iter().enumerate() {
+                for to in points.iter().skip(index + 1) {
+                    if from.distance(*to) <= radius {
+                        links.push((*from, *to));
+                    }
+                }
+            }
+            links
         }
     }
 }
@@ -5675,6 +5655,197 @@ fn union_rects(rects: &[Rect]) -> Option<Rect> {
 
 fn app_cloud_rounding(theme: &Theme, zoom: f32) -> f32 {
     theme.node.rounding().min(18.0) * zoom
+}
+
+/// Ancestors deliberately occupy more space than their descendants. This keeps
+/// a parent field readable behind its specific child field instead of making
+/// every level look like the same-sized overlapping circle.
+fn cloud_member_padding(path: &str, theme: &Theme, zoom: f32) -> f32 {
+    let depth = path.matches('/').count();
+    let ancestor_levels = 4_usize.saturating_sub(depth.min(4));
+    let ancestor_bonus = f32::from(u8::try_from(ancestor_levels).unwrap_or(u8::MAX)) * 8.0;
+    (theme.tag.region_padding + ancestor_bonus) * zoom
+}
+
+/// Paints one cloud island. When a card carries independent leaf tags, its
+/// surrounding circular cloud receives repeated diagonal color stripes rather
+/// than blended colors or a decoration on the card itself.
+fn draw_cloud_member(
+    painter: &egui::Painter,
+    member: Rect,
+    fill: Color32,
+    colors: &[Color32],
+    theme: &Theme,
+    zoom: f32,
+) {
+    if colors.len() <= 1 {
+        match theme.tag.cloud_member_shape {
+            CloudMemberShape::Circle => {
+                painter.circle_filled(member.center(), member.size().length() / 2.0, fill);
+            }
+            CloudMemberShape::Card => {
+                painter.rect_filled(member, app_cloud_rounding(theme, zoom), fill);
+            }
+        }
+        return;
+    }
+    match theme.tag.cloud_member_shape {
+        CloudMemberShape::Circle => draw_diagonal_cloud_stripes(painter, member, colors),
+        CloudMemberShape::Card => {
+            // Card-clouds keep a simple horizontal split. Their squared rails
+            // make diagonal strokes look like accidental connector fragments;
+            // the circular cloud is the intended stripe treatment.
+            let count = f32::from(u16::try_from(colors.len()).unwrap_or(u16::MAX));
+            let band_height = member.height() / count;
+            let backdrop = painter
+                .ctx()
+                .style_of(painter.ctx().theme())
+                .visuals
+                .panel_fill;
+            for (index, color) in colors.iter().enumerate() {
+                let index = f32::from(u16::try_from(index).unwrap_or(u16::MAX));
+                let band = Rect::from_min_max(
+                    egui::pos2(member.left(), member.top() + index * band_height),
+                    egui::pos2(
+                        member.right(),
+                        (member.top() + (index + 1.0) * band_height).min(member.bottom()),
+                    ),
+                );
+                let clipped = painter.with_clip_rect(band);
+                clipped.rect_filled(
+                    member,
+                    app_cloud_rounding(theme, zoom),
+                    cloud_pastel(*color, backdrop),
+                );
+            }
+        }
+    }
+}
+
+/// Fills a circular cloud with diagonal stripe polygons clipped against a
+/// many-sided circular boundary. Filled geometry avoids stroke caps creating a
+/// saw-toothed edge.
+fn draw_diagonal_cloud_stripes(painter: &egui::Painter, member: Rect, colors: &[Color32]) {
+    let center = member.center();
+    let radius = member.size().length() / 2.0;
+    let backdrop = painter
+        .ctx()
+        .style_of(painter.ctx().theme())
+        .visuals
+        .panel_fill;
+    let palette = colors
+        .iter()
+        .map(|color| cloud_pastel(*color, backdrop))
+        .collect::<Vec<_>>();
+    // This is a texture, not a small number of competing wedges. Keep the
+    // stripes narrow enough that a two-tag cloud reads as one circular field.
+    let stripe_width = (radius * 0.09).clamp(5.0, 14.0);
+    let Some(base) = palette.first().copied() else {
+        return;
+    };
+    painter.circle_filled(center, radius, base);
+    // A narrow solid rim gives the alternating fills a clean termination. It
+    // keeps color changes from making the cloud's circular silhouette look
+    // serrated at every stripe endpoint.
+    let stripe_radius = (radius - stripe_width * 0.75).max(0.0);
+    let direction = Vec2::new(0.707_106_77, 0.707_106_77);
+    let normal = Vec2::new(-direction.y, direction.x);
+    let circle = (0_u8..48)
+        .map(|index| {
+            let angle = -std::f32::consts::TAU * f32::from(index) / 48.0;
+            center + Vec2::new(angle.cos(), angle.sin()) * stripe_radius
+        })
+        .collect::<Vec<_>>();
+    let mut offset = -stripe_radius + stripe_width / 2.0;
+    let mut stripe = 0_usize;
+    while offset < stripe_radius {
+        let start = center + normal * (offset - stripe_width / 2.0);
+        let end = center + normal * (offset + stripe_width / 2.0);
+        let length = stripe_radius * 2.5;
+        let band = [
+            start - direction * length,
+            start + direction * length,
+            end + direction * length,
+            end - direction * length,
+        ];
+        let clipped = clip_convex_polygon(&band, &circle);
+        if clipped.len() >= 3
+            && let Some(color) = palette.get(stripe % palette.len()).copied()
+        {
+            painter.add(egui::Shape::convex_polygon(clipped, color, Stroke::NONE));
+        }
+        offset += stripe_width;
+        stripe = stripe.saturating_add(1);
+    }
+}
+
+/// Clips one convex polygon to another with Sutherland-Hodgman clipping.
+/// `clip` is clockwise in screen coordinates, so its right side is in.
+fn clip_convex_polygon(subject: &[Pos2], clip: &[Pos2]) -> Vec<Pos2> {
+    let mut output = subject.to_vec();
+    for (index, edge_start) in clip.iter().enumerate() {
+        let Some(edge_end) = clip.get((index + 1) % clip.len()) else {
+            return Vec::new();
+        };
+        let input = std::mem::take(&mut output);
+        let Some(mut previous) = input.last().copied() else {
+            break;
+        };
+        let mut previous_inside = left_of(*edge_start, *edge_end, previous);
+        for current in input {
+            let current_inside = left_of(*edge_start, *edge_end, current);
+            if current_inside != previous_inside
+                && let Some(intersection) =
+                    line_intersection(previous, current, *edge_start, *edge_end)
+            {
+                output.push(intersection);
+            }
+            if current_inside {
+                output.push(current);
+            }
+            previous = current;
+            previous_inside = current_inside;
+        }
+    }
+    output
+}
+
+fn left_of(start: Pos2, end: Pos2, point: Pos2) -> bool {
+    (end.x - start.x) * (point.y - start.y) - (end.y - start.y) * (point.x - start.x) <= 0.0
+}
+
+fn line_intersection(start: Pos2, end: Pos2, clip_start: Pos2, clip_end: Pos2) -> Option<Pos2> {
+    let line = end - start;
+    let edge = clip_end - clip_start;
+    let denominator = edge.x * line.y - edge.y * line.x;
+    if denominator.abs() <= f32::EPSILON {
+        return None;
+    }
+    let relative = start - clip_start;
+    let factor = -(edge.x * relative.y - edge.y * relative.x) / denominator;
+    Some(start + line * factor)
+}
+
+fn draw_cloud_member_outline(
+    painter: &egui::Painter,
+    member: Rect,
+    color: Color32,
+    theme: &Theme,
+    zoom: f32,
+) {
+    match theme.tag.cloud_member_shape {
+        CloudMemberShape::Circle => painter.circle_stroke(
+            member.center(),
+            member.size().length() / 2.0,
+            Stroke::new(1.5 * zoom, color),
+        ),
+        CloudMemberShape::Card => painter.rect_stroke(
+            member,
+            app_cloud_rounding(theme, zoom),
+            Stroke::new(1.5 * zoom, color),
+            egui::StrokeKind::Outside,
+        ),
+    };
 }
 
 /// Keeps a cloud label within its own colored member space instead of floating
@@ -5930,52 +6101,131 @@ fn family_boxes(
     layouts: &HashMap<String, NodeLayout>,
     theme: &Theme,
     zoom: f32,
-    expanded: &std::collections::HashSet<String>,
     presentations: &HashMap<String, FamilyPresentation>,
-) -> HashMap<String, FamilyBox> {
+) -> Vec<FamilyBox> {
     let children = child_index(items);
-    let mut boxes = HashMap::new();
+    let mut boxes: Vec<FamilyBox> = Vec::new();
     let mut ordered = items.iter().collect::<Vec<_>>();
     ordered.sort_by_key(|item| std::cmp::Reverse(ancestor_depth(item, items)));
     for item in ordered {
         let id = item.item.id.to_string();
-        let descendants = collect_subtree(&id, &children)
-            .iter()
-            .filter(|member| **member != id)
-            .filter_map(|member| layouts.get(member).map(|layout| layout.rect))
-            .collect::<Vec<_>>();
-        if descendants.len() < theme.parent.min_descendants.max(1) {
+        let direct_children = children.get(&id).cloned().unwrap_or_default();
+        if direct_children.is_empty() {
             continue;
         }
         let Some(parent) = layouts.get(&id).map(|layout| layout.rect) else {
             continue;
         };
-        let descendant_count = descendants.len();
-        let child_bounds = descendants
-            .into_iter()
-            .fold(Rect::NOTHING, |bounds, rect| bounds.union(rect));
-        let child_bounds = collect_subtree(&id, &children)
-            .into_iter()
-            .filter(|member| member != &id)
-            .filter_map(|member| boxes.get(&member).map(|family: &FamilyBox| family.body))
-            .fold(child_bounds, |bounds, rect| bounds.union(rect));
-        let family = bounded_family_box(
-            parent,
-            child_bounds,
-            theme,
-            zoom,
-            expanded.contains(&id),
-            descendant_count,
-            match presentations.get(&id).copied() {
-                Some(FamilyPresentation::Dynamic) => FamilyView::Adaptive,
-                Some(FamilyPresentation::Box) => FamilyView::Boxed,
-                Some(FamilyPresentation::Tree) => FamilyView::Connected,
-                None => theme.parent.family_view,
-            },
-        );
-        boxes.insert(id, family);
+        let view = match presentations.get(&id).copied() {
+            Some(FamilyPresentation::Dynamic) => FamilyView::Adaptive,
+            Some(FamilyPresentation::Box) => FamilyView::Boxed,
+            Some(FamilyPresentation::Tree) => FamilyView::Connected,
+            None => theme.parent.family_view,
+        };
+        if view == FamilyView::Connected {
+            continue;
+        }
+        let clusters = match view {
+            FamilyView::Adaptive => dynamic_child_clusters(
+                &direct_children,
+                layouts,
+                theme.parent.dynamic_cluster_distance * zoom,
+            ),
+            FamilyView::Boxed => vec![direct_children],
+            FamilyView::Connected => Vec::new(),
+        };
+        for cluster in clusters {
+            if view == FamilyView::Adaptive
+                && cluster.len() < theme.parent.dynamic_min_children.max(1)
+            {
+                continue;
+            }
+            let child_bounds = cluster
+                .iter()
+                .filter_map(|member| layouts.get(member).map(|layout| layout.rect))
+                .fold(Rect::NOTHING, |bounds, rect| bounds.union(rect));
+            if child_bounds == Rect::NOTHING {
+                continue;
+            }
+            let child_bounds = if theme.parent.child_style == FamilyChildStyle::NestedFamily {
+                cluster.iter().fold(child_bounds, |bounds, child| {
+                    boxes
+                        .iter()
+                        .filter(|family| family.parent_id == *child)
+                        .fold(bounds, |nested, family| nested.union(family.body))
+                })
+            } else {
+                child_bounds
+            };
+            // Build the plain family first so containment is judged against the
+            // actual rim, including padding—not merely the child-card bounds.
+            // A card already inside its own frame must not grow a second bridge
+            // through that frame.
+            let unjoined = family_box(id.clone(), parent, child_bounds, theme, zoom, false);
+            let parent_inside = unjoined.body.contains(parent.center());
+            let aligned =
+                parent.left() <= unjoined.body.right() && parent.right() >= unjoined.body.left();
+            let near = rect_gap(parent, unjoined.body) <= theme.parent.parent_join_max_gap * zoom;
+            let direct_join = !parent_inside && aligned && near;
+            boxes.push(if direct_join {
+                family_box(id.clone(), parent, child_bounds, theme, zoom, true)
+            } else {
+                unjoined
+            });
+        }
     }
     boxes
+}
+
+/// Finds connected components of direct children. The transitive rule keeps a
+/// short chain readable as one local subgraph without turning remote work into
+/// one giant containment frame.
+fn dynamic_child_clusters(
+    child_ids: &[String],
+    layouts: &HashMap<String, NodeLayout>,
+    range: f32,
+) -> Vec<Vec<String>> {
+    let mut seen = std::collections::HashSet::new();
+    let mut groups = Vec::new();
+    for start in child_ids {
+        if !seen.insert(start.clone()) {
+            continue;
+        }
+        let mut group = vec![start.clone()];
+        let mut cursor = 0;
+        while let Some(current) = group.get(cursor) {
+            let Some(center) = layouts.get(current).map(|layout| layout.rect.center()) else {
+                cursor += 1;
+                continue;
+            };
+            for candidate in child_ids {
+                if seen.contains(candidate) {
+                    continue;
+                }
+                let Some(other) = layouts.get(candidate).map(|layout| layout.rect.center()) else {
+                    continue;
+                };
+                if center.distance(other) <= range {
+                    seen.insert(candidate.clone());
+                    group.push(candidate.clone());
+                }
+            }
+            cursor += 1;
+        }
+        groups.push(group);
+    }
+    groups
+}
+
+/// The physical clear air between two card/frame rectangles.
+fn rect_gap(left: Rect, right: Rect) -> f32 {
+    let horizontal = (left.left() - right.right())
+        .max(right.left() - left.right())
+        .max(0.0);
+    let vertical = (left.top() - right.bottom())
+        .max(right.top() - left.bottom())
+        .max(0.0);
+    Vec2::new(horizontal, vertical).length()
 }
 
 /// The visible band is the gap between `body` and `well`, so `body` is grown
@@ -5987,20 +6237,27 @@ fn family_boxes(
 /// The card is folded in only when it is close enough to read as the frame's
 /// tab; at any greater distance the attachment stalk carries the relationship
 /// and the frame stays a tight border around the children.
-fn family_box(parent: Rect, children: Rect, theme: &Theme, zoom: f32) -> FamilyBox {
+fn family_box(
+    parent_id: String,
+    parent: Rect,
+    children: Rect,
+    theme: &Theme,
+    zoom: f32,
+    direct_join: bool,
+) -> FamilyBox {
     let mut well = children.expand((theme.parent.padding + theme.parent.nest_padding) * zoom);
     let side = theme.parent.padding * zoom;
     let body = well.expand(side);
     let overlap = (parent.height() * 0.18).min(14.0 * zoom);
-    let attached_parent = parent.expand(parent.height()).intersects(body);
-    let attachment = (attached_parent
-        && theme.parent.header_style == FamilyHeaderStyle::AttachedTab)
+    let attachment = (direct_join && theme.parent.header_style == FamilyHeaderStyle::AttachedTab)
         .then(|| {
             let top = parent.bottom() - overlap;
             let bottom = body.top().max(top + 1.0 * zoom);
+            let half_width =
+                (parent.width() * theme.parent.parent_join_width_ratio * 0.5).max(1.0 * zoom);
             Rect::from_min_max(
-                egui::pos2(parent.left(), top),
-                egui::pos2(parent.right(), bottom),
+                egui::pos2(parent.center().x - half_width, top),
+                egui::pos2(parent.center().x + half_width, bottom),
             )
         });
     // The attached card is the cap of this family, not part of the recessed
@@ -6013,45 +6270,12 @@ fn family_box(parent: Rect, children: Rect, theme: &Theme, zoom: f32) -> FamilyB
         well.set_top(well.top().max(tab_bottom).min(well.bottom()));
     }
     FamilyBox {
+        parent_id,
         body,
         well,
         attachment,
-        attached_parent,
-        oversized: false,
-        capped: false,
-        descendant_count: 0,
+        direct_join,
     }
-}
-
-/// A distant descendant becomes a continuation, not a giant opaque bridge.
-/// The child card and its family link remain visible outside the compact board.
-fn bounded_family_box(
-    parent: Rect,
-    children: Rect,
-    theme: &Theme,
-    zoom: f32,
-    expanded: bool,
-    count: usize,
-    view: FamilyView,
-) -> FamilyBox {
-    let mut family = family_box(parent, children, theme, zoom);
-    let max_size = parent.size() * theme.parent.max_board_span.max(1.0);
-    family.oversized = view != FamilyView::Connected
-        && (family.body.width() > max_size.x || family.body.height() > max_size.y);
-    family.descendant_count = count;
-    if family.oversized && !expanded {
-        let body = Rect::from_min_size(
-            egui::pos2(
-                parent.center().x - max_size.x / 2.0,
-                parent.bottom() - 10.0 * zoom,
-            ),
-            max_size,
-        );
-        family.body = body;
-        family.well = body.shrink(theme.parent.padding * zoom);
-        family.capped = true;
-    }
-    family
 }
 
 /// Orders two tasks by the chosen sort, breaking ties on title for stability.
@@ -6204,17 +6428,17 @@ fn tinted(color: Color32, value: f32) -> Color32 {
     Color32::from(hsva)
 }
 
-/// Returns a node's tag accent from the item's own deepest tag.
+/// Returns the tag colors a card carries, ordered from most specific to broadest.
 ///
-/// The accent never comes from a region the node merely sits inside, so an item
-/// tagged only `work` keeps the plain `work` color while drawn within a
-/// `work/cdint` region. Ties break alphabetically to stay deterministic.
-fn node_tag_color(
+/// The card never takes a color from a region it merely sits inside. Independent
+/// tags at the same depth break alphabetically, so the dominant accent remains
+/// stable across redraws.
+fn node_tag_colors(
     item: &StoredItem,
     theme: &Theme,
     palette: &TagPalette,
     effective: &HashMap<String, Vec<String>>,
-) -> Option<Color32> {
+) -> Vec<Color32> {
     let carried = effective.get(&item.item.id.to_string());
     let mut tags = match carried {
         Some(tags) => tags.iter().map(String::as_str).collect::<Vec<_>>(),
@@ -6224,11 +6448,88 @@ fn node_tag_color(
             .map(NamespacePath::as_str)
             .collect::<Vec<_>>(),
     };
-    tags.sort_unstable();
-    let deepest = tags
+    tags.sort_unstable_by(|left, right| {
+        right
+            .matches('/')
+            .count()
+            .cmp(&left.matches('/').count())
+            .then_with(|| left.cmp(right))
+    });
+    tags.dedup();
+    tags.into_iter()
+        .map(|tag| palette.color(tag, &theme.tag))
+        .collect()
+}
+
+/// Returns a node's dominant tag accent, its own deepest tag.
+fn node_tag_color(
+    item: &StoredItem,
+    theme: &Theme,
+    palette: &TagPalette,
+    effective: &HashMap<String, Vec<String>>,
+) -> Option<Color32> {
+    node_tag_colors(item, theme, palette, effective)
         .into_iter()
-        .max_by_key(|tag| tag.matches('/').count())?;
-    Some(palette.color(deepest, &theme.tag))
+        .next()
+}
+
+/// Returns colors for tags that are not ancestors of another carried tag.
+/// These are the independent memberships a cloud needs to show as bands.
+fn independent_tag_colors(
+    carried: &[String],
+    palette: &TagPalette,
+    theme: &theme::TagTheme,
+) -> Vec<Color32> {
+    let mut leaves = carried
+        .iter()
+        .map(String::as_str)
+        .filter(|tag| {
+            !carried
+                .iter()
+                .any(|other| other != tag && other.starts_with(&format!("{tag}/")))
+        })
+        .collect::<Vec<_>>();
+    leaves.sort_unstable_by(|left, right| {
+        right
+            .matches('/')
+            .count()
+            .cmp(&left.matches('/').count())
+            .then_with(|| left.cmp(right))
+    });
+    leaves
+        .into_iter()
+        .map(|tag| palette.color(tag, theme))
+        .collect()
+}
+
+/// Chooses the most specific tag a card carries that is an ancestor of the
+/// cloud crossing it. That restores a valid lower hierarchy field when a deeper
+/// sibling cloud has to yield. For unrelated fields, retain every independent
+/// tag color so their surrounding cloud can be banded rather than blank.
+fn fallback_tag_colors(
+    carried: &[String],
+    independent_colors: &[Color32],
+    cloud_path: &str,
+    palette: &TagPalette,
+    theme: &theme::TagTheme,
+) -> Vec<Color32> {
+    let mut matching = carried
+        .iter()
+        .map(String::as_str)
+        .filter(|tag| cloud_path == *tag || cloud_path.starts_with(&format!("{tag}/")))
+        .collect::<Vec<_>>();
+    matching.sort_unstable_by(|left, right| {
+        right
+            .matches('/')
+            .count()
+            .cmp(&left.matches('/').count())
+            .then_with(|| left.cmp(right))
+    });
+    matching
+        .into_iter()
+        .next()
+        .map(|tag| vec![palette.color(tag, theme)])
+        .unwrap_or_else(|| independent_colors.to_vec())
 }
 
 fn load_layout(path: &std::path::Path) -> LocalGraphLayout {
@@ -6261,10 +6562,10 @@ fn short_title(title: &str) -> String {
 )]
 mod tests {
     use super::{
-        FamilyPresentation, FamilyView, GroupBy, LocalGraphLayout, appearance_lab_scale,
-        bounded_family_box, collect_subtree, compare_group_labels, family_box,
-        family_dependency_bands, family_ring_mesh, family_tree_geometry, focus_is_active,
-        hierarchy_levels, limit_child_depth, matches_query, segment_outside_rect,
+        FamilyPresentation, GroupBy, LocalGraphLayout, collect_subtree, compare_group_labels,
+        fallback_tag_colors, family_box, family_dependency_bands, family_ring_mesh,
+        family_tree_geometry, focus_is_active, hierarchy_levels, limit_child_depth, matches_query,
+        segment_outside_rect,
     };
     use eframe::egui::{Color32, Pos2, Rect, pos2, vec2};
     use std::collections::{HashMap, HashSet};
@@ -6319,14 +6620,18 @@ mod tests {
     }
 
     #[test]
-    fn attached_parent_card_uses_a_card_width_attachment_not_a_wide_body_band() {
+    fn attached_parent_uses_the_configured_width_not_a_wide_body_band() {
         let parent = Rect::from_min_size(pos2(100.0, 20.0), vec2(150.0, 58.0));
         let child = Rect::from_min_size(pos2(300.0, 150.0), vec2(150.0, 70.0));
-        let family = family_box(parent, child, &super::Theme::default(), 1.0);
+        let theme = super::Theme::default();
+        let family = family_box("parent".to_owned(), parent, child, &theme, 1.0, true);
         assert!(family.body.top() > parent.bottom());
         assert!(family.attachment.is_some());
         let attachment = family.attachment.unwrap();
-        assert_eq!(attachment.width(), parent.width());
+        assert_eq!(
+            attachment.width(),
+            parent.width() * theme.parent.parent_join_width_ratio
+        );
         assert!(attachment.contains(parent.center_bottom()));
         assert!(family.well.contains(child.min));
         assert!(family.well.contains(child.max));
@@ -6340,33 +6645,10 @@ mod tests {
         // A closely placed child used to pull its inset behind the attached tab.
         let child = Rect::from_min_size(pos2(110.0, 72.0), vec2(140.0, 70.0));
         let theme = super::Theme::default();
-        let family = family_box(parent, child, &theme, 1.0);
+        let family = family_box("parent".to_owned(), parent, child, &theme, 1.0, true);
         let overlap = (parent.height() * 0.18).min(14.0);
         assert!(family.well.top() >= parent.bottom() - overlap);
         assert!(family.well.contains(child.center()));
-    }
-
-    #[test]
-    fn a_wide_family_uses_a_bounded_board_until_expanded() {
-        let parent = Rect::from_min_size(pos2(100.0, 20.0), vec2(150.0, 58.0));
-        // Children spread far apart, which is what legitimately needs capping.
-        let children = Rect::from_min_size(pos2(120.0, 140.0), vec2(1600.0, 400.0));
-        let theme = super::Theme::default();
-        let compact = bounded_family_box(
-            parent,
-            children,
-            &theme,
-            1.0,
-            false,
-            9,
-            FamilyView::Adaptive,
-        );
-        let expanded =
-            bounded_family_box(parent, children, &theme, 1.0, true, 9, FamilyView::Adaptive);
-        assert!(compact.capped);
-        assert!(compact.body.width() <= parent.width() * theme.parent.max_board_span);
-        assert!(compact.body.height() <= parent.height() * theme.parent.max_board_span);
-        assert!(expanded.body.contains(children.center()));
     }
 
     #[test]
@@ -6387,29 +6669,21 @@ mod tests {
     }
 
     #[test]
-    fn boxed_view_keeps_a_wide_family_bounded() {
-        let parent = Rect::from_min_size(pos2(100.0, 20.0), vec2(150.0, 58.0));
-        let children = Rect::from_min_size(pos2(120.0, 140.0), vec2(1600.0, 400.0));
-        let mut theme = super::Theme::default();
-        theme.parent.family_view = super::FamilyView::Boxed;
-        let family = bounded_family_box(parent, children, &theme, 1.0, false, 9, FamilyView::Boxed);
-        assert!(family.oversized);
-        assert!(family.capped);
-        assert!(family.body.width() <= parent.width() * theme.parent.max_board_span);
-    }
-
-    /// One far-away child used to trip the cap only because the frame had
-    /// stretched to reach it. With the band fixed, the frame stays small and
-    /// there is nothing to cap.
-    #[test]
-    fn a_single_distant_child_no_longer_needs_capping() {
-        let parent = Rect::from_min_size(pos2(100.0, 20.0), vec2(150.0, 58.0));
-        let child = Rect::from_min_size(pos2(900.0, 900.0), vec2(150.0, 70.0));
+    fn deep_cloud_cutout_restores_the_closest_carried_ancestor_color() {
         let theme = super::Theme::default();
-        let compact =
-            bounded_family_box(parent, child, &theme, 1.0, false, 1, FamilyView::Adaptive);
-        assert!(!compact.capped);
-        assert!(compact.well.contains(child.center()));
+        let palette =
+            super::TagPalette::build(["tag/work/cdint", "tag/work/cdint/todoapp"], &theme.tag);
+        let carried = vec!["tag/work/cdint".to_owned()];
+        assert_eq!(
+            fallback_tag_colors(
+                &carried,
+                &[palette.color("tag/work/cdint", &theme.tag)],
+                "tag/work/cdint/todoapp",
+                &palette,
+                &theme.tag,
+            ),
+            vec![palette.color("tag/work/cdint", &theme.tag)],
+        );
     }
 
     #[test]
@@ -6419,7 +6693,7 @@ mod tests {
         let child = Rect::from_min_size(pos2(900.0, 900.0), vec2(150.0, 70.0));
         // Far enough that an earlier version spanned the whole gap with fill.
         let parent = Rect::from_min_size(pos2(100.0, 20.0), vec2(150.0, 58.0));
-        let family = family_box(parent, child, &theme, 1.0);
+        let family = family_box("parent".to_owned(), parent, child, &theme, 1.0, false);
         for band in [
             family.well.left() - family.body.left(),
             family.body.right() - family.well.right(),
@@ -6434,12 +6708,12 @@ mod tests {
     }
 
     #[test]
-    fn an_adjacent_parent_gets_a_card_width_attachment() {
+    fn an_adjacent_parent_gets_a_configurable_rim_join() {
         let theme = super::Theme::default();
         let child = Rect::from_min_size(pos2(100.0, 140.0), vec2(150.0, 70.0));
         let parent = Rect::from_min_size(pos2(100.0, 20.0), vec2(150.0, 58.0));
-        let family = family_box(parent, child, &theme, 1.0);
-        assert!(family.attached_parent);
+        let family = family_box("parent".to_owned(), parent, child, &theme, 1.0, true);
+        assert!(family.direct_join);
         assert!(
             family
                 .attachment
@@ -6575,13 +6849,6 @@ mod tests {
     }
 
     #[test]
-    fn appearance_lab_scales_the_complete_exemplar_into_its_window() {
-        assert_eq!(appearance_lab_scale(vec2(840.0, 470.0)), 1.0);
-        assert!((appearance_lab_scale(vec2(420.0, 235.0)) - 0.5).abs() < f32::EPSILON);
-        assert_eq!(appearance_lab_scale(vec2(80.0, 80.0)), 0.45);
-    }
-
-    #[test]
     fn displaced_children_keep_the_shared_angular_family_route() {
         let parent = Rect::from_min_size(pos2(100.0, 120.0), vec2(150.0, 58.0));
         let above = Rect::from_min_size(pos2(20.0, 20.0), vec2(120.0, 60.0));
@@ -6605,7 +6872,7 @@ mod tests {
     }
 
     #[test]
-    fn detached_family_tree_starts_where_its_outline_anchor_ends() {
+    fn direct_rim_join_can_be_the_source_of_a_family_tree() {
         let parent = Rect::from_min_size(pos2(100.0, 20.0), vec2(150.0, 58.0));
         let well = Rect::from_min_size(pos2(90.0, 150.0), vec2(320.0, 190.0));
         let child = Rect::from_min_size(pos2(180.0, 230.0), vec2(150.0, 58.0));
