@@ -13,6 +13,7 @@ Commands:
   run -- <args>     Run the todo CLI with <args>.
   gui               Run the native Todo Ledger graph editor.
   install           Install todo into Cargo's bin directory.
+  install-gui       Install todo-gui into Cargo's bin directory.
 EOF
 }
 
@@ -45,6 +46,9 @@ case "$command" in
     ;;
   install)
     nix develop --command cargo install --path crates/todo-cli --locked
+    ;;
+  install-gui)
+    nix develop --command cargo install --path crates/todo-gui --locked
     ;;
   help|-h|--help)
     usage

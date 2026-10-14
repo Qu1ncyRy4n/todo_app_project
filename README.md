@@ -63,6 +63,9 @@ Enter the development shell with `nix develop`. Install the CLI through
 `./dev install`; `todo init` initializes the global ledger and configuration
 rather than installing the executable.
 
+Install the graph editor separately with `./dev install-gui`, then launch it
+with `todo-gui`. Both executables are installed in Cargo's bin directory.
+
 ## Development shortcuts
 
 `./dev` runs the matching Cargo command inside the pinned Nix shell, so it also
@@ -74,6 +77,7 @@ works when Rust is not globally installed:
 ./dev check
 ./dev run -- sync --help
 ./dev install
+./dev install-gui
 ```
 
 The enforced checks, lint policy, and intentionally deferred testing and
