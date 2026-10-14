@@ -209,6 +209,7 @@ struct TodoGui {
     inspector: InspectorTheme,
     layout_undo: Option<LayoutUndo>,
     normalize_requested: bool,
+    reset_view_requested: bool,
     focus_layout_requested: bool,
     separate_requested: bool,
     relax_requested: bool,
@@ -337,6 +338,7 @@ impl TodoGui {
             theme_path,
             layout_undo: None,
             normalize_requested: false,
+            reset_view_requested: false,
             focus_layout_requested: false,
             separate_requested: false,
             relax_requested: false,
@@ -2003,8 +2005,7 @@ impl TodoGui {
         // Manual Unstack remains available for unusually tall wrapped cards.
         self.timeline_origin = None;
         self.focus_mode = false;
-        self.graph_pan = Vec2::ZERO;
-        self.graph_zoom = 1.0;
+        self.frame_visible_nodes(rect);
         self.group_labels.clear();
         self.message =
             Some("Hierarchy arranged. Undo layout restores the previous one.".to_owned());
@@ -2397,8 +2398,7 @@ impl TodoGui {
         self.relax_if_enabled(rect);
         self.timeline_origin = None;
         self.focus_mode = false;
-        self.graph_pan = Vec2::ZERO;
-        self.graph_zoom = 1.0;
+        self.frame_visible_nodes(rect);
         self.group_labels.clear();
         self.message = Some("Layout normalized. Undo layout restores the previous one.".to_owned());
     }
@@ -2458,6 +2458,32 @@ impl TodoGui {
         };
         let (zoom, pan) =
             geometry::fit_view(bounds, rect, (0.4, 2.5), self.theme.focus.zoom_margin);
+        self.graph_zoom = zoom;
+        self.graph_pan = pan;
+    }
+
+    /// Centers the camera on the main visible cluster and fits most of its cards.
+    ///
+    /// The retained central majority prevents a deliberately remote card from
+    /// shrinking the working cluster to an unreadable size. The omitted minority
+    /// remains available by pan and is not filtered or moved.
+    fn frame_visible_nodes(&mut self, rect: Rect) {
+        let items = self.visible_items();
+        let points = items
+            .iter()
+            .enumerate()
+            .map(|(index, item)| {
+                let id = item.item.id.to_string();
+                grid_slot(index, rect) + self.node_offsets.get(&id).copied().unwrap_or(Vec2::ZERO)
+            })
+            .collect::<Vec<_>>();
+        let (width, height) = self.theme.node.size();
+        let Some(bounds) =
+            geometry::majority_bounds(&points, Vec2::new(width / 2.0, height / 2.0), 0.85)
+        else {
+            return;
+        };
+        let (zoom, pan) = geometry::fit_view(bounds, rect, (0.2, 4.0), 72.0);
         self.graph_zoom = zoom;
         self.graph_pan = pan;
     }
@@ -3461,8 +3487,9 @@ impl eframe::App for TodoGui {
                     self.graph_zoom = (self.graph_zoom * 1.2).min(4.0);
                 }
                 if ui.button("Reset view").clicked() {
-                    self.graph_zoom = 1.0;
-                    self.graph_pan = Vec2::ZERO;
+                    // The graph viewport is only known after both side panels
+                    // have claimed their space, so framing is deferred to canvas draw.
+                    self.reset_view_requested = true;
                 }
                 ui.separator();
                 if ui.button("Reload theme").clicked() {
@@ -3604,6 +3631,10 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
     if app.normalize_requested {
         app.normalize_requested = false;
         app.normalize_layout(rect);
+    }
+    if app.reset_view_requested {
+        app.reset_view_requested = false;
+        app.frame_visible_nodes(rect);
     }
     if app.focus_layout_requested {
         app.focus_layout_requested = false;

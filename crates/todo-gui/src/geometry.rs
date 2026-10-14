@@ -669,6 +669,51 @@ pub fn fit_view(bounds: Rect, viewport: Rect, zoom_range: (f32, f32), margin: f3
     (zoom, pan)
 }
 
+/// Returns bounds around the central majority of points, including their extent.
+///
+/// A graph can have one card deliberately parked far away. Framing every visible
+/// card in that case makes the main body too small to work with, so the camera
+/// keeps the points nearest the median and leaves a bounded minority discoverable
+/// by panning. `fraction` is clamped so a one-card view still produces bounds.
+pub fn majority_bounds(points: &[Pos2], half_size: Vec2, fraction: f32) -> Option<Rect> {
+    let first = *points.first()?;
+    let mut xs = points.iter().map(|point| point.x).collect::<Vec<_>>();
+    let mut ys = points.iter().map(|point| point.y).collect::<Vec<_>>();
+    xs.sort_by(f32::total_cmp);
+    ys.sort_by(f32::total_cmp);
+    let middle = points.len() / 2;
+    let center = Pos2::new(
+        xs.get(middle).copied().unwrap_or(first.x),
+        ys.get(middle).copied().unwrap_or(first.y),
+    );
+    let visible_count = u16::try_from(points.len()).map_or(f32::from(u16::MAX), f32::from);
+    let target_count = visible_count * fraction.clamp(0.1, 1.0);
+    let mut nearest = points.to_vec();
+    nearest.sort_by(|left, right| {
+        let left_distance = (*left - center).length_sq();
+        let right_distance = (*right - center).length_sq();
+        left_distance
+            .total_cmp(&right_distance)
+            .then_with(|| left.x.total_cmp(&right.x))
+            .then_with(|| left.y.total_cmp(&right.y))
+    });
+    // Keeping a rank while its zero-based index is below the fractional target
+    // yields the ceiling count without a lossy float-to-integer conversion.
+    let count = nearest
+        .iter()
+        .enumerate()
+        .take_while(|(index, _)| {
+            u16::try_from(*index).map_or(f32::from(u16::MAX), f32::from) < target_count
+        })
+        .count()
+        .clamp(1, points.len());
+    let first = *nearest.first()?;
+    Some(nearest.iter().take(count).skip(1).fold(
+        Rect::from_center_size(first, half_size * 2.0),
+        |bounds, point| bounds.union(Rect::from_center_size(*point, half_size * 2.0)),
+    ))
+}
+
 /// Moves `current` toward `target` by one frame's worth of easing.
 ///
 /// Exponential smoothing rather than a fixed-length tween: the step depends on the
@@ -1049,9 +1094,9 @@ mod tests {
         SeparationSpacing, TimelineAxis, TimelineScale, TimelineSpacing, TreeAxis, TreeSpacing,
         arrowhead_points, banded_positions, boundary_point, centroid, cluster_points, convex_hull,
         duration_length, ease_toward, edge_between, expand_path, fit_view, grouped_positions,
-        is_settled, layered_positions, pack_tree_families, relax_overlaps, ruler_ticks,
-        separate_groups, shaft_end, smooth_closed_path, timeline_positions, tree_positions,
-        tree_positions_at_levels, zoom_about,
+        is_settled, layered_positions, majority_bounds, pack_tree_families, relax_overlaps,
+        ruler_ticks, separate_groups, shaft_end, smooth_closed_path, timeline_positions,
+        tree_positions, tree_positions_at_levels, zoom_about,
     };
     use eframe::egui::{Pos2, Rect, Vec2, pos2};
     use std::collections::HashMap;
@@ -1324,6 +1369,19 @@ mod tests {
         let center = viewport.center();
         let drawn = center + (offset.center() - center) * zoom + pan;
         assert!((drawn - center).length() < 0.001);
+    }
+
+    #[test]
+    fn framing_the_majority_ignores_one_remote_card() {
+        let points = [
+            pos2(0.0, 0.0),
+            pos2(50.0, 0.0),
+            pos2(0.0, 50.0),
+            pos2(50.0, 50.0),
+            pos2(5000.0, 5000.0),
+        ];
+        let bounds = majority_bounds(&points, Vec2::new(10.0, 10.0), 0.8);
+        assert!(bounds.is_some_and(|bounds| bounds.right() < 100.0));
     }
 
     #[test]
