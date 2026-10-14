@@ -459,51 +459,57 @@ impl TodoGui {
     /// adjusted while looking at the graph; filters answer a different question and
     /// are reached past them.
     fn draw_filters(&mut self, ui: &mut egui::Ui) {
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            if ui.button("Reset filters").clicked() {
-                self.reset_filters();
-            }
-            egui::CollapsingHeader::new("View")
-                .default_open(true)
-                .show(ui, |ui| self.view_settings(ui));
-            egui::CollapsingHeader::new("Appearance")
-                .default_open(false)
-                .show(ui, |ui| self.appearance_settings(ui));
-            egui::CollapsingHeader::new("Arrangements")
-                .default_open(true)
-                .show(ui, |ui| self.arrangement_buttons(ui));
-            egui::CollapsingHeader::new("Forces")
-                .default_open(false)
-                .show(ui, |ui| self.force_settings(ui));
-            ui.separator();
-            ui.heading("Filters");
-            egui::CollapsingHeader::new("Tasks shown")
-                .default_open(true)
-                .show(ui, |ui| {
-                    ui.checkbox(&mut self.show_completed, "Completed and canceled");
-                    ui.checkbox(&mut self.focus_only, "Active work only");
-                    ui.weak("Active work only hides everything that is not active.");
-                });
-            egui::CollapsingHeader::new("Relationships drawn")
-                .default_open(true)
-                .show(ui, |ui| {
-                    ui.checkbox(&mut self.show_parent_graph, "Parent tasks");
-                    ui.checkbox(&mut self.show_dependency_graph, "Depends on");
-                    ui.checkbox(&mut self.show_blocker_graph, "Blocked by");
-                    ui.checkbox(&mut self.show_relations, "Typed relations");
-                });
-            egui::CollapsingHeader::new("Overlays")
-                .default_open(true)
-                .show(ui, |ui| {
-                    ui.checkbox(&mut self.show_tag_constellation, "Tag regions");
-                    ui.checkbox(&mut self.show_parent_regions, "Parent regions");
-                    ui.checkbox(&mut self.show_focus_window, "Focus Window");
-                    ui.checkbox(&mut self.show_timeline_ruler, "Timeline ruler");
-                });
-            egui::CollapsingHeader::new("Tags")
-                .default_open(true)
-                .show(ui, |ui| self.draw_tag_filters(ui));
-        });
+        // Controls such as long tag paths and relationship labels should remain
+        // reachable in a narrow sidebar. Vertical scrolling handles its length;
+        // horizontal scrolling preserves a control rather than clipping its label.
+        egui::ScrollArea::both()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                if ui.button("Reset filters").clicked() {
+                    self.reset_filters();
+                }
+                egui::CollapsingHeader::new("View")
+                    .default_open(true)
+                    .show(ui, |ui| self.view_settings(ui));
+                egui::CollapsingHeader::new("Appearance")
+                    .default_open(false)
+                    .show(ui, |ui| self.appearance_settings(ui));
+                egui::CollapsingHeader::new("Arrangements")
+                    .default_open(true)
+                    .show(ui, |ui| self.arrangement_buttons(ui));
+                egui::CollapsingHeader::new("Forces")
+                    .default_open(false)
+                    .show(ui, |ui| self.force_settings(ui));
+                ui.separator();
+                ui.heading("Filters");
+                egui::CollapsingHeader::new("Tasks shown")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        ui.checkbox(&mut self.show_completed, "Completed and canceled");
+                        ui.checkbox(&mut self.focus_only, "Active work only");
+                        ui.weak("Active work only hides everything that is not active.");
+                    });
+                egui::CollapsingHeader::new("Relationships drawn")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        ui.checkbox(&mut self.show_parent_graph, "Parent tasks");
+                        ui.checkbox(&mut self.show_dependency_graph, "Depends on");
+                        ui.checkbox(&mut self.show_blocker_graph, "Blocked by");
+                        ui.checkbox(&mut self.show_relations, "Typed relations");
+                    });
+                egui::CollapsingHeader::new("Overlays")
+                    .default_open(true)
+                    .show(ui, |ui| {
+                        ui.checkbox(&mut self.show_tag_constellation, "Tag regions");
+                        ui.checkbox(&mut self.show_parent_regions, "Parent regions");
+                        ui.checkbox(&mut self.show_focus_window, "Focus Window");
+                        ui.checkbox(&mut self.show_timeline_ruler, "Timeline ruler");
+                    });
+                egui::CollapsingHeader::new("Tags")
+                    .default_open(true)
+                    .show(ui, |ui| self.draw_tag_filters(ui));
+            });
     }
 
     /// Restores the transient visibility controls without touching an arrangement
@@ -1054,50 +1060,54 @@ impl TodoGui {
         }
     }
 
-    /// Draws the inspector as five collapsible sections over the selected task.
+    /// Draws the inspector in everyday editing order, with rare controls last.
     ///
     /// Grouping keeps the panel navigable: status, then how the task relates to
     /// other work, then its content, then its timing, with the raw editing surface
     /// tucked away last. Each group's open state starts from the theme.
     fn draw_inspector(&mut self, ui: &mut egui::Ui) {
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            ui.heading("Inspector");
-            let Some(item) = self.selected_item().cloned() else {
-                ui.weak("Select a task node to inspect it.");
+        egui::ScrollArea::both()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.heading("Inspector");
+                let Some(item) = self.selected_item().cloned() else {
+                    ui.weak("Select a task node to inspect it.");
+                    if let Some(message) = self.message.clone() {
+                        ui.separator();
+                        ui.label(message);
+                    }
+                    return;
+                };
+                ui.label(format!("{} · {}", item.item.state, item.item.id.short()))
+                    .on_hover_text(item.item.id.to_string());
+                ui.separator();
+                egui::CollapsingHeader::new("Task basics")
+                    .default_open(self.inspector.open_status)
+                    .show(ui, |ui| self.section_status(ui, &item));
+                egui::CollapsingHeader::new("Family & dependencies")
+                    .default_open(self.inspector.open_relationships)
+                    .show(ui, |ui| self.section_relationships(ui, &item));
+                egui::CollapsingHeader::new("Tags, notes & links")
+                    .default_open(self.inspector.open_details)
+                    .show(ui, |ui| self.section_details(ui, &item));
+                egui::CollapsingHeader::new("Schedule & effort")
+                    .default_open(self.inspector.open_schedule)
+                    .show(ui, |ui| self.section_schedule(ui, &item));
+                egui::CollapsingHeader::new("Advanced / raw editing")
+                    .default_open(self.inspector.open_advanced)
+                    .show(ui, |ui| self.section_advanced(ui));
+                egui::CollapsingHeader::new("Visible fields")
+                    .default_open(false)
+                    .show(ui, |ui| self.section_display_settings(ui));
                 if let Some(message) = self.message.clone() {
                     ui.separator();
                     ui.label(message);
                 }
-                return;
-            };
-            ui.label(format!("{} · {}", item.item.state, item.item.id.short()))
-                .on_hover_text(item.item.id.to_string());
-            egui::CollapsingHeader::new("Status")
-                .default_open(self.inspector.open_status)
-                .show(ui, |ui| self.section_status(ui, &item));
-            egui::CollapsingHeader::new("Relationships")
-                .default_open(self.inspector.open_relationships)
-                .show(ui, |ui| self.section_relationships(ui, &item));
-            egui::CollapsingHeader::new("Details")
-                .default_open(self.inspector.open_details)
-                .show(ui, |ui| self.section_details(ui, &item));
-            egui::CollapsingHeader::new("Schedule")
-                .default_open(self.inspector.open_schedule)
-                .show(ui, |ui| self.section_schedule(ui, &item));
-            egui::CollapsingHeader::new("Advanced")
-                .default_open(self.inspector.open_advanced)
-                .show(ui, |ui| self.section_advanced(ui));
-            egui::CollapsingHeader::new("Section display")
-                .default_open(false)
-                .show(ui, |ui| self.section_display_settings(ui));
-            if let Some(message) = self.message.clone() {
-                ui.separator();
-                ui.label(message);
-            }
-        });
+            });
     }
 
-    /// Title, priority, and state: what the task is and where it stands.
+    /// Title, state, and priority: the three controls used on most task edits.
     fn section_status(&mut self, ui: &mut egui::Ui, item: &StoredItem) {
         ui.label("Title");
         ui.text_edit_singleline(&mut self.title_draft);
@@ -1110,23 +1120,6 @@ impl TodoGui {
             .clicked()
         {
             self.save_title();
-        }
-        ui.separator();
-        ui.label("Priority");
-        egui::ComboBox::from_id_salt("priority")
-            .selected_text(self.priority_draft.to_string())
-            .show_ui(ui, |ui| {
-                for priority in [
-                    Priority::Low,
-                    Priority::Normal,
-                    Priority::High,
-                    Priority::Critical,
-                ] {
-                    ui.selectable_value(&mut self.priority_draft, priority, priority.to_string());
-                }
-            });
-        if ui.button("Save priority").clicked() {
-            self.save_priority();
         }
         ui.separator();
         ui.label("Status");
@@ -1158,6 +1151,23 @@ impl TodoGui {
             .clicked()
         {
             self.toggle_complete();
+        }
+        ui.separator();
+        ui.label("Priority");
+        egui::ComboBox::from_id_salt("priority")
+            .selected_text(self.priority_draft.to_string())
+            .show_ui(ui, |ui| {
+                for priority in [
+                    Priority::Low,
+                    Priority::Normal,
+                    Priority::High,
+                    Priority::Critical,
+                ] {
+                    ui.selectable_value(&mut self.priority_draft, priority, priority.to_string());
+                }
+            });
+        if ui.button("Save priority").clicked() {
+            self.save_priority();
         }
     }
 
@@ -1192,24 +1202,32 @@ impl TodoGui {
                     }
                 });
             }
+            let mut show_parent_suggestions = false;
             ui.horizontal(|ui| {
-                ui.text_edit_singleline(&mut self.parent_search);
+                let search = ui.add(
+                    egui::TextEdit::singleline(&mut self.parent_search)
+                        .hint_text("Search parent tasks"),
+                );
+                show_parent_suggestions =
+                    search.hovered() || search.has_focus() || !self.parent_search.trim().is_empty();
                 if ui.button("Clear parent").clicked() {
                     self.parent_draft = None;
                     self.save_parent();
                 }
             });
-            let parent_query = self.parent_search.to_lowercase();
-            for (id, title) in relation_candidates
-                .iter()
-                .filter(|(_, title)| {
-                    parent_query.is_empty() || title.to_lowercase().contains(&parent_query)
-                })
-                .take(5)
-            {
-                if ui.small_button(format!("Set parent: {title}")).clicked() {
-                    self.parent_draft = Some(id.clone());
-                    self.save_parent();
+            if show_parent_suggestions {
+                let parent_query = self.parent_search.to_lowercase();
+                for (id, title) in relation_candidates
+                    .iter()
+                    .filter(|(_, title)| {
+                        parent_query.is_empty() || title.to_lowercase().contains(&parent_query)
+                    })
+                    .take(5)
+                {
+                    if ui.small_button(format!("Set parent: {title}")).clicked() {
+                        self.parent_draft = Some(id.clone());
+                        self.save_parent();
+                    }
                 }
             }
         }
@@ -1225,25 +1243,33 @@ impl TodoGui {
                     }
                 });
             }
-            ui.text_edit_singleline(&mut self.dependency_search);
-            let dependency_query = self.dependency_search.to_lowercase();
-            for (id, title) in relation_candidates
-                .iter()
-                .filter(|(id, title)| {
-                    !item
-                        .dependencies
-                        .iter()
-                        .any(|dependency| dependency.to_string() == *id)
-                        && (dependency_query.is_empty()
-                            || title.to_lowercase().contains(&dependency_query))
-                })
-                .take(5)
+            let dependency_search = ui.add(
+                egui::TextEdit::singleline(&mut self.dependency_search)
+                    .hint_text("Search prerequisite tasks"),
+            );
+            if dependency_search.hovered()
+                || dependency_search.has_focus()
+                || !self.dependency_search.trim().is_empty()
             {
-                if ui
-                    .small_button(format!("Add dependency: {title}"))
-                    .clicked()
+                let dependency_query = self.dependency_search.to_lowercase();
+                for (id, title) in relation_candidates
+                    .iter()
+                    .filter(|(id, title)| {
+                        !item
+                            .dependencies
+                            .iter()
+                            .any(|dependency| dependency.to_string() == *id)
+                            && (dependency_query.is_empty()
+                                || title.to_lowercase().contains(&dependency_query))
+                    })
+                    .take(5)
                 {
-                    self.toggle_dependency(id.clone(), true);
+                    if ui
+                        .small_button(format!("Add dependency: {title}"))
+                        .clicked()
+                    {
+                        self.toggle_dependency(id.clone(), true);
+                    }
                 }
             }
         }
@@ -1265,25 +1291,33 @@ impl TodoGui {
                     }
                 });
             }
-            ui.text_edit_singleline(&mut self.blocker_search);
-            let blocker_query = self.blocker_search.to_lowercase();
-            for (id, title) in relation_candidates
-                .iter()
-                .filter(|(id, title)| {
-                    !item
-                        .blocked_by
-                        .iter()
-                        .any(|blocker| blocker.to_string() == *id)
-                        && (blocker_query.is_empty()
-                            || title.to_lowercase().contains(&blocker_query))
-                })
-                .take(5)
+            let blocker_search = ui.add(
+                egui::TextEdit::singleline(&mut self.blocker_search)
+                    .hint_text("Search blocking tasks"),
+            );
+            if blocker_search.hovered()
+                || blocker_search.has_focus()
+                || !self.blocker_search.trim().is_empty()
             {
-                if ui
-                    .small_button(format!("Add active blocker: {title}"))
-                    .clicked()
+                let blocker_query = self.blocker_search.to_lowercase();
+                for (id, title) in relation_candidates
+                    .iter()
+                    .filter(|(id, title)| {
+                        !item
+                            .blocked_by
+                            .iter()
+                            .any(|blocker| blocker.to_string() == *id)
+                            && (blocker_query.is_empty()
+                                || title.to_lowercase().contains(&blocker_query))
+                    })
+                    .take(5)
                 {
-                    self.toggle_blocker(id.clone(), true);
+                    if ui
+                        .small_button(format!("Add active blocker: {title}"))
+                        .clicked()
+                    {
+                        self.toggle_blocker(id.clone(), true);
+                    }
                 }
             }
         }
@@ -1310,31 +1344,39 @@ impl TodoGui {
                     }
                 }
             });
-            ui.text_edit_singleline(&mut self.relation_search);
-            let relation_query = self.relation_search.to_lowercase();
-            // Candidates are deliberately not filtered by project: relating across
-            // projects is the point of this edge.
-            let relation_targets = self
-                .items
-                .iter()
-                .filter(|candidate| candidate.item.id != item.item.id)
-                .filter(|candidate| {
-                    relation_query.is_empty()
-                        || candidate
-                            .item
-                            .title
-                            .to_lowercase()
-                            .contains(&relation_query)
-                })
-                .map(|candidate| (candidate.item.id.to_string(), candidate.item.title.clone()))
-                .take(5)
-                .collect::<Vec<_>>();
-            for (id, title) in relation_targets {
-                if ui
-                    .small_button(format!("{} {title}", self.relation_draft))
-                    .clicked()
-                {
-                    self.add_relation(id);
+            let relation_search = ui.add(
+                egui::TextEdit::singleline(&mut self.relation_search)
+                    .hint_text("Search related tasks"),
+            );
+            if relation_search.hovered()
+                || relation_search.has_focus()
+                || !self.relation_search.trim().is_empty()
+            {
+                let relation_query = self.relation_search.to_lowercase();
+                // Candidates are deliberately not filtered by project: relating across
+                // projects is the point of this edge.
+                let relation_targets = self
+                    .items
+                    .iter()
+                    .filter(|candidate| candidate.item.id != item.item.id)
+                    .filter(|candidate| {
+                        relation_query.is_empty()
+                            || candidate
+                                .item
+                                .title
+                                .to_lowercase()
+                                .contains(&relation_query)
+                    })
+                    .map(|candidate| (candidate.item.id.to_string(), candidate.item.title.clone()))
+                    .take(5)
+                    .collect::<Vec<_>>();
+                for (id, title) in relation_targets {
+                    if ui
+                        .small_button(format!("{} {title}", self.relation_draft))
+                        .clicked()
+                    {
+                        self.add_relation(id);
+                    }
                 }
             }
         }
@@ -1400,26 +1442,32 @@ impl TodoGui {
                 });
             }
         }
+        let mut show_tag_suggestions = false;
         ui.horizontal(|ui| {
-            ui.text_edit_singleline(&mut self.tag_draft);
+            let tag_input = ui
+                .add(egui::TextEdit::singleline(&mut self.tag_draft).hint_text("Search tag paths"));
+            show_tag_suggestions =
+                tag_input.hovered() || tag_input.has_focus() || !self.tag_draft.trim().is_empty();
             if ui.button("Add tag").clicked() {
                 self.add_tag();
             }
         });
-        let tag_query = self.tag_draft.to_lowercase();
-        let tag_matches = self
-            .assigned_tag_paths()
-            .into_iter()
-            .filter(|path| {
-                !item.namespaces.iter().any(|tag| tag.as_str() == path)
-                    && (tag_query.is_empty() || path.to_lowercase().contains(&tag_query))
-            })
-            .take(5)
-            .collect::<Vec<_>>();
-        for namespace in tag_matches {
-            if ui.small_button(format!("Add {namespace}")).clicked() {
-                self.tag_draft = namespace;
-                self.add_tag();
+        if show_tag_suggestions {
+            let tag_query = self.tag_draft.to_lowercase();
+            let tag_matches = self
+                .assigned_tag_paths()
+                .into_iter()
+                .filter(|path| {
+                    !item.namespaces.iter().any(|tag| tag.as_str() == path)
+                        && (tag_query.is_empty() || path.to_lowercase().contains(&tag_query))
+                })
+                .take(5)
+                .collect::<Vec<_>>();
+            for namespace in tag_matches {
+                if ui.small_button(format!("Add {namespace}")).clicked() {
+                    self.tag_draft = namespace;
+                    self.add_tag();
+                }
             }
         }
         if self.inspector.show_notes {
