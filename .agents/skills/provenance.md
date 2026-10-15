@@ -58,6 +58,15 @@ is not a skill and should not be loaded as a procedure.
   and ID convention. The archived Cat-1a through Cat-7 vocabulary is evidence,
   not required QMR policy.
 
+## Todo Ledger
+
+- Skill: `todo-ledger/SKILL.md`
+- Source: written 2026-10-14 by agent-assistant in `todo_app_project`
+  (ledger item `zitun-funiv`), against `todo` CLI v0.3.0, protocol v13.
+- Review boundary: command names and flags track the `todo` CLI; re-check them
+  against `todo --help` when the CLI changes. `todo sync` is an external Git
+  push and stays behind explicit approval.
+
 ## Captured CDINT Grid Skills
 
 - Source root: `reference/source-guides/cdint-grid_skills/`
