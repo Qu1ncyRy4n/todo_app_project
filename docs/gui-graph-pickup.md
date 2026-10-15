@@ -432,7 +432,7 @@ Values that carry data or protocol meaning are deliberately not configurable.
 
 ```sh
 ./dev check   # cargo fmt --check, then clippy --workspace --all-targets -D warnings
-./dev test    # 237 tests: 166 todo-gui, 35 todo-core, 22 todo-store, 14 todo-cli (2026-10-14)
+./dev test    # 233 tests: 162 todo-gui, 35 todo-core, 22 todo-store, 14 todo-cli (2026-10-14)
 ```
 
 `./dev check` passed after the live Dynamic-family update. A full `./dev test` run

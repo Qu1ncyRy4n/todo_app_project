@@ -15,14 +15,25 @@ after the October 14 session".
   actors, roles on links, projects keyed by repo, KDL manifests, `relates-to`)
   and TE-0017 (habits as occurrence events summarized by stats). The
   quick-entry research is `docs/research/task-field-survey.md`.
-- **Ledger:** todo-app work lives under `ruris-nipal` (feature sprint) and
-  `tafuf-hohob` (identity and sync sprint), tagged `tag/work/apps/todo-app`,
-  with GUI items under `…/gui`. This repo is not attached as a project; tags
-  carry it, pending TE-0016's repo-keyed projects.
-- **Queued quick wins:** document the current appearance defaults
-  (`kapah-danip`); `todo import markdown --parent <id>` with `--dry-run`
-  (`rutas-mumik`; show usage and output before building); an agent skill for the
-  todo CLI (`zitun-funiv`).
+- **Ledger:** todo-app work lives under the roadmap `ruris-nipal`, split into
+  sprints: identity and sync (`tafuf-hohob`), GUI (`kufod-mogar`, with a
+  needs-spec views sub-sprint `tibum-zivim`), entry and CLI ergonomics
+  (`tasir-visok`), model and relations (`tajam-havag`), naming and config
+  (`razam-nobir`), and modes and navigation (`gusol-difon`). Tagged
+  `tag/work/apps/todo-app`, GUI items under `…/gui`. This repo is not attached
+  as a project; tags carry it, pending TE-0016's repo-keyed projects.
+- **Modes (needs spec):** `nogul-darat` holds the developer's sketch of a DO
+  sequence (a stack, one open item, no wandering) and a PLAN traversal (fast
+  task/subtask/dependency navigation). It depends on the binding layer
+  `viguz-nodit`.
+- **Done this session:** appearance snapshot `docs/themes/developer-2026-10.toml`
+  (`kapah-danip`); Graph design tree removed (`higod-rugar`).
+- **In progress:** the `todo-ledger` agent skill (`zitun-funiv`) is drafted in
+  `qmr-agents-library/skills/todo-ledger/`, uncommitted there and not yet
+  rendered into this repo's `.agents/skills/`.
+- **Deferred by the developer:** the rename (`jalil-kimop`, deferred to
+  2026-10-15); `todo import markdown --parent <id>` (`rutas-mumik`; show usage
+  and `--dry-run` output before building).
 - **Deferred:** `clap_complete` shell completion (`docs/development.md`). zsh
   binds its `_devtodo` completer to `todo`; `compdef -d todo` silences it.
 - **External:** another agent is wiring matugen through Nix to generate the
@@ -38,7 +49,7 @@ handoff lives.
 ```sh
 nix develop          # everything runs in the pinned shell; ./dev wraps it
 ./dev check          # cargo fmt --check, then clippy -D warnings
-./dev test           # 237 tests
+./dev test           # 233 tests
 ./dev gui            # the graph editor against the real ledger
 ./dev run -- ls --tree
 ```
