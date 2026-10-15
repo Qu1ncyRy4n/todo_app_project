@@ -55,6 +55,13 @@ requirements:
 - Developer workflow tools: add `direnv`, Devenv, watch tools, benchmarks, or
   mutation testing only for demonstrated needs. The existing direct Nix flake
   remains the default toolchain definition.
+- Shell completion: zsh binds its bundled `_devtodo` completer to `todo`, so
+  Tab runs this binary with devtodo's flags and fails with
+  `unexpected argument '-f' found`. Planned fix: add `clap_complete`, expose
+  `todo completions <shell>`, write the zsh script to a directory on `fpath`
+  such as `~/.zfunc/_todo`, and run `compdef _todo todo` after `compinit` so it
+  overrides `_devtodo`. Until then, `compdef -d todo` in `.zshrc` silences the
+  error. Item IDs can be completed dynamically later.
 
 Do not enable broad Clippy groups such as `pedantic`, `nursery`, or
 `restriction` wholesale. Trial individual lints as warnings, fix or document
