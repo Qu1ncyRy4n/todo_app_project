@@ -17,9 +17,10 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fs, path::PathBuf};
 use tags::{TagFilter, TagFilterState};
 use theme::{
-    Channel, CloudMemberShape, ConnectorStyle, FamilyChildStyle, FamilyHeaderStyle, FamilyView,
-    FamilyWellFill, InspectorTheme, NodeShape, NormalizeStyle, ParentRegionStyle, RegionShape,
-    TagCloudLinkMode, TagColoring, TagInheritance, TagPalette, Theme,
+    Channel, CloudMemberShape, ColorMode, ConnectorStyle, FamilyChildStyle, FamilyHeaderStyle,
+    FamilyView, FamilyWellFill, InspectorTheme, NodeShape, NormalizeStyle, ParentRegionStyle,
+    RegionShape, TagCloudLinkMode, TagColoring, TagInheritance, TagPalette, TagTheme,
+    TerminalPalette, Theme,
 };
 use todo_core::{ItemId, ItemState, NamespacePath, Priority, RelationKind, WeightInputs};
 use todo_store::{
@@ -206,6 +207,9 @@ struct TodoGui {
     graph_zoom: f32,
     theme: Theme,
     theme_path: PathBuf,
+    /// Cleared on load and on Reload theme, so the next frame applies the color
+    /// mode and palette; applying needs the egui context, which only a frame has.
+    colors_applied: bool,
     inspector: InspectorTheme,
     layout_undo: Option<LayoutUndo>,
     normalize_requested: bool,
@@ -336,6 +340,7 @@ impl TodoGui {
             inspector: theme.inspector,
             theme,
             theme_path,
+            colors_applied: false,
             layout_undo: None,
             normalize_requested: false,
             reset_view_requested: false,
@@ -2622,12 +2627,54 @@ impl TodoGui {
             Ok(theme) => {
                 self.inspector = theme.inspector;
                 self.theme = theme;
+                self.colors_applied = false;
                 if self.message.is_none() {
                     self.message = Some("Theme reloaded.".to_owned());
                 }
             }
             Err(error) => self.message = Some(format!("Theme not loaded: {error:#}")),
         }
+    }
+
+    /// Applies the color mode and any borrowed terminal palette to egui.
+    ///
+    /// The palette restyles the surfaces only: panels, canvas, text, selection,
+    /// and links. Card colors stay with the tag and status channels.
+    fn apply_colors(&mut self, ctx: &egui::Context) {
+        let colors = &self.theme.colors;
+        // ponytail: in system mode the palette lands on whichever appearance is
+        // current at load; an OS switch afterwards shows egui's stock visuals until
+        // Reload theme. Apply to both themes if that ever matters.
+        let (preference, theme) = match colors.mode {
+            ColorMode::Dark => (egui::ThemePreference::Dark, egui::Theme::Dark),
+            ColorMode::Light => (egui::ThemePreference::Light, egui::Theme::Light),
+            ColorMode::System => (egui::ThemePreference::System, ctx.theme()),
+        };
+        ctx.set_theme(preference);
+        let Some(path) = colors.palette_path() else {
+            return;
+        };
+        let palette = match fs::read_to_string(&path) {
+            Ok(text) => TerminalPalette::parse_ghostty(&text),
+            Err(error) => {
+                self.message = Some(format!("Palette not read from {}: {error}", path.display()));
+                return;
+            }
+        };
+        let mut visuals = theme.default_visuals();
+        if let Some(background) = palette.background {
+            visuals.panel_fill = background;
+            visuals.window_fill = background;
+            visuals.extreme_bg_color = background;
+        }
+        visuals.override_text_color = palette.foreground;
+        if let Some(selection) = palette.selection {
+            visuals.selection.bg_fill = selection;
+        }
+        if let Some(accent) = palette.accent {
+            visuals.hyperlink_color = accent;
+        }
+        ctx.set_visuals_of(theme, visuals);
     }
 
     /// Writes the current theme to disk, as a starting point or to keep changes.
@@ -3440,6 +3487,10 @@ fn matches_query(query: &str, title: &str, ids: &[String], tags: &[String]) -> b
 
 impl eframe::App for TodoGui {
     fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
+        if !self.colors_applied {
+            self.colors_applied = true;
+            self.apply_colors(ui.ctx());
+        }
         // `/` reaches the search box from anywhere on the canvas; Escape leaves it.
         // Both are gated on the canvas having focus so typing a title is unaffected.
         if !ui.ctx().egui_wants_keyboard_input()
@@ -5566,7 +5617,7 @@ fn draw_clean_tag_clouds(painter: &egui::Painter, clouds: &[TagCloud], theme: &T
     let context = painter.ctx();
     let backdrop = context.style_of(context.theme()).visuals.panel_fill;
     for cloud in clouds {
-        let fill = cloud_pastel(cloud.color, backdrop);
+        let fill = cloud_pastel(cloud.color, backdrop, &theme.tag);
         let padding = cloud_member_padding(&cloud.path, theme, zoom);
         let members = cloud
             .members
@@ -5622,7 +5673,7 @@ fn draw_clean_tag_clouds(painter: &egui::Painter, clouds: &[TagCloud], theme: &T
                 let fallback_fill = fallback
                     .colors
                     .first()
-                    .map_or(backdrop, |color| cloud_pastel(*color, backdrop));
+                    .map_or(backdrop, |color| cloud_pastel(*color, backdrop, &theme.tag));
                 draw_cloud_member(
                     painter,
                     foreign,
@@ -5676,7 +5727,7 @@ fn draw_multi_tag_cloud_members(
         let member = rect.expand(cloud_member_padding(deepest, theme, zoom));
         let fill = colors
             .first()
-            .map_or(backdrop, |color| cloud_pastel(*color, backdrop));
+            .map_or(backdrop, |color| cloud_pastel(*color, backdrop, &theme.tag));
         draw_cloud_member(painter, member, fill, colors, theme, zoom);
     }
 }
@@ -5769,7 +5820,7 @@ fn draw_cloud_member(
         return;
     }
     match theme.tag.cloud_member_shape {
-        CloudMemberShape::Circle => draw_diagonal_cloud_stripes(painter, member, colors),
+        CloudMemberShape::Circle => draw_diagonal_cloud_stripes(painter, member, colors, theme),
         CloudMemberShape::Card => {
             // Card-clouds keep a simple horizontal split. Their squared rails
             // make diagonal strokes look like accidental connector fragments;
@@ -5794,7 +5845,7 @@ fn draw_cloud_member(
                 clipped.rect_filled(
                     member,
                     app_cloud_rounding(theme, zoom),
-                    cloud_pastel(*color, backdrop),
+                    cloud_pastel(*color, backdrop, &theme.tag),
                 );
             }
         }
@@ -5804,7 +5855,12 @@ fn draw_cloud_member(
 /// Fills a circular cloud with diagonal stripe polygons clipped against a
 /// many-sided circular boundary. Filled geometry avoids stroke caps creating a
 /// saw-toothed edge.
-fn draw_diagonal_cloud_stripes(painter: &egui::Painter, member: Rect, colors: &[Color32]) {
+fn draw_diagonal_cloud_stripes(
+    painter: &egui::Painter,
+    member: Rect,
+    colors: &[Color32],
+    theme: &Theme,
+) {
     let center = member.center();
     let radius = member.size().length() / 2.0;
     let backdrop = painter
@@ -5814,7 +5870,7 @@ fn draw_diagonal_cloud_stripes(painter: &egui::Painter, member: Rect, colors: &[
         .panel_fill;
     let palette = colors
         .iter()
-        .map(|color| cloud_pastel(*color, backdrop))
+        .map(|color| cloud_pastel(*color, backdrop, &theme.tag))
         .collect::<Vec<_>>();
     // This is a texture, not a small number of competing wedges. Keep the
     // stripes narrow enough that a two-tag cloud reads as one circular field.
@@ -5952,16 +6008,8 @@ fn draw_cloud_label(
 /// Opacity would be composited once per circle and make a shared cloud darker at
 /// its joins. Pre-blending once keeps the deliberately clean circle geometry while
 /// making every overlap read as the same continuous body.
-fn cloud_pastel(color: Color32, backdrop: Color32) -> Color32 {
-    fn blend(channel: u8, backdrop: u8) -> u8 {
-        let mixed = (u16::from(channel) * 16 + u16::from(backdrop) * 84) / 100;
-        u8::try_from(mixed).map_or(u8::MAX, |value| value)
-    }
-    Color32::from_rgb(
-        blend(color.r(), backdrop.r()),
-        blend(color.g(), backdrop.g()),
-        blend(color.b(), backdrop.b()),
-    )
+fn cloud_pastel(color: Color32, backdrop: Color32, tag: &TagTheme) -> Color32 {
+    blend_color(backdrop, color, tag.cloud_mix_over(backdrop))
 }
 
 /// Moves a redundant outline toward its surrounding fill without removing the

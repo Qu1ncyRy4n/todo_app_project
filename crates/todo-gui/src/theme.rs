@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     fs,
-    path::Path,
+    path::{Path, PathBuf},
 };
 use todo_core::WeightFactors;
 
@@ -33,6 +33,7 @@ pub struct Theme {
     pub node: NodeTheme,
     pub tag: TagTheme,
     pub edge: EdgeTheme,
+    pub colors: ColorsTheme,
 }
 
 impl Theme {
@@ -350,6 +351,92 @@ impl NodeTheme {
             NodeShape::Capsule => self.height / 2.0,
             NodeShape::Circle => self.radius,
         }
+    }
+}
+
+/// Window color mode, and an optional terminal theme to borrow colors from.
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ColorsTheme {
+    /// `dark`, `light`, or `system`.
+    ///
+    /// Dark by default: cards are drawn for a dark canvas and read poorly on
+    /// egui's light panels.
+    pub mode: ColorMode,
+    /// A Ghostty-format theme file whose background, foreground, selection, and
+    /// cursor colors restyle the panels and canvas. Empty keeps egui's palette.
+    ///
+    /// A leading `~/` is the home directory, so a terminal theme or a matugen
+    /// template output can be pointed at directly.
+    pub palette_file: String,
+}
+
+impl Default for ColorsTheme {
+    fn default() -> Self {
+        Self {
+            mode: ColorMode::Dark,
+            palette_file: String::new(),
+        }
+    }
+}
+
+impl ColorsTheme {
+    /// Resolves `palette_file`, or `None` when no palette is configured.
+    pub fn palette_path(&self) -> Option<PathBuf> {
+        let file = self.palette_file.trim();
+        if file.is_empty() {
+            return None;
+        }
+        match (file.strip_prefix("~/"), std::env::var_os("HOME")) {
+            (Some(rest), Some(home)) => Some(PathBuf::from(home).join(rest)),
+            _ => Some(PathBuf::from(file)),
+        }
+    }
+}
+
+/// Which egui visuals the window uses.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ColorMode {
+    #[default]
+    Dark,
+    Light,
+    /// Follow the operating system's appearance.
+    System,
+}
+
+/// Colors borrowed from a terminal theme. Each is optional, since a theme file
+/// may set only some of them.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TerminalPalette {
+    pub background: Option<Color32>,
+    pub foreground: Option<Color32>,
+    pub selection: Option<Color32>,
+    pub accent: Option<Color32>,
+}
+
+impl TerminalPalette {
+    /// Reads Ghostty's `key = #rrggbb` lines.
+    ///
+    /// Unknown keys, comments, and the numbered `palette = N=#…` entries are
+    /// ignored; the editor only needs the four surface colors.
+    pub fn parse_ghostty(text: &str) -> Self {
+        let mut palette = Self::default();
+        for line in text.lines() {
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            let hex = value.trim().trim_start_matches('#');
+            let color = Color32::from_hex(&format!("#{hex}")).ok();
+            match key.trim() {
+                "background" => palette.background = color,
+                "foreground" => palette.foreground = color,
+                "selection-background" => palette.selection = color,
+                "cursor-color" => palette.accent = color,
+                _ => {}
+            }
+        }
+        palette
     }
 }
 
@@ -1016,6 +1103,11 @@ pub struct TagTheme {
     pub label_font_size: f32,
     /// Narrowest region, in points, that still gets a label.
     pub label_min_width: f32,
+    /// Percent of the tag color in a cloud fill over a light canvas; the rest is
+    /// the canvas color.
+    pub cloud_mix: u8,
+    /// The same percent over a dark canvas, where a faint mix all but vanishes.
+    pub cloud_mix_dark: u8,
 }
 
 impl Default for TagTheme {
@@ -1052,11 +1144,25 @@ impl Default for TagTheme {
             label_full_path: false,
             label_font_size: 11.0,
             label_min_width: 70.0,
+            cloud_mix: 16,
+            cloud_mix_dark: 40,
         }
     }
 }
 
 impl TagTheme {
+    /// Returns the cloud mix for a canvas color, choosing by its luminance.
+    pub fn cloud_mix_over(&self, backdrop: Color32) -> u8 {
+        let luma = u32::from(backdrop.r()) * 299
+            + u32::from(backdrop.g()) * 587
+            + u32::from(backdrop.b()) * 114;
+        if luma < 128_000 {
+            self.cloud_mix_dark
+        } else {
+            self.cloud_mix
+        }
+    }
+
     /// Colors a tag path from its top-level group hue, darkened once per depth.
     ///
     /// A child tag is a deeper shade of its parent: `work` and `work/cdint` share
@@ -1094,14 +1200,51 @@ impl TagTheme {
 #[cfg(test)]
 mod tests {
     use super::{
-        CloudMemberShape, EdgeTheme, FamilyWellFill, NodeShape, NodeTheme, TagCloudLinkMode,
-        TagColoring, TagPalette, TagTheme, Theme, branch_weight,
+        CloudMemberShape, ColorMode, EdgeTheme, FamilyWellFill, NodeShape, NodeTheme,
+        TagCloudLinkMode, TagColoring, TagPalette, TagTheme, TerminalPalette, Theme, branch_weight,
     };
     use eframe::egui::Color32;
     use std::{
         collections::{BTreeMap, BTreeSet, HashMap},
         path::Path,
     };
+
+    #[test]
+    fn a_ghostty_theme_supplies_the_surface_colors() {
+        let palette = TerminalPalette::parse_ghostty(
+            "# comment\nbackground = #1a2f1f\nforeground = c8d4aa\n\
+             selection-background = #7ba428\ncursor-color = #9bc53d\npalette = 0=#3d5c43\n",
+        );
+        assert_eq!(
+            palette.background,
+            Some(Color32::from_rgb(0x1a, 0x2f, 0x1f))
+        );
+        assert_eq!(
+            palette.foreground,
+            Some(Color32::from_rgb(0xc8, 0xd4, 0xaa))
+        );
+        assert_eq!(palette.selection, Some(Color32::from_rgb(0x7b, 0xa4, 0x28)));
+        assert_eq!(palette.accent, Some(Color32::from_rgb(0x9b, 0xc5, 0x3d)));
+    }
+
+    #[test]
+    fn clouds_mix_stronger_over_a_dark_canvas() {
+        let tag = TagTheme::default();
+        assert_eq!(tag.cloud_mix_over(Color32::from_gray(248)), tag.cloud_mix);
+        assert_eq!(
+            tag.cloud_mix_over(Color32::from_rgb(0x1a, 0x2f, 0x1f)),
+            tag.cloud_mix_dark
+        );
+    }
+
+    #[test]
+    fn colors_default_to_dark_without_a_palette() {
+        let parsed: Result<Theme, _> = toml::from_str("[colors]\nmode = \"light\"\n");
+        assert!(matches!(parsed, Ok(theme) if theme.colors.mode == ColorMode::Light));
+        let defaults = Theme::default().colors;
+        assert_eq!(defaults.mode, ColorMode::Dark);
+        assert_eq!(defaults.palette_path(), None);
+    }
 
     #[test]
     fn the_example_theme_files_parse() {

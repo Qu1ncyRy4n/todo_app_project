@@ -22,3 +22,18 @@ stands, and what it belongs to, in one glance.
 
 - `semantic-body.toml` — the default arrangement, stated explicitly
 - `status-first.toml` — status everywhere, tags only in their regions
+
+## Window colors
+
+```toml
+[colors]
+mode = "dark"                                   # dark (default), light, or system
+palette_file = "~/.config/ghostty/themes/green" # optional Ghostty-format theme
+```
+
+`palette_file` takes any Ghostty theme file. Its `background`, `foreground`,
+`selection-background`, and `cursor-color` restyle the panels, canvas, text,
+selection, and links; card colors stay with the visual channels above. Because
+the format is Ghostty's, one generated file can drive both the terminal and the
+editor: point a matugen Ghostty template's output path here. Press Reload theme
+after the file changes.
