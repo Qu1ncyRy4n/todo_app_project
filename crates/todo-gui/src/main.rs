@@ -1,6 +1,5 @@
 //! Native graph editor for the local Todo Ledger.
 
-mod appearance_lab;
 mod geometry;
 mod palette;
 mod tags;
@@ -289,8 +288,6 @@ struct TodoGui {
     search_focus: bool,
     show_filters: bool,
     show_inspector: bool,
-    show_appearance_lab: bool,
-    appearance_lab: appearance_lab::LabState,
 }
 
 /// A local presentation override for one parent family. It belongs to the GUI
@@ -429,8 +426,6 @@ impl TodoGui {
             search_focus: false,
             show_filters: true,
             show_inspector: true,
-            show_appearance_lab: false,
-            appearance_lab: appearance_lab::LabState::default(),
         };
         app.refresh_if_ledger_changed();
         app.theme_seen = app.theme_stamps();
@@ -2856,11 +2851,6 @@ impl TodoGui {
             }
         }
     }
-
-    /// Fixed comparisons for reviewing graph appearance before changing the live renderer.
-    fn draw_appearance_lab(&mut self, ctx: &egui::Context) {
-        appearance_lab::show(ctx, &mut self.show_appearance_lab, &mut self.appearance_lab);
-    }
     fn save_layout(&mut self) {
         let layout = LocalGraphLayout {
             node_offsets: self
@@ -3656,7 +3646,6 @@ impl eframe::App for TodoGui {
                 ui.separator();
                 ui.toggle_value(&mut self.show_filters, "Filters");
                 ui.toggle_value(&mut self.show_inspector, "Inspector");
-                ui.toggle_value(&mut self.show_appearance_lab, "Graph design tree");
                 ui.separator();
                 ui.label("Search");
                 let search = ui.add(
@@ -3729,7 +3718,6 @@ impl eframe::App for TodoGui {
                 .show(ui, |ui| self.draw_inspector(ui));
         }
         egui::CentralPanel::default().show(ui, |ui| draw_graph(ui, self));
-        self.draw_appearance_lab(ui.ctx());
     }
 }
 

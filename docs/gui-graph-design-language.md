@@ -133,7 +133,9 @@ padding. They annotate cards; they do not form a child well or parent outline.
 
 ## Graph design comparisons
 
-The toolbar's **Graph design tree** uses one multi-generation dummy graph with
+The **Graph design tree** window was removed on 2026-10-14 once its choices were
+settled in `theme.toml`; this section records how those choices were compared.
+It used one multi-generation dummy graph with
 two fixed arrangements: parent above, or parent among its children. A near
 child, a distant child, a grandchild, a cross-family neighbor, and dependency
 arrows stay in the same positions as choices change. Step through four
@@ -242,9 +244,9 @@ change. Its provisional rule is:
    does not remove the grandchild from its outer family's containment.
 
 This expresses the three live Dynamic outcomes—**connected box**, **detached
-box**, and **tree only**—with fewer connector primitives. The sketch remains a
-controlled way to compare them, but the live renderer now uses the same core
-rule: direct-child count and transitive center-to-center proximity.
+box**, and **tree only**—with fewer connector primitives. The live renderer
+uses the same core rule the sketch did: direct-child count and transitive
+center-to-center proximity.
 
 The live default configuration, all exposed under **Appearance**, is:
 

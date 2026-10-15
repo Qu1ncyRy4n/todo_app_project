@@ -13,13 +13,15 @@ Shipped and confirmed in a running window by the developer:
 - Cloud fills mix more strongly over a dark canvas (slice 55). The developer's
   tuned appearance had been read on egui's light canvas.
 - The editor no longer locks the CLI out (slice 56).
+- The **Graph design tree** window is removed (`higod-rugar`). `theme.toml`
+  settles box / attached tab / nested family, and the reviewed Dynamic policy
+  is live in `ParentTheme`, so only the sketch went. Sections below that
+  describe the sketch are history; the code is recoverable from commit
+  `1f3d7b8` and earlier.
 
-Decided, not yet done (ledger items under `ruris-nipal`, tagged
+Decided, not yet done (ledger items under the GUI sprint `kufod-mogar`, tagged
 `tag/work/apps/todo-app/gui`):
 
-- Remove the **Graph design tree** window (`appearance_lab.rs`, `higod-rugar`).
-  `theme.toml` already settles box / attached tab / nested family, and the
-  reviewed Dynamic policy is live in `ParentTheme`, so only the sketch goes.
 - One normalize algorithm (`hurik-duliv`). Today they
   differ: G over a card runs `tree_positions_at_levels` with parents only, empty
   levels, no `done_above`, no `compact_active` packing, and no framing, using
@@ -33,7 +35,7 @@ Unverified: `mode = "system"` applies the palette only to the appearance that
 was current at load (marked `ponytail:` in `apply_colors`).
 
 The stable names and visual contracts for family frames, anchors, tree lines,
-tag clouds, and the Graph design tree window live in
+and tag clouds live in
 [Graph Design Language](gui-graph-design-language.md). Read it before changing
 graph rendering; this pickup focuses on implementation state.
 
@@ -45,12 +47,9 @@ now groups only actual nearby direct children: a cluster below its threshold is
 tree-only, a nearby aligned boxed cluster gets a narrow direct rim join, and a
 remote boxed cluster keeps the ordinary family tree. An explicitly Boxed family
 still draws a true, potentially wide frame around all of its direct children.
-The **Graph design tree** remains a fixed fixture for comparing edge cases; it
-does not read or write ledger state.
 
 The reviewed Dynamic policy is now serialized in `ParentTheme` and exposed in
-the Appearance inspector. The sketch has independent in-memory controls for
-comparison, while the live values are saved via the ordinary theme workflow.
+the Appearance inspector, saved via the ordinary theme workflow.
 
 ## Pickup: the current family-design decision
 
@@ -109,7 +108,11 @@ the Appearance inspector.
 longer shown in Appearance or used by Dynamic grouping; `n` and `m` determine
 which child groups receive a frame.
 
-### How to inspect the sketches
+### How the sketches were inspected (window removed 2026-10-14)
+
+Steps 1-4 and 6-7 describe the removed **Graph design tree** window and are
+kept as the record of how the live defaults were chosen. Step 5 still applies
+to the live ledger.
 
 1. Restart the app with `./dev gui`; the old running binary will not pick up
    source edits. Open **Graph design tree** from the toolbar.
@@ -167,12 +170,8 @@ transitive-proximity rule needs to change.
 
 ### Code and state map
 
-- `crates/todo-gui/src/appearance_lab.rs`: ledger-free comparison state,
-  both fixed pages, the transitive proximity grouping, and a focused grouping
-  test. The page's controls are in-memory only; it does not mutate the
-  production theme.
-- `crates/todo-gui/src/main.rs`: toolbar toggle and sketch window call;
-  `family_boxes` computes live Dynamic clusters and frame eligibility;
+- `crates/todo-gui/src/main.rs`: `family_boxes` computes live Dynamic
+  clusters and frame eligibility;
   `draw_family_tree` and `family_tree_geometry` draw live family routes. The
   live renderer uses a direct rim join only for a nearby aligned frame and has
   no detached Outline Anchor.
@@ -185,11 +184,6 @@ transitive-proximity rule needs to change.
   inspected read-only and had no explicit `child_depth` key, so reloading a
   newly built app should use the new All default. A different theme file with
   an explicit depth still overrides it.
-
-The current worktree changes are uncommitted. The new sketch file is untracked
-until explicitly staged; do not omit it when preparing a future focused
-commit. Preserve unrelated developer edits and keep the default Git mode of
-commit-only-when-asked.
 
 ## What is implemented in the current worktree
 
