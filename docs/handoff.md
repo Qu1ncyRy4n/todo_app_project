@@ -7,7 +7,10 @@ after the October 14 session".
 ## Where we left off, October 14
 
 - **Shipped:** dark mode with a Ghostty-format palette, and the editor no longer
-  locks the CLI out. Details are in the graph editor handoff, slices 54 to 56.
+  locks the CLI out (both confirmed in a window). Theme watch reloads
+  `theme.toml` and the palette on change (`mopuh-votod`, awaiting the
+  developer's window check). Details are in the graph editor handoff, slices
+  54 to 57.
 - **Design direction agreed, not built:** TE-0016 (one-line typed entry,
   actors, roles on links, projects keyed by repo, KDL manifests, `relates-to`)
   and TE-0017 (habits as occurrence events summarized by stats). The
@@ -23,7 +26,8 @@ after the October 14 session".
 - **Deferred:** `clap_complete` shell completion (`docs/development.md`). zsh
   binds its `_devtodo` completer to `todo`; `compdef -d todo` silences it.
 - **External:** another agent is wiring matugen through Nix to generate the
-  Ghostty theme `[colors] palette_file` points at.
+  Ghostty theme `[colors] palette_file` points at. No editor-side hook is
+  needed: theme watch picks up regenerated files and re-pointed symlinks.
 
 This is the entry point for picking the project up cold. It states what exists,
 what is deliberately not built, what is unverified, and where each area's own
