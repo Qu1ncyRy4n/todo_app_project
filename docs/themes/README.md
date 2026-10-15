@@ -22,6 +22,8 @@ stands, and what it belongs to, in one glance.
 
 - `semantic-body.toml` — the default arrangement, stated explicitly
 - `status-first.toml` — status everywhere, tags only in their regions
+- `developer-2026-10.toml` — the developer's full tuned appearance, recorded
+  as of October 2026 rather than promoted to the code defaults
 
 ## Window colors
 

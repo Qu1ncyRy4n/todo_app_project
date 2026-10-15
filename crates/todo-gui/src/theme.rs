@@ -1251,6 +1251,7 @@ mod tests {
         for text in [
             include_str!("../../../docs/themes/semantic-body.toml"),
             include_str!("../../../docs/themes/status-first.toml"),
+            include_str!("../../../docs/themes/developer-2026-10.toml"),
         ] {
             let parsed: Result<Theme, _> = toml::from_str(text);
             assert!(parsed.is_ok(), "example theme failed to parse: {parsed:?}");

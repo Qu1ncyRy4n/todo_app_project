@@ -1,0 +1,159 @@
+# The developer's tuned appearance as of 2026-10-14, recorded rather than
+# promoted to the code defaults. Copy it to theme.toml to reproduce that look;
+# palette_file names a matugen-generated Ghostty theme on the developer's
+# machine and is reported, not fatal, where it does not exist.
+
+[weight]
+size_nodes_by_weight = false
+min_scale = 0.85
+max_scale = 1.45
+
+[weight.factors]
+priority = 1.0
+urgency = 1.0
+difficulty = 0.8
+estimate = 0.6
+descendants = 0.6
+urgency_horizon_days = 14.0
+estimate_full_hours = 8.0
+descendants_full = 8.0
+
+[inspector]
+open_status = true
+open_relationships = true
+open_details = true
+open_schedule = false
+open_advanced = false
+show_parent = true
+show_dependencies = true
+show_blockers = true
+show_relations = true
+show_focus_sequence = true
+show_dates = true
+show_sessions = true
+show_notes = true
+show_links = true
+show_raw_json = true
+
+[focus]
+band_gap = 235.0
+node_gap = 185.0
+row_gap = 95.0
+band_width = 4
+parents_of_active_read_active = true
+show_frame = true
+future_includes_deferred = true
+exile_multiplier = 3.2
+exiled_alpha = 70
+zoom_to_active = true
+zoom_margin = 90.0
+
+[timeline]
+axis = "left_right"
+scale = "elapsed"
+show_durations = true
+hours_per_day = 8.0
+day_width = 120.0
+lane_height = 82.0
+show_ruler = true
+ruler_margin_days = 2
+ruler_top_offset = 34.0
+reset_view = true
+park_unscheduled = true
+
+[parent]
+show_regions = true
+region_style = "box"
+header_style = "attached_tab"
+child_style = "nested_family"
+well_fill = "transparent"
+header_height = 18.0
+nest_padding = 14.0
+corner_radius = 10.0
+min_descendants = 1
+padding = 12.0
+smoothing = 2
+fill_alpha = 14
+stroke_alpha = 90
+stroke_width = 1.5
+
+[layout]
+style = "hierarchy"
+leaf_gap = 210.0
+row_gap = 130.0
+done_band_gap = 190.0
+done_above = true
+compact_active = true
+active_head_gap = 240.0
+group_column_gap = 280.0
+group_row_gap = 96.0
+direction = "down"
+layer_gap = 120.0
+node_gap = 185.0
+follow_parents = true
+follow_dependencies = true
+separation_iterations = 14
+separation_attraction = 0.1
+separation_repulsion = 14.0
+separation_radius = 420.0
+separate_after_layout = true
+animate = true
+transition_ms = 420.0
+relax_overlaps_after_layout = true
+overlap_gap = 26.0
+overlap_iterations = 60
+overlap_strength = 0.65
+follow_blockers = false
+
+[node]
+shape = "rounded_rect"
+width = 150.0
+height = 58.0
+radius = 34.0
+corner_radius = 7.0
+title_font_size = 14.0
+meta_font_size = 11.0
+show_meta_line = true
+bar_encodes = "status"
+body_encodes = "tag"
+outline_encodes = "tag"
+body_tint_value = 0.26
+outline_width = 1.6
+wrap_titles = true
+text_padding = 9.0
+max_height = 190.0
+
+[tag]
+base_saturation = 0.45
+depth_saturation_step = 0.08
+base_value = 0.72
+depth_value_step = 0.13
+min_value = 0.22
+max_saturation = 0.85
+region_fill_alpha = 26
+region_stroke_alpha = 110
+node_stripe_width = 7.0
+region_shape = "cloud"
+region_padding = 24.0
+region_smoothing = 2
+coloring = "wheel"
+inherit = "implicit"
+colormap = "rainbow"
+brightness = 1.15
+cluster_distance = 420.0
+min_region_members = 2
+label_full_path = false
+label_font_size = 11.0
+label_min_width = 70.0
+
+[edge]
+width = 2.0
+arrowhead_length = 11.0
+arrowhead_width = 9.0
+dash_relations = true
+relation_dash_length = 9.0
+scale_arrowheads_with_zoom = false
+
+[colors]
+mode = "dark"
+palette_file = "~/.config/ghostty/themes/matugen"
