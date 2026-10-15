@@ -1,6 +1,36 @@
 # GUI Graph Implementation Pickup
 
-Updated: 2026-09-30
+Updated: 2026-10-14
+
+## Session, October 14
+
+Shipped and confirmed in a running window by the developer:
+
+- Dark mode and a borrowed terminal palette (slice 54). `[colors]` in
+  `theme.toml`; the developer's file points at
+  `~/.config/ghostty/themes/green`. Another agent is wiring matugen through
+  Nix to generate that file.
+- Cloud fills mix more strongly over a dark canvas (slice 55). The developer's
+  tuned appearance had been read on egui's light canvas.
+- The editor no longer locks the CLI out (slice 56).
+
+Decided, not yet done (ledger items under `ruris-nipal`, tagged
+`tag/work/apps/todo-app/gui`):
+
+- Remove the **Graph design tree** window (`appearance_lab.rs`, `higod-rugar`).
+  `theme.toml` already settles box / attached tab / nested family, and the
+  reviewed Dynamic policy is live in `ParentTheme`, so only the sketch goes.
+- One normalize algorithm (`hurik-duliv`). Today they
+  differ: G over a card runs `tree_positions_at_levels` with parents only, empty
+  levels, no `done_above`, no `compact_active` packing, and no framing, using
+  `leaf_gap`/`row_gap`/`tree_axis`, anchored at the root. G over the canvas runs
+  `hierarchy_layout` or `layered_positions` per `layout.style`, follows
+  dependencies and blockers per config, then separates, relaxes, and frames.
+  Unify on the whole-graph pipeline restricted to the family, keeping only the
+  anchoring; also let relation edges (leads-to, relates-to) inform ordering.
+
+Unverified: `mode = "system"` applies the palette only to the appearance that
+was current at load (marked `ponytail:` in `apply_colors`).
 
 The stable names and visual contracts for family frames, anchors, tree lines,
 tag clouds, and the Graph design tree window live in
@@ -353,6 +383,18 @@ dogfooding notes. Every slice below landed as its own commit with tests.
 53. Family connectors are drawn as a casing plus a core, one stroke the shared
     blue and the other the family's own fill, so a link says which family it
     belongs to. `parent.connector_style` chooses which carries the color.
+54. `[colors]` picks dark (default), light, or system egui visuals rather than
+    following the OS, since cards are drawn for a dark canvas. `palette_file`
+    reads a Ghostty-format theme; its `background`, `foreground`,
+    `selection-background`, and `cursor-color` restyle panels, canvas, text,
+    selection, and links. Applied on the first frame and after Reload theme.
+55. Cloud fills pre-blend `tag.cloud_mix` percent of the tag color over a light
+    canvas and `tag.cloud_mix_dark` over a dark one, chosen by canvas luminance.
+56. The editor holds a `LedgerAccess` (path and actor), not an open `Ledger`,
+    and opens the ledger per operation through `with_ledger`; Turso locks the
+    file for as long as it is open. It refreshes when the database or its WAL
+    changes, polled once a second (`ponytail:` note; a file watcher is the
+    upgrade). Covered by the CLI test `a_dropped_ledger_lets_another_process_write`.
 
 ## Configuration
 
@@ -362,7 +404,10 @@ rather than ignored. Reload theme re-reads it in place, and writes the current
 defaults the first time as an editable starting point.
 
 Sections: `[node]`, `[edge]`, `[tag]`, `[layout]`, `[focus]`, `[timeline]`,
-`[parent]`, `[weight]`, `[inspector]`. In `[parent]`, `header_style` accepts
+`[parent]`, `[weight]`, `[inspector]`, `[colors]`. `[colors]` takes `mode`
+(`dark`, `light`, `system`) and `palette_file` (a Ghostty theme path, `~/`
+allowed); see `docs/themes/README.md`. In `[tag]`, `cloud_mix` and
+`cloud_mix_dark` set cloud fill strength over light and dark canvases. In `[parent]`, `header_style` accepts
 `header` or `attached_tab`, and `child_style` accepts `recessed_board` or
 `nested_family`. `well_fill` accepts `transparent` or `dark`. `family_view`
 accepts `adaptive`, `boxed`, or `connected`, and `connector_style` accepts
@@ -386,7 +431,7 @@ Values that carry data or protocol meaning are deliberately not configurable.
 
 ```sh
 ./dev check   # cargo fmt --check, then clippy --workspace --all-targets -D warnings
-./dev test    # 227 tests: 157 todo-gui, 35 todo-core, 22 todo-store, 13 todo-cli
+./dev test    # 236 tests: 165 todo-gui, 35 todo-core, 22 todo-store, 14 todo-cli (2026-10-14)
 ```
 
 `./dev check` passed after the live Dynamic-family update. A full `./dev test` run

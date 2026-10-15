@@ -1,9 +1,29 @@
 # Project Handoff
 
-Updated: 2026-09-29
-Covers: workspace v0.3.0, protocol v13, `main` at "Write a project handoff and
-bring the docs up to date", plus uncommitted graph editor work implementing
-TE-0015.
+Updated: 2026-10-14
+Covers: workspace v0.3.0, protocol v13, `main` at "docs: update pickup notes
+after the October 14 session".
+
+## Where we left off, October 14
+
+- **Shipped:** dark mode with a Ghostty-format palette, and the editor no longer
+  locks the CLI out. Details are in the graph editor handoff, slices 54 to 56.
+- **Design direction agreed, not built:** TE-0016 (one-line typed entry,
+  actors, roles on links, projects keyed by repo, KDL manifests, `relates-to`)
+  and TE-0017 (habits as occurrence events summarized by stats). The
+  quick-entry research is `docs/research/task-field-survey.md`.
+- **Ledger:** todo-app work lives under `ruris-nipal` (feature sprint) and
+  `tafuf-hohob` (identity and sync sprint), tagged `tag/work/apps/todo-app`,
+  with GUI items under `…/gui`. This repo is not attached as a project; tags
+  carry it, pending TE-0016's repo-keyed projects.
+- **Queued quick wins:** document the current appearance defaults
+  (`kapah-danip`); `todo import markdown --parent <id>` with `--dry-run`
+  (`rutas-mumik`; show usage and output before building); an agent skill for the
+  todo CLI (`zitun-funiv`).
+- **Deferred:** `clap_complete` shell completion (`docs/development.md`). zsh
+  binds its `_devtodo` completer to `todo`; `compdef -d todo` silences it.
+- **External:** another agent is wiring matugen through Nix to generate the
+  Ghostty theme `[colors] palette_file` points at.
 
 This is the entry point for picking the project up cold. It states what exists,
 what is deliberately not built, what is unverified, and where each area's own
@@ -14,7 +34,7 @@ handoff lives.
 ```sh
 nix develop          # everything runs in the pinned shell; ./dev wraps it
 ./dev check          # cargo fmt --check, then clippy -D warnings
-./dev test           # 214 tests
+./dev test           # 236 tests
 ./dev gui            # the graph editor against the real ledger
 ./dev run -- ls --tree
 ```
@@ -29,7 +49,9 @@ decided says so in its `Status` line.
 One global event-sourced ledger. Events are immutable Grid-CBOR envelopes
 addressed by CID; SQLite is a projection that can be thrown away and rebuilt.
 Two clients read it: the `todo` CLI, which is the complete surface, and
-`todo-gui`, a native graph editor that is presentation only.
+`todo-gui`, a native graph editor that is presentation only. Both can run at
+once: the editor opens the ledger per operation, because Turso locks the file
+for as long as it is open.
 
 ```text
 crates/todo-core    domain, events, CIDs, proquints. No platform dependencies.
@@ -44,7 +66,7 @@ downstream of that staying true.
 
 ## Area handoffs
 
-- **Graph editor** — `docs/gui-graph-pickup.md`. Slices 1 to 49, every
+- **Graph editor** — `docs/gui-graph-pickup.md`. Slices 1 to 56, every
   configuration knob, the eight items of remaining work, and what is deferred by
   decision.
 - **Family display and Focus** — `docs/thought-experiments/TE-0015-graph-display-flow.md`.
