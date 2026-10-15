@@ -61,6 +61,23 @@ impl Harness {
     }
 }
 
+/// The editor opens the ledger per operation so the CLI is never locked out.
+/// That relies on a held `Ledger` locking other processes out and on dropping
+/// it releasing the file; Turso shares an open database within one process, so
+/// only a second process can observe either.
+#[test]
+fn a_dropped_ledger_lets_another_process_write() {
+    let harness = Harness::new();
+    harness.ok(&["init"]);
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let held = runtime
+        .block_on(todo_store::Ledger::open(&harness.data.join("ledger.db")))
+        .unwrap();
+    assert!(!harness.run(&["add", "Locked out"]).status.success());
+    drop(held);
+    harness.ok(&["add", "Written after release"]);
+}
+
 #[test]
 fn simultaneous_readers_wait_for_the_local_ledger() {
     let harness = Harness::new();

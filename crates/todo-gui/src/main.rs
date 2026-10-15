@@ -44,7 +44,12 @@ fn main() -> Result<()> {
         }
     };
     let runtime = Runtime::new().context("create GUI async runtime")?;
-    let ledger = runtime.block_on(Ledger::open_with_actor(&paths.database(), actor_id))?;
+    // Opened once up front so a broken ledger fails at launch, then released.
+    drop(runtime.block_on(Ledger::open_with_actor(&paths.database(), actor_id.clone()))?);
+    let access = LedgerAccess {
+        path: paths.database(),
+        actor_id,
+    };
     let layout_path = paths.config_dir.join("gui-layout.json");
     let theme_path = paths.config_dir.join("theme.toml");
     eframe::run_native(
@@ -53,13 +58,36 @@ fn main() -> Result<()> {
         Box::new(move |_| {
             Ok(Box::new(TodoGui::new(
                 runtime,
-                ledger,
+                access,
                 layout_path,
                 theme_path,
             )))
         }),
     )
     .context("run native Todo Ledger window")
+}
+
+/// Where the ledger lives and who the editor writes as.
+///
+/// Turso locks the database file for as long as it is open, so the editor holds
+/// this instead of an open `Ledger` and opens one per operation. The CLI is then
+/// locked out for milliseconds rather than for the whole session, and the
+/// store's open retry absorbs any overlap.
+struct LedgerAccess {
+    path: PathBuf,
+    actor_id: String,
+}
+
+impl LedgerAccess {
+    /// The latest modification time of the database and its write-ahead log.
+    fn modified(&self) -> Option<std::time::SystemTime> {
+        let mut wal = self.path.clone().into_os_string();
+        wal.push("-wal");
+        [self.path.as_os_str(), wal.as_os_str()]
+            .into_iter()
+            .filter_map(|path| fs::metadata(path).and_then(|meta| meta.modified()).ok())
+            .max()
+    }
 }
 
 /// What the graph is grouped by at one level.
@@ -161,7 +189,9 @@ struct DragAnchor {
 
 struct TodoGui {
     runtime: Runtime,
-    ledger: Ledger,
+    ledger: LedgerAccess,
+    /// Ledger file time at the last refresh; see `refresh_if_ledger_changed`.
+    ledger_seen: Option<std::time::SystemTime>,
     items: Vec<StoredItem>,
     namespaces: Vec<NamespaceEntry>,
     notes: Vec<Note>,
@@ -276,7 +306,12 @@ struct LayoutUndo {
 }
 
 impl TodoGui {
-    fn new(runtime: Runtime, ledger: Ledger, layout_path: PathBuf, theme_path: PathBuf) -> Self {
+    fn new(
+        runtime: Runtime,
+        ledger: LedgerAccess,
+        layout_path: PathBuf,
+        theme_path: PathBuf,
+    ) -> Self {
         let saved_layout = load_layout(&layout_path);
         let node_offsets = saved_layout
             .node_offsets
@@ -294,6 +329,7 @@ impl TodoGui {
         let mut app = Self {
             runtime,
             ledger,
+            ledger_seen: None,
             items: Vec::new(),
             namespaces: Vec::new(),
             notes: Vec::new(),
@@ -373,7 +409,7 @@ impl TodoGui {
             show_appearance_lab: false,
             appearance_lab: appearance_lab::LabState::default(),
         };
-        app.refresh();
+        app.refresh_if_ledger_changed();
         app
     }
 
@@ -386,10 +422,7 @@ impl TodoGui {
             return;
         };
         let relation = self.relation_draft;
-        match self
-            .runtime
-            .block_on(self.ledger.add_relation(&id, relation, &target))
-        {
+        match self.with_ledger(async |ledger| ledger.add_relation(&id, relation, &target).await) {
             Ok(_) => {
                 self.message = Some(format!("Relation {relation} added."));
                 self.refresh();
@@ -403,9 +436,7 @@ impl TodoGui {
         let Some(id) = self.selected.clone() else {
             return;
         };
-        match self
-            .runtime
-            .block_on(self.ledger.remove_relation(&id, relation, &target))
+        match self.with_ledger(async |ledger| ledger.remove_relation(&id, relation, &target).await)
         {
             Ok(_) => {
                 self.message = Some(format!("Relation {relation} removed."));
@@ -427,10 +458,7 @@ impl TodoGui {
                 return;
             }
         };
-        match self
-            .runtime
-            .block_on(self.ledger.set_difficulty(&id, parsed))
-        {
+        match self.with_ledger(async |ledger| ledger.set_difficulty(&id, parsed).await) {
             Ok(_) => {
                 self.message = Some("Difficulty saved.".to_owned());
                 self.refresh();
@@ -451,7 +479,7 @@ impl TodoGui {
                 return;
             }
         };
-        match self.runtime.block_on(self.ledger.set_estimate(&id, parsed)) {
+        match self.with_ledger(async |ledger| ledger.set_estimate(&id, parsed).await) {
             Ok(_) => {
                 self.message = Some("Estimate saved.".to_owned());
                 self.refresh();
@@ -2690,18 +2718,36 @@ impl TodoGui {
             .with_context(|| format!("write {}", self.theme_path.display()))
     }
 
+    /// Opens the ledger for one operation and closes it again; see `LedgerAccess`.
+    fn with_ledger<T>(&self, operation: impl AsyncFnOnce(&Ledger) -> Result<T>) -> Result<T> {
+        self.runtime.block_on(async {
+            let ledger =
+                Ledger::open_with_actor(&self.ledger.path, self.ledger.actor_id.clone()).await?;
+            operation(&ledger).await
+        })
+    }
+
+    /// Refreshes when the ledger files changed since the last look, which is
+    /// how a CLI write reaches an open editor.
+    ///
+    /// The stamp is taken after refreshing, so any write the refresh itself
+    /// causes while opening is not mistaken for an outside change.
+    fn refresh_if_ledger_changed(&mut self) {
+        if self.ledger.modified() != self.ledger_seen {
+            self.refresh();
+            self.ledger_seen = self.ledger.modified();
+        }
+    }
+
     fn refresh(&mut self) {
-        match self
-            .runtime
-            .block_on(self.ledger.list_items(ItemScope::All, true))
-        {
+        match self.with_ledger(async |ledger| ledger.list_items(ItemScope::All, true).await) {
             Ok(items) => {
                 self.items = items;
-                match self.runtime.block_on(self.ledger.namespaces()) {
+                match self.with_ledger(async |ledger| ledger.namespaces().await) {
                     Ok(namespaces) => self.namespaces = namespaces,
                     Err(error) => self.message = Some(format!("Could not load tags: {error:#}")),
                 }
-                match self.runtime.block_on(self.ledger.focus_sequences()) {
+                match self.with_ledger(async |ledger| ledger.focus_sequences().await) {
                     Ok(sequences) => self.focus_sequences = sequences,
                     Err(error) => {
                         self.message = Some(format!("Could not load focus sequences: {error:#}"))
@@ -2714,8 +2760,7 @@ impl TodoGui {
 
     fn create_focus_sequence(&mut self) {
         match self
-            .runtime
-            .block_on(self.ledger.create_focus_sequence(&self.focus_title_draft))
+            .with_ledger(async |ledger| ledger.create_focus_sequence(&self.focus_title_draft).await)
         {
             Ok(sequence) => {
                 self.selected_focus_sequence = Some(sequence.id);
@@ -2733,8 +2778,7 @@ impl TodoGui {
             return;
         };
         match self
-            .runtime
-            .block_on(self.ledger.add_focus_sequence_item(&sequence, &item))
+            .with_ledger(async |ledger| ledger.add_focus_sequence_item(&sequence, &item).await)
         {
             Ok(()) => {
                 self.message = Some("Added task to focus sequence.".to_owned());
@@ -2826,15 +2870,15 @@ impl TodoGui {
                 .scheduled_on
                 .map_or(String::new(), |date| date.to_string());
             self.selected = Some(id);
-            match self.runtime.block_on(self.ledger.notes(item.item.id)) {
+            match self.with_ledger(async |ledger| ledger.notes(item.item.id).await) {
                 Ok(notes) => self.notes = notes,
                 Err(error) => self.message = Some(format!("Could not load notes: {error:#}")),
             }
-            match self.runtime.block_on(self.ledger.citations(item.item.id)) {
+            match self.with_ledger(async |ledger| ledger.citations(item.item.id).await) {
                 Ok(citations) => self.citations = citations,
                 Err(error) => self.message = Some(format!("Could not load links: {error:#}")),
             }
-            match self.runtime.block_on(self.ledger.sessions(item.item.id)) {
+            match self.with_ledger(async |ledger| ledger.sessions(item.item.id).await) {
                 Ok(sessions) => self.sessions = sessions,
                 Err(error) => self.message = Some(format!("Could not load sessions: {error:#}")),
             }
@@ -2863,7 +2907,7 @@ impl TodoGui {
             self.message = Some("Title cannot be empty.".to_owned());
             return;
         }
-        match self.runtime.block_on(self.ledger.edit_title(&id, title)) {
+        match self.with_ledger(async |ledger| ledger.edit_title(&id, title).await) {
             Ok(_) => {
                 self.message = Some("Title saved.".to_owned());
                 self.refresh();
@@ -2876,10 +2920,7 @@ impl TodoGui {
         let Some(id) = self.selected.clone() else {
             return;
         };
-        match self
-            .runtime
-            .block_on(self.ledger.set_priority(&id, self.priority_draft))
-        {
+        match self.with_ledger(async |ledger| ledger.set_priority(&id, self.priority_draft).await) {
             Ok(_) => {
                 self.message = Some("Priority saved.".to_owned());
                 self.refresh();
@@ -2898,7 +2939,7 @@ impl TodoGui {
         } else {
             ItemState::Done
         };
-        match self.runtime.block_on(self.ledger.set_state(&id, next)) {
+        match self.with_ledger(async |ledger| ledger.set_state(&id, next).await) {
             Ok(_) => {
                 self.message = Some(if next == ItemState::Done {
                     "Task completed.".to_owned()
@@ -2915,10 +2956,7 @@ impl TodoGui {
         let Some(id) = self.selected.clone() else {
             return;
         };
-        match self
-            .runtime
-            .block_on(self.ledger.set_state(&id, self.state_draft))
-        {
+        match self.with_ledger(async |ledger| ledger.set_state(&id, self.state_draft).await) {
             Ok(_) => {
                 self.message = Some("State saved.".to_owned());
                 self.refresh();
@@ -2934,7 +2972,7 @@ impl TodoGui {
             return;
         }
         let parent = self.new_task_parent.clone();
-        match self.runtime.block_on(self.ledger.add_item(title, None)) {
+        match self.with_ledger(async |ledger| ledger.add_item(title, None).await) {
             Ok(item) => {
                 let id = item.item.id.to_string();
                 self.new_task_title.clear();
@@ -2943,7 +2981,8 @@ impl TodoGui {
                 // a failure to attach leaves the task itself intact and says so.
                 let attached = match parent {
                     Some(parent) => {
-                        match self.runtime.block_on(self.ledger.set_parent(&id, &parent)) {
+                        match self.with_ledger(async |ledger| ledger.set_parent(&id, &parent).await)
+                        {
                             Ok(()) => Some(Ok(())),
                             Err(error) => Some(Err(error)),
                         }
@@ -2974,12 +3013,12 @@ impl TodoGui {
             self.message = Some("Note cannot be empty.".to_owned());
             return;
         }
-        match self.runtime.block_on(self.ledger.add_note(&id, body)) {
+        match self.with_ledger(async |ledger| ledger.add_note(&id, body).await) {
             Ok(()) => {
                 self.note_draft.clear();
                 self.message = Some("Note added.".to_owned());
                 if let Some(item) = self.selected_item() {
-                    match self.runtime.block_on(self.ledger.notes(item.item.id)) {
+                    match self.with_ledger(async |ledger| ledger.notes(item.item.id).await) {
                         Ok(notes) => self.notes = notes,
                         Err(error) => {
                             self.message = Some(format!("Could not refresh notes: {error:#}"))
@@ -3002,17 +3041,14 @@ impl TodoGui {
         }
         let label =
             (!self.link_label_draft.trim().is_empty()).then_some(self.link_label_draft.trim());
-        match self
-            .runtime
-            .block_on(self.ledger.add_citation(&id, target, label))
-        {
+        match self.with_ledger(async |ledger| ledger.add_citation(&id, target, label).await) {
             Ok(()) => {
                 self.link_target_draft.clear();
                 self.link_label_draft.clear();
                 self.message = Some("Link added.".to_owned());
                 if let Some(item) = self.selected_item()
                     && let Ok(citations) =
-                        self.runtime.block_on(self.ledger.citations(item.item.id))
+                        self.with_ledger(async |ledger| ledger.citations(item.item.id).await)
                 {
                     self.citations = citations;
                 }
@@ -3031,11 +3067,9 @@ impl TodoGui {
             .iter()
             .any(|session| session.finished_at.is_none());
         let result = if active {
-            self.runtime
-                .block_on(self.ledger.finish_session(&id, chrono::Utc::now()))
+            self.with_ledger(async |ledger| ledger.finish_session(&id, chrono::Utc::now()).await)
         } else {
-            self.runtime
-                .block_on(self.ledger.start_session(&id, chrono::Utc::now()))
+            self.with_ledger(async |ledger| ledger.start_session(&id, chrono::Utc::now()).await)
         };
         match result {
             Ok(_) => {
@@ -3064,17 +3098,16 @@ impl TodoGui {
             format!("tag/{draft}")
         };
         match path.parse::<NamespacePath>() {
-            Ok(tag) => match self
-                .runtime
-                .block_on(self.ledger.assign_namespace(&id, &tag))
-            {
-                Ok(()) => {
-                    self.tag_draft.clear();
-                    self.message = Some("Tag added.".to_owned());
-                    self.refresh();
+            Ok(tag) => {
+                match self.with_ledger(async |ledger| ledger.assign_namespace(&id, &tag).await) {
+                    Ok(()) => {
+                        self.tag_draft.clear();
+                        self.message = Some("Tag added.".to_owned());
+                        self.refresh();
+                    }
+                    Err(error) => self.message = Some(format!("Tag not added: {error:#}")),
                 }
-                Err(error) => self.message = Some(format!("Tag not added: {error:#}")),
-            },
+            }
             Err(error) => self.message = Some(format!("Invalid tag: {error}")),
         }
     }
@@ -3083,10 +3116,7 @@ impl TodoGui {
         let Some(id) = self.selected.clone() else {
             return;
         };
-        match self
-            .runtime
-            .block_on(self.ledger.remove_namespace(&id, tag))
-        {
+        match self.with_ledger(async |ledger| ledger.remove_namespace(&id, tag).await) {
             Ok(()) => {
                 self.message = Some("Tag removed.".to_owned());
                 self.refresh();
@@ -3100,8 +3130,8 @@ impl TodoGui {
             return;
         };
         let result = match self.parent_draft.clone() {
-            Some(parent) => self.runtime.block_on(self.ledger.set_parent(&id, &parent)),
-            None => self.runtime.block_on(self.ledger.clear_parent(&id)),
+            Some(parent) => self.with_ledger(async |ledger| ledger.set_parent(&id, &parent).await),
+            None => self.with_ledger(async |ledger| ledger.clear_parent(&id).await),
         };
         match result {
             Ok(()) => {
@@ -3117,11 +3147,9 @@ impl TodoGui {
             return;
         };
         let result = if enabled {
-            self.runtime
-                .block_on(self.ledger.add_blocker(&id, &blocker))
+            self.with_ledger(async |ledger| ledger.add_blocker(&id, &blocker).await)
         } else {
-            self.runtime
-                .block_on(self.ledger.remove_blocker(&id, &blocker))
+            self.with_ledger(async |ledger| ledger.remove_blocker(&id, &blocker).await)
         };
         match result {
             Ok(()) => {
@@ -3137,11 +3165,9 @@ impl TodoGui {
             return;
         };
         let result = if enabled {
-            self.runtime
-                .block_on(self.ledger.add_dependency(&id, &dependency))
+            self.with_ledger(async |ledger| ledger.add_dependency(&id, &dependency).await)
         } else {
-            self.runtime
-                .block_on(self.ledger.remove_dependency(&id, &dependency))
+            self.with_ledger(async |ledger| ledger.remove_dependency(&id, &dependency).await)
         };
         match result {
             Ok(()) => {
@@ -3169,10 +3195,9 @@ impl TodoGui {
             }
         };
         let result = if due {
-            self.runtime.block_on(self.ledger.set_due_on(&id, date))
+            self.with_ledger(async |ledger| ledger.set_due_on(&id, date).await)
         } else {
-            self.runtime
-                .block_on(self.ledger.set_defer_until(&id, date))
+            self.with_ledger(async |ledger| ledger.set_defer_until(&id, date).await)
         };
         match result {
             Ok(_) => {
@@ -3194,13 +3219,17 @@ impl TodoGui {
                 return;
             }
         };
-        match self.runtime.block_on(self.ledger.apply_patch(
-            &id,
-            ItemPatch {
-                scheduled_on: Some(date),
-                ..ItemPatch::default()
-            },
-        )) {
+        match self.with_ledger(async |ledger| {
+            ledger
+                .apply_patch(
+                    &id,
+                    ItemPatch {
+                        scheduled_on: Some(date),
+                        ..ItemPatch::default()
+                    },
+                )
+                .await
+        }) {
             Ok(_) => {
                 self.message = Some("Scheduled date saved.".to_owned());
                 self.refresh();
@@ -3293,7 +3322,9 @@ impl TodoGui {
                 scheduled_on: date("scheduled_on")?,
             })
         })();
-        match patch.and_then(|patch| self.runtime.block_on(self.ledger.apply_patch(&id, patch))) {
+        match patch
+            .and_then(|patch| self.with_ledger(async |ledger| ledger.apply_patch(&id, patch).await))
+        {
             Ok(_) => {
                 self.message = Some("Raw JSON patch applied atomically.".to_owned());
                 self.refresh();
@@ -3491,6 +3522,11 @@ impl eframe::App for TodoGui {
             self.colors_applied = true;
             self.apply_colors(ui.ctx());
         }
+        self.refresh_if_ledger_changed();
+        // ponytail: polls file times once a second; a file watcher is the upgrade
+        // if idle repaints ever cost too much.
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_secs(1));
         // `/` reaches the search box from anywhere on the canvas; Escape leaves it.
         // Both are gated on the canvas having focus so typing a title is unaffected.
         if !ui.ctx().egui_wants_keyboard_input()
