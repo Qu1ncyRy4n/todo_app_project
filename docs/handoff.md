@@ -34,7 +34,7 @@ handoff lives.
 ```sh
 nix develop          # everything runs in the pinned shell; ./dev wraps it
 ./dev check          # cargo fmt --check, then clippy -D warnings
-./dev test           # 236 tests
+./dev test           # 237 tests
 ./dev gui            # the graph editor against the real ledger
 ./dev run -- ls --tree
 ```
@@ -66,7 +66,7 @@ downstream of that staying true.
 
 ## Area handoffs
 
-- **Graph editor** — `docs/gui-graph-pickup.md`. Slices 1 to 56, every
+- **Graph editor** — `docs/gui-graph-pickup.md`. Slices 1 to 57, every
   configuration knob, the eight items of remaining work, and what is deferred by
   decision.
 - **Family display and Focus** — `docs/thought-experiments/TE-0015-graph-display-flow.md`.

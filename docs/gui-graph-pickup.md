@@ -395,6 +395,13 @@ dogfooding notes. Every slice below landed as its own commit with tests.
     file for as long as it is open. It refreshes when the database or its WAL
     changes, polled once a second (`ponytail:` note; a file watcher is the
     upgrade). Covered by the CLI test `a_dropped_ledger_lets_another_process_write`.
+57. The theme reloads itself when `theme.toml` or its `palette_file` changes,
+    checked in the same once-a-second loop. A stamp is the resolved path,
+    modification time, and size, so a home-manager generation switch, which
+    only re-points a Nix store symlink, still counts. Saving from the panel
+    records its own write as seen. Unsaved panel edits (live theme differs from
+    `theme_loaded`) block the reload and report it instead. A deleted
+    `theme.toml` is left alone. Covered by `a_file_stamp_sees_edits_and_repointed_links`.
 
 ## Configuration
 
@@ -431,7 +438,7 @@ Values that carry data or protocol meaning are deliberately not configurable.
 
 ```sh
 ./dev check   # cargo fmt --check, then clippy --workspace --all-targets -D warnings
-./dev test    # 236 tests: 165 todo-gui, 35 todo-core, 22 todo-store, 14 todo-cli (2026-10-14)
+./dev test    # 237 tests: 166 todo-gui, 35 todo-core, 22 todo-store, 14 todo-cli (2026-10-14)
 ```
 
 `./dev check` passed after the live Dynamic-family update. A full `./dev test` run

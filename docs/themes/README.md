@@ -35,5 +35,9 @@ palette_file = "~/.config/ghostty/themes/green" # optional Ghostty-format theme
 `selection-background`, and `cursor-color` restyle the panels, canvas, text,
 selection, and links; card colors stay with the visual channels above. Because
 the format is Ghostty's, one generated file can drive both the terminal and the
-editor: point a matugen Ghostty template's output path here. Press Reload theme
-after the file changes.
+editor: point a matugen Ghostty template's output path here.
+
+The editor watches `theme.toml` and the palette file and reloads within about a
+second of either changing, including a re-pointed home-manager symlink. If the
+settings panel holds unsaved edits, it says the file changed instead of
+discarding them; Reload theme then applies the file.

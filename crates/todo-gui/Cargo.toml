@@ -21,3 +21,6 @@ toml.workspace = true
 todo-core = { path = "../todo-core" }
 todo-store = { path = "../todo-store" }
 tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

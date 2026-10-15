@@ -90,6 +90,21 @@ impl LedgerAccess {
     }
 }
 
+/// Where a file's symlinks lead, when it last changed, and its size.
+type FileStamp = (PathBuf, std::time::SystemTime, u64);
+
+/// Stamps a file so a change can be noticed without reading it, or `None` when
+/// it does not exist.
+///
+/// The resolved path is part of the stamp because home-manager files are
+/// symlinks into the Nix store, where every modification time is 1970: a
+/// generation switch moves only the link.
+fn file_stamp(path: &std::path::Path) -> Option<FileStamp> {
+    let resolved = fs::canonicalize(path).ok()?;
+    let meta = fs::metadata(&resolved).ok()?;
+    Some((resolved, meta.modified().ok()?, meta.len()))
+}
+
 /// What the graph is grouped by at one level.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum GroupBy {
@@ -237,6 +252,12 @@ struct TodoGui {
     graph_zoom: f32,
     theme: Theme,
     theme_path: PathBuf,
+    /// The theme as last read from or written to disk, so unsaved panel edits
+    /// can be told apart from it.
+    theme_loaded: Theme,
+    /// Stamps of `theme.toml` and the palette file at the last load or save; see
+    /// `reload_theme_if_changed`.
+    theme_seen: Vec<Option<FileStamp>>,
     /// Cleared on load and on Reload theme, so the next frame applies the color
     /// mode and palette; applying needs the egui context, which only a frame has.
     colors_applied: bool,
@@ -374,8 +395,10 @@ impl TodoGui {
             graph_pan: Vec2::ZERO,
             graph_zoom: 1.0,
             inspector: theme.inspector,
+            theme_loaded: theme.clone(),
             theme,
             theme_path,
+            theme_seen: Vec::new(),
             colors_applied: false,
             layout_undo: None,
             normalize_requested: false,
@@ -410,6 +433,7 @@ impl TodoGui {
             appearance_lab: appearance_lab::LabState::default(),
         };
         app.refresh_if_ledger_changed();
+        app.theme_seen = app.theme_stamps();
         app
     }
 
@@ -2654,14 +2678,51 @@ impl TodoGui {
         match Theme::load(&self.theme_path) {
             Ok(theme) => {
                 self.inspector = theme.inspector;
+                self.theme_loaded = theme.clone();
                 self.theme = theme;
                 self.colors_applied = false;
+                // The palette path may have changed with the theme, so the watched
+                // set is taken from the theme just loaded.
+                self.theme_seen = self.theme_stamps();
                 if self.message.is_none() {
                     self.message = Some("Theme reloaded.".to_owned());
                 }
             }
             Err(error) => self.message = Some(format!("Theme not loaded: {error:#}")),
         }
+    }
+
+    /// Stamps of the files the theme comes from: `theme.toml` and its palette.
+    fn theme_stamps(&self) -> Vec<Option<FileStamp>> {
+        std::iter::once(self.theme_path.clone())
+            .chain(self.theme.colors.palette_path())
+            .map(|path| file_stamp(&path))
+            .collect()
+    }
+
+    /// Reloads the theme when `theme.toml` or its palette changed on disk, so a
+    /// regenerated palette or a hand edit shows without pressing Reload theme.
+    ///
+    /// Unsaved panel edits win: rather than discard them, the change is reported
+    /// and left for Reload theme. A deleted `theme.toml` is not rewritten behind
+    /// the developer's back; Reload theme still writes the defaults on request.
+    fn reload_theme_if_changed(&mut self) {
+        let stamps = self.theme_stamps();
+        if stamps == self.theme_seen {
+            return;
+        }
+        // Recorded before reloading, so a file that fails to parse is reported
+        // once rather than every second until it is fixed.
+        self.theme_seen = stamps;
+        if !self.theme_path.exists() {
+            return;
+        }
+        if self.theme != self.theme_loaded {
+            self.message = Some("theme.toml changed on disk; Reload theme to apply it.".to_owned());
+            return;
+        }
+        self.message = None;
+        self.reload_theme();
     }
 
     /// Applies the color mode and any borrowed terminal palette to egui.
@@ -2709,13 +2770,19 @@ impl TodoGui {
     ///
     /// Settings adjusted in the side panel edit the live theme; this is what makes
     /// them survive a restart.
-    fn write_theme(&self) -> Result<()> {
+    ///
+    /// The editor's own write is recorded as seen, so the theme watch does not
+    /// reload what was just saved.
+    fn write_theme(&mut self) -> Result<()> {
         if let Some(parent) = self.theme_path.parent() {
             fs::create_dir_all(parent).context("create theme directory")?;
         }
         let contents = self.theme.to_toml()?;
         fs::write(&self.theme_path, contents)
-            .with_context(|| format!("write {}", self.theme_path.display()))
+            .with_context(|| format!("write {}", self.theme_path.display()))?;
+        self.theme_loaded = self.theme.clone();
+        self.theme_seen = self.theme_stamps();
+        Ok(())
     }
 
     /// Opens the ledger for one operation and closes it again; see `LedgerAccess`.
@@ -3523,6 +3590,7 @@ impl eframe::App for TodoGui {
             self.apply_colors(ui.ctx());
         }
         self.refresh_if_ledger_changed();
+        self.reload_theme_if_changed();
         // ponytail: polls file times once a second; a file watcher is the upgrade
         // if idle repaints ever cost too much.
         ui.ctx()
@@ -6727,13 +6795,47 @@ mod tests {
     use super::{
         FamilyPresentation, GroupBy, LocalGraphLayout, collect_subtree, compare_group_labels,
         fallback_tag_colors, family_box, family_dependency_bands, family_ring_mesh,
-        family_tree_geometry, focus_is_active, hierarchy_levels, limit_child_depth, matches_query,
-        segment_outside_rect,
+        family_tree_geometry, file_stamp, focus_is_active, hierarchy_levels, limit_child_depth,
+        matches_query, segment_outside_rect,
     };
     use eframe::egui::{Color32, Pos2, Rect, pos2, vec2};
     use std::collections::{HashMap, HashSet};
     use todo_core::{ItemState, Priority};
     use todo_store::StoredItem;
+
+    #[test]
+    fn a_file_stamp_sees_edits_and_repointed_links() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("theme.toml");
+        assert_eq!(file_stamp(&path), None);
+        std::fs::write(&path, "a = 1\n").unwrap();
+        let first = file_stamp(&path);
+        assert!(first.is_some());
+        assert_eq!(file_stamp(&path), first);
+        std::fs::write(&path, "a = 12\n").unwrap();
+        assert_ne!(file_stamp(&path), first);
+
+        // Nix store files share one modification time, so only the link target
+        // tells two generations apart.
+        let epoch = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1);
+        let targets = ["old", "new"].map(|name| {
+            let target = dir.path().join(name);
+            std::fs::write(&target, "same\n").unwrap();
+            std::fs::File::options()
+                .write(true)
+                .open(&target)
+                .unwrap()
+                .set_modified(epoch)
+                .unwrap();
+            target
+        });
+        let link = dir.path().join("palette");
+        std::os::unix::fs::symlink(&targets[0], &link).unwrap();
+        let before = file_stamp(&link);
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&targets[1], &link).unwrap();
+        assert_ne!(file_stamp(&link), before);
+    }
 
     fn tree(pairs: &[(&str, &[&str])]) -> HashMap<String, Vec<String>> {
         pairs
