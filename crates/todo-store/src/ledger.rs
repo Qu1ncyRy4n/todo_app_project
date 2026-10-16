@@ -2,16 +2,24 @@ use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Local, NaiveDate, Utc};
 use cid::Cid;
 use serde::Serialize;
-use std::{cmp::Ordering, collections::HashSet, path::Path, str::FromStr};
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, HashSet},
+    path::Path,
+    str::FromStr,
+};
 use todo_core::{
     Event, EventBuilder, EventKind, GRID_CBOR_CODEC, GridEnvelope, Item, ItemId, ItemState,
     NamespaceId, NamespaceKind, NamespacePath, Priority, RelationKind, decode_envelope,
     event_protocol_v5_cid, event_protocol_v6_cid, event_protocol_v7_cid, event_protocol_v8_cid,
     event_protocol_v9_cid, event_protocol_v10_cid, event_protocol_v11_cid, event_protocol_v12_cid,
-    event_protocol_v13_cid,
+    event_protocol_v13_cid, event_protocol_v14_cid, validate_segment,
 };
 use turso::{Builder, Connection, Value};
 use uuid::Uuid;
+
+/// The one namespace relation protocol v14 defines: an actor belongs to another.
+pub const MEMBER_OF: &str = "member-of";
 
 const OPEN_RETRY_ATTEMPTS: usize = 50;
 const OPEN_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(20);
@@ -93,6 +101,26 @@ CREATE TABLE IF NOT EXISTS item_relations (
   PRIMARY KEY(item_id, relation, target_id)
 );
 CREATE INDEX IF NOT EXISTS relations_target ON item_relations(target_id);
+CREATE TABLE IF NOT EXISTS namespace_fields (
+  namespace_id TEXT NOT NULL,
+  key TEXT NOT NULL,
+  value TEXT NOT NULL,
+  PRIMARY KEY(namespace_id, key)
+);
+CREATE TABLE IF NOT EXISTS namespace_links (
+  namespace_id TEXT NOT NULL,
+  relation TEXT NOT NULL,
+  target_id TEXT NOT NULL,
+  PRIMARY KEY(namespace_id, relation, target_id)
+);
+CREATE INDEX IF NOT EXISTS namespace_links_target ON namespace_links(target_id);
+CREATE TABLE IF NOT EXISTS item_roles (
+  item_id TEXT NOT NULL,
+  role TEXT NOT NULL,
+  namespace_id TEXT NOT NULL,
+  PRIMARY KEY(item_id, role, namespace_id)
+);
+CREATE INDEX IF NOT EXISTS item_roles_namespace ON item_roles(namespace_id);
 CREATE TABLE IF NOT EXISTS focus_sequences (
   id TEXT PRIMARY KEY,
   title TEXT NOT NULL
@@ -1929,6 +1957,7 @@ impl Ledger {
                 && envelope.protocol_cid() != &event_protocol_v11_cid()
                 && envelope.protocol_cid() != &event_protocol_v12_cid()
                 && envelope.protocol_cid() != &event_protocol_v13_cid()
+                && envelope.protocol_cid() != &event_protocol_v14_cid()
             {
                 bail!("event {} uses an unknown protocol", record.cid);
             }
@@ -2074,11 +2103,14 @@ impl Ledger {
         if item.item.id == target.item.id {
             bail!("an item cannot relate to itself");
         }
-        if item
-            .relations
-            .iter()
-            .any(|existing| existing.relation == relation && existing.target == target.item.id)
-        {
+        let holds = |from: &StoredItem, to: ItemId| {
+            from.relations
+                .iter()
+                .any(|existing| existing.relation == relation && existing.target == to)
+        };
+        // A symmetric relation already stored the other way round is the same
+        // relation, so it is never written twice. Source: protocol v14.
+        if holds(&item, target.item.id) || relation.is_symmetric() && holds(&target, item.item.id) {
             return Ok(item);
         }
         let event = self
@@ -2116,13 +2148,19 @@ impl Ledger {
         relation: RelationKind,
         target_reference: &str,
     ) -> Result<StoredItem> {
-        let item = self.get_item(reference).await?;
-        let target = self.get_item(target_reference).await?;
-        if !item
-            .relations
-            .iter()
-            .any(|existing| existing.relation == relation && existing.target == target.item.id)
+        let mut item = self.get_item(reference).await?;
+        let mut target = self.get_item(target_reference).await?;
+        let holds = |from: &StoredItem, to: ItemId| {
+            from.relations
+                .iter()
+                .any(|existing| existing.relation == relation && existing.target == to)
+        };
+        // A symmetric relation may have been written from the other end.
+        if relation.is_symmetric() && !holds(&item, target.item.id) && holds(&target, item.item.id)
         {
+            std::mem::swap(&mut item, &mut target);
+        }
+        if !holds(&item, target.item.id) {
             bail!(
                 "item {} does not {relation} {}",
                 item.item.id,
@@ -2154,7 +2192,257 @@ impl Ledger {
         }
         .await;
         self.transaction_finish(result).await?;
-        self.get_item(&item.item.id.to_string()).await
+        self.get_item(reference).await
+    }
+
+    /// Sets one field on a namespace node, or clears it with `None`.
+    ///
+    /// Setting creates the node on first use, so `todo set quincy email=…` needs no
+    /// separate create step. Writing the value already held is a no-op.
+    pub async fn set_field(
+        &self,
+        path: &NamespacePath,
+        key: &str,
+        value: Option<&str>,
+    ) -> Result<()> {
+        validate_segment(key).with_context(|| format!("field key {key:?}"))?;
+        let value = value.unwrap_or("");
+        let namespace = match self.namespace_by_path(path).await? {
+            Some(namespace) => namespace,
+            None if value.is_empty() => bail!("unknown namespace {path}"),
+            None => self.ensure_namespace(path).await?,
+        };
+        let current = self.fields(path).await?;
+        if current.get(key).map_or("", String::as_str) == value {
+            return Ok(());
+        }
+        self.record(
+            EventBuilder::new(EventKind::NamespaceFieldSet, namespace.id.to_string())
+                .data("key", key)
+                .data("value", value),
+        )
+        .await
+    }
+
+    /// Returns a namespace node's fields, empty for an unknown node.
+    pub async fn fields(&self, path: &NamespacePath) -> Result<BTreeMap<String, String>> {
+        let mut rows = self.connection.query(
+            "SELECT f.key, f.value FROM namespace_fields f JOIN namespaces n ON n.id = f.namespace_id LEFT JOIN namespace_aliases a ON a.namespace_id = n.id WHERE n.canonical_path = ?1 OR a.path = ?1",
+            values([path.to_string()]),
+        ).await?;
+        let mut result = BTreeMap::new();
+        while let Some(row) = rows.next().await? {
+            result.insert(text(&row, 0)?, text(&row, 1)?);
+        }
+        Ok(result)
+    }
+
+    /// Links one namespace to another, such as a person `member-of` an org.
+    pub async fn link_namespace(
+        &self,
+        path: &NamespacePath,
+        relation: &str,
+        target: &NamespacePath,
+    ) -> Result<()> {
+        if relation != MEMBER_OF {
+            bail!("unknown namespace relation {relation:?}; expected {MEMBER_OF}");
+        }
+        let namespace = self.ensure_namespace(path).await?;
+        let target = self.ensure_namespace(target).await?;
+        if namespace.id == target.id {
+            bail!("a namespace cannot link to itself");
+        }
+        if self
+            .namespace_links(&namespace.path)
+            .await?
+            .contains(&(relation.to_owned(), target.path.clone()))
+        {
+            return Ok(());
+        }
+        self.record(
+            EventBuilder::new(EventKind::NamespaceLinked, namespace.id.to_string())
+                .data("relation", relation)
+                .link("target", target.id.to_string()),
+        )
+        .await
+    }
+
+    /// Withdraws a namespace link.
+    pub async fn unlink_namespace(
+        &self,
+        path: &NamespacePath,
+        relation: &str,
+        target: &NamespacePath,
+    ) -> Result<()> {
+        let unknown = || anyhow!("{path} is not {relation} {target}");
+        let namespace = self.namespace_by_path(path).await?.ok_or_else(unknown)?;
+        let target = self.namespace_by_path(target).await?.ok_or_else(unknown)?;
+        if !self
+            .namespace_links(&namespace.path)
+            .await?
+            .contains(&(relation.to_owned(), target.path.clone()))
+        {
+            return Err(unknown());
+        }
+        self.record(
+            EventBuilder::new(EventKind::NamespaceUnlinked, namespace.id.to_string())
+                .data("relation", relation)
+                .link("target", target.id.to_string()),
+        )
+        .await
+    }
+
+    /// Returns the links a namespace holds, as (relation, target).
+    pub async fn namespace_links(
+        &self,
+        path: &NamespacePath,
+    ) -> Result<Vec<(String, NamespacePath)>> {
+        self.links_query(
+            "SELECT l.relation, t.canonical_path FROM namespace_links l JOIN namespaces s ON s.id = l.namespace_id JOIN namespaces t ON t.id = l.target_id WHERE s.canonical_path = ?1 ORDER BY l.relation, t.canonical_path",
+            path,
+        )
+        .await
+    }
+
+    /// Returns the links pointing at a namespace, as (relation, source): an org's
+    /// members. Derived on read, never stored twice.
+    pub async fn namespace_linked_from(
+        &self,
+        path: &NamespacePath,
+    ) -> Result<Vec<(String, NamespacePath)>> {
+        self.links_query(
+            "SELECT l.relation, s.canonical_path FROM namespace_links l JOIN namespaces s ON s.id = l.namespace_id JOIN namespaces t ON t.id = l.target_id WHERE t.canonical_path = ?1 ORDER BY l.relation, s.canonical_path",
+            path,
+        )
+        .await
+    }
+
+    async fn links_query(
+        &self,
+        sql: &str,
+        path: &NamespacePath,
+    ) -> Result<Vec<(String, NamespacePath)>> {
+        let mut rows = self
+            .connection
+            .query(sql, values([path.to_string()]))
+            .await?;
+        let mut result = Vec::new();
+        while let Some(row) = rows.next().await? {
+            result.push((text(&row, 0)?, text(&row, 1)?.parse()?));
+        }
+        Ok(result)
+    }
+
+    /// Attaches an item to a namespace in a role, such as `author` of `actor/quincy`.
+    ///
+    /// Independent of plain tagging: the same namespace may be both a tag and a
+    /// role holder on one item. A duplicate is a no-op.
+    pub async fn assign_role(
+        &self,
+        item_reference: &str,
+        role: &str,
+        path: &NamespacePath,
+    ) -> Result<()> {
+        validate_segment(role).with_context(|| format!("role {role:?}"))?;
+        let item = self.get_item(item_reference).await?;
+        let namespace = self.ensure_namespace(path).await?;
+        if self
+            .roles(item.item.id)
+            .await?
+            .contains(&(role.to_owned(), namespace.path.clone()))
+        {
+            return Ok(());
+        }
+        self.record(
+            EventBuilder::for_item(EventKind::NamespaceAssigned, item.item.id)
+                .project(item.item.project_id)
+                .data("role", role)
+                .link("namespace", namespace.id.to_string()),
+        )
+        .await
+    }
+
+    /// Withdraws one role assignment.
+    pub async fn remove_role(
+        &self,
+        item_reference: &str,
+        role: &str,
+        path: &NamespacePath,
+    ) -> Result<()> {
+        let item = self.get_item(item_reference).await?;
+        let missing = || anyhow!("item {} has no {role} {path}", item.item.id);
+        let namespace = self.namespace_by_path(path).await?.ok_or_else(missing)?;
+        if !self
+            .roles(item.item.id)
+            .await?
+            .contains(&(role.to_owned(), namespace.path.clone()))
+        {
+            return Err(missing());
+        }
+        self.record(
+            EventBuilder::for_item(EventKind::NamespaceRemoved, item.item.id)
+                .project(item.item.project_id)
+                .data("role", role)
+                .link("namespace", namespace.id.to_string()),
+        )
+        .await
+    }
+
+    /// Returns an item's roles, as (role, namespace).
+    pub async fn roles(&self, item: ItemId) -> Result<Vec<(String, NamespacePath)>> {
+        let mut rows = self.connection.query(
+            "SELECT r.role, n.canonical_path FROM item_roles r JOIN namespaces n ON n.id = r.namespace_id WHERE r.item_id = ?1 ORDER BY r.role, n.canonical_path",
+            values([item.to_string()]),
+        ).await?;
+        let mut result = Vec::new();
+        while let Some(row) = rows.next().await? {
+            result.push((text(&row, 0)?, text(&row, 1)?.parse()?));
+        }
+        Ok(result)
+    }
+
+    /// Returns the live items holding a role on a namespace, as (role, item): what
+    /// an actor authored, was assigned, or reviewed.
+    pub async fn role_items(&self, path: &NamespacePath) -> Result<Vec<(String, ItemId)>> {
+        let mut rows = self.connection.query(
+            "SELECT r.role, r.item_id FROM item_roles r JOIN namespaces n ON n.id = r.namespace_id JOIN items i ON i.id = r.item_id WHERE n.canonical_path = ?1 AND i.deleted_at IS NULL ORDER BY r.role, r.item_id",
+            values([path.to_string()]),
+        ).await?;
+        let mut result = Vec::new();
+        while let Some(row) = rows.next().await? {
+            result.push((text(&row, 0)?, ItemId::parse(&text(&row, 1)?)?));
+        }
+        Ok(result)
+    }
+
+    /// Writes one event and applies it through the same code a rebuild replays,
+    /// so a live write and a rebuilt view cannot disagree.
+    async fn record(&self, builder: EventBuilder) -> Result<()> {
+        let event = self.event(builder).await?;
+        self.transaction_begin().await?;
+        let result = async {
+            self.insert_event(&event).await?;
+            self.apply_event(&event).await?;
+            self.set_head(&event.cid).await
+        }
+        .await;
+        self.transaction_finish(result).await
+    }
+
+    async fn write_field(&self, namespace_id: &str, key: &str, value: &str) -> Result<u64> {
+        if value.is_empty() {
+            return Ok(self
+                .connection
+                .execute(
+                    "DELETE FROM namespace_fields WHERE namespace_id = ?1 AND key = ?2",
+                    values([namespace_id.to_owned(), key.to_owned()]),
+                )
+                .await?);
+        }
+        Ok(self.connection.execute(
+            "INSERT INTO namespace_fields(namespace_id, key, value) VALUES (?1, ?2, ?3) ON CONFLICT(namespace_id, key) DO UPDATE SET value = excluded.value",
+            values([namespace_id.to_owned(), key.to_owned(), value.to_owned()]),
+        ).await?)
     }
 
     async fn item_active_blockers(&self, item: ItemId) -> Result<Vec<ItemId>> {
@@ -2200,7 +2488,8 @@ impl Ledger {
         }))
     }
 
-    async fn namespace_by_path(&self, path: &NamespacePath) -> Result<Option<NamespaceEntry>> {
+    /// Looks a namespace up by its current path or any former one.
+    pub async fn namespace_by_path(&self, path: &NamespacePath) -> Result<Option<NamespaceEntry>> {
         let mut rows = self.connection.query(
             "SELECT n.id, n.kind, n.canonical_path FROM namespaces n LEFT JOIN namespace_aliases a ON a.namespace_id = n.id WHERE n.canonical_path = ?1 OR a.path = ?1 LIMIT 1",
             values([path.to_string()]),
@@ -2367,6 +2656,10 @@ impl Ledger {
             "notes",
             "citations",
             "item_namespaces",
+            "item_roles",
+            "item_relations",
+            "namespace_fields",
+            "namespace_links",
             "item_dependencies",
             "item_blocks",
             "focus_sequence_entries",
@@ -2578,13 +2871,34 @@ impl Ledger {
                 }
                 0
             }
-            EventKind::NamespaceAssigned => self.connection.execute(
-                "INSERT INTO item_namespaces(item_id, namespace_id) VALUES (?1, ?2)",
-                values([event.payload.subject_id.clone(), link("namespace")?.to_owned()]),
+            EventKind::NamespaceAssigned => match event.payload.data.get("role") {
+                Some(role) => self.connection.execute(
+                    "INSERT OR IGNORE INTO item_roles(item_id, role, namespace_id) VALUES (?1, ?2, ?3)",
+                    values([event.payload.subject_id.clone(), role.clone(), link("namespace")?.to_owned()]),
+                ).await?,
+                None => self.connection.execute(
+                    "INSERT INTO item_namespaces(item_id, namespace_id) VALUES (?1, ?2)",
+                    values([event.payload.subject_id.clone(), link("namespace")?.to_owned()]),
+                ).await?,
+            },
+            EventKind::NamespaceRemoved => match event.payload.data.get("role") {
+                Some(role) => self.connection.execute(
+                    "DELETE FROM item_roles WHERE item_id = ?1 AND role = ?2 AND namespace_id = ?3",
+                    values([event.payload.subject_id.clone(), role.clone(), link("namespace")?.to_owned()]),
+                ).await?,
+                None => self.connection.execute(
+                    "DELETE FROM item_namespaces WHERE item_id = ?1 AND namespace_id = ?2",
+                    values([event.payload.subject_id.clone(), link("namespace")?.to_owned()]),
+                ).await?,
+            },
+            EventKind::NamespaceFieldSet => self.write_field(&event.payload.subject_id, value("key")?, value("value")?).await?,
+            EventKind::NamespaceLinked => self.connection.execute(
+                "INSERT OR IGNORE INTO namespace_links(namespace_id, relation, target_id) VALUES (?1, ?2, ?3)",
+                values([event.payload.subject_id.clone(), value("relation")?.to_owned(), link("target")?.to_owned()]),
             ).await?,
-            EventKind::NamespaceRemoved => self.connection.execute(
-                "DELETE FROM item_namespaces WHERE item_id = ?1 AND namespace_id = ?2",
-                values([event.payload.subject_id.clone(), link("namespace")?.to_owned()]),
+            EventKind::NamespaceUnlinked => self.connection.execute(
+                "DELETE FROM namespace_links WHERE namespace_id = ?1 AND relation = ?2 AND target_id = ?3",
+                values([event.payload.subject_id.clone(), value("relation")?.to_owned(), link("target")?.to_owned()]),
             ).await?,
         };
         Ok(())
@@ -2715,7 +3029,7 @@ fn optional_integer(row: &turso::Row, index: usize) -> Result<Option<i64>> {
     reason = "test fixtures use direct setup and assertion values"
 )]
 mod tests {
-    use super::{BatchItem, ItemPatch, ItemScope, Ledger};
+    use super::{BatchItem, ItemPatch, ItemScope, Ledger, MEMBER_OF};
     use chrono::{DateTime, NaiveDate};
     use tempfile::tempdir;
     use todo_core::RelationKind;
@@ -3371,5 +3685,93 @@ mod tests {
         assert_eq!(target_items, source_items);
         assert_eq!(target.notes(child.item.id).await.unwrap().len(), 1);
         assert_eq!(target.event_records().await.unwrap(), records);
+    }
+
+    #[tokio::test]
+    async fn actor_fields_membership_and_roles_survive_import() {
+        let source = ledger().await;
+        let quincy: NamespacePath = "actor/quincy".parse().unwrap();
+        let cdint: NamespacePath = "actor/cdint".parse().unwrap();
+        source
+            .set_field(&quincy, "kind", Some("person"))
+            .await
+            .unwrap();
+        source.set_field(&quincy, "gh", Some("old")).await.unwrap();
+        source
+            .set_field(&quincy, "gh", Some("Qu1ncyRy4n"))
+            .await
+            .unwrap();
+        source
+            .set_field(&quincy, "email", Some("q@example.com"))
+            .await
+            .unwrap();
+        source.set_field(&quincy, "email", None).await.unwrap();
+        source
+            .link_namespace(&quincy, MEMBER_OF, &cdint)
+            .await
+            .unwrap();
+        let work = source.add_item("Fix sync race", None).await.unwrap();
+        let id = work.item.id.to_string();
+        source.assign_role(&id, "author", &quincy).await.unwrap();
+        source.assign_role(&id, "reviewer", &quincy).await.unwrap();
+        source.remove_role(&id, "reviewer", &quincy).await.unwrap();
+        // A role is not a tag.
+        assert!(source.get_item(&id).await.unwrap().namespaces.is_empty());
+
+        let target = ledger().await;
+        target
+            .import_events(&source.event_records().await.unwrap())
+            .await
+            .unwrap();
+        let fields = target.fields(&quincy).await.unwrap();
+        assert_eq!(fields.get("gh").map(String::as_str), Some("Qu1ncyRy4n"));
+        assert_eq!(fields.get("kind").map(String::as_str), Some("person"));
+        assert!(!fields.contains_key("email"));
+        assert_eq!(
+            target.namespace_linked_from(&cdint).await.unwrap(),
+            vec![(MEMBER_OF.to_owned(), quincy.clone())]
+        );
+        assert_eq!(
+            target.roles(work.item.id).await.unwrap(),
+            vec![("author".to_owned(), quincy.clone())]
+        );
+        assert_eq!(
+            target.role_items(&quincy).await.unwrap(),
+            vec![("author".to_owned(), work.item.id)]
+        );
+    }
+
+    #[tokio::test]
+    async fn relates_to_is_stored_once_and_removable_from_either_end() {
+        let ledger = ledger().await;
+        let one = ledger
+            .add_item("One", None)
+            .await
+            .unwrap()
+            .item
+            .id
+            .to_string();
+        let two = ledger
+            .add_item("Two", None)
+            .await
+            .unwrap()
+            .item
+            .id
+            .to_string();
+        ledger
+            .add_relation(&one, RelationKind::RelatesTo, &two)
+            .await
+            .unwrap();
+        let before = ledger.event_records().await.unwrap().len();
+        ledger
+            .add_relation(&two, RelationKind::RelatesTo, &one)
+            .await
+            .unwrap();
+        assert_eq!(ledger.event_records().await.unwrap().len(), before);
+        ledger
+            .remove_relation(&two, RelationKind::RelatesTo, &one)
+            .await
+            .unwrap();
+        assert!(ledger.get_item(&one).await.unwrap().relations.is_empty());
     }
 }

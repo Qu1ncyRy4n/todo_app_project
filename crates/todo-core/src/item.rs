@@ -116,12 +116,20 @@ pub enum RelationKind {
     ContributesTo,
     /// The item realizes a specification, design, or decision.
     Implements,
+    /// The two items are worth reading together. Symmetric: stored once, read
+    /// from both ends. Source: protocol v14.
+    RelatesTo,
 }
 
 impl RelationKind {
     /// Returns every relation name, for help text and completion.
-    pub fn all() -> [Self; 2] {
-        [Self::ContributesTo, Self::Implements]
+    pub fn all() -> [Self; 3] {
+        [Self::ContributesTo, Self::Implements, Self::RelatesTo]
+    }
+
+    /// Whether the relation reads the same from both ends.
+    pub fn is_symmetric(self) -> bool {
+        self == Self::RelatesTo
     }
 }
 
@@ -130,12 +138,13 @@ impl fmt::Display for RelationKind {
         formatter.write_str(match self {
             Self::ContributesTo => "contributes-to",
             Self::Implements => "implements",
+            Self::RelatesTo => "relates-to",
         })
     }
 }
 
 #[derive(Debug, Error, Eq, PartialEq)]
-#[error("unknown relation {0:?}; expected contributes-to or implements")]
+#[error("unknown relation {0:?}; expected contributes-to, implements, or relates-to")]
 pub struct ParseRelationKindError(String);
 
 impl FromStr for RelationKind {
@@ -145,6 +154,7 @@ impl FromStr for RelationKind {
         match text.trim().to_lowercase().replace('_', "-").as_str() {
             "contributes-to" | "contributes" => Ok(Self::ContributesTo),
             "implements" | "implement" => Ok(Self::Implements),
+            "relates-to" | "relates" | "see" => Ok(Self::RelatesTo),
             other => Err(ParseRelationKindError(other.to_owned())),
         }
     }

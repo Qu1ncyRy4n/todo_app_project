@@ -4700,6 +4700,7 @@ fn relation_color(relation: RelationKind) -> Color32 {
     match relation {
         RelationKind::ContributesTo => Color32::from_rgb(171, 130, 205),
         RelationKind::Implements => Color32::from_rgb(198, 164, 92),
+        RelationKind::RelatesTo => Color32::from_rgb(120, 160, 200),
     }
 }
 

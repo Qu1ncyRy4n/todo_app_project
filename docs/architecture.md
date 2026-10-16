@@ -32,9 +32,9 @@ grid([42(pCID), parents, payload, proof])
 
 The proof slot remains `null`, and semantic validity is checked before an event
 is persisted. Historical events retain their exact bytes and original CIDs. New
-writes use the v13 payload protocol over the registered Grid-CBOR codec
+writes use the v14 payload protocol over the registered Grid-CBOR codec
 (`0x1027`) with the generic envelope validation from DI-0008, and import accepts
-v5 through v13. The payload protocols are frozen, content-addressed files under
+v5 through v14. The payload protocols are frozen, content-addressed files under
 `docs/protocols/`; a protocol is never edited in place, because its bytes are
 hashed into every event that references it. Adding a field means adding a file.
 

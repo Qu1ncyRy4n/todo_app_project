@@ -37,6 +37,9 @@ pub enum NamespaceKind {
     Goal,
     Topic,
     Context,
+    /// Anyone who can act: a person, an org, or an agent, told apart by the
+    /// node's `kind` field. Source: TE-0016.
+    Actor,
     Custom(String),
 }
 
@@ -49,6 +52,7 @@ impl fmt::Display for NamespaceKind {
             Self::Goal => formatter.write_str("goal"),
             Self::Topic => formatter.write_str("topic"),
             Self::Context => formatter.write_str("context"),
+            Self::Actor => formatter.write_str("actor"),
             Self::Custom(value) => formatter.write_str(value),
         }
     }
@@ -66,6 +70,7 @@ impl FromStr for NamespaceKind {
             "goal" => Self::Goal,
             "topic" => Self::Topic,
             "context" => Self::Context,
+            "actor" => Self::Actor,
             other => Self::Custom(other.to_owned()),
         })
     }
@@ -125,7 +130,9 @@ impl FromStr for NamespacePath {
     }
 }
 
-fn validate_segment(segment: &str) -> Result<(), NamespacePathError> {
+/// Checks one path segment, or a name such as a field key or role, against the
+/// path alphabet.
+pub fn validate_segment(segment: &str) -> Result<(), NamespacePathError> {
     if segment.is_empty()
         || !segment.bytes().all(|byte| {
             byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')

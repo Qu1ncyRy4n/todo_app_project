@@ -30,6 +30,8 @@ const PROTOCOL_V12_BYTES: &[u8] =
     include_bytes!("../../../docs/protocols/todo-ledger-event-v12.md");
 const PROTOCOL_V13_BYTES: &[u8] =
     include_bytes!("../../../docs/protocols/todo-ledger-event-v13.md");
+const PROTOCOL_V14_BYTES: &[u8] =
+    include_bytes!("../../../docs/protocols/todo-ledger-event-v14.md");
 
 pub fn event_protocol_v4_cid() -> Cid {
     raw_cid(PROTOCOL_V4_BYTES)
@@ -63,6 +65,9 @@ pub fn event_protocol_v12_cid() -> Cid {
 }
 pub fn event_protocol_v13_cid() -> Cid {
     raw_cid(PROTOCOL_V13_BYTES)
+}
+pub fn event_protocol_v14_cid() -> Cid {
+    raw_cid(PROTOCOL_V14_BYTES)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -98,6 +103,9 @@ pub enum EventKind {
     NamespaceRenamed,
     NamespaceAssigned,
     NamespaceRemoved,
+    NamespaceFieldSet,
+    NamespaceLinked,
+    NamespaceUnlinked,
 }
 
 impl fmt::Display for EventKind {
@@ -134,6 +142,9 @@ impl fmt::Display for EventKind {
             Self::NamespaceRenamed => "namespace.renamed",
             Self::NamespaceAssigned => "namespace.assigned",
             Self::NamespaceRemoved => "namespace.removed",
+            Self::NamespaceFieldSet => "namespace.field-set",
+            Self::NamespaceLinked => "namespace.linked",
+            Self::NamespaceUnlinked => "namespace.unlinked",
         })
     }
 }
@@ -174,6 +185,9 @@ impl std::str::FromStr for EventKind {
             "namespace.renamed" => Self::NamespaceRenamed,
             "namespace.assigned" => Self::NamespaceAssigned,
             "namespace.removed" => Self::NamespaceRemoved,
+            "namespace.field-set" => Self::NamespaceFieldSet,
+            "namespace.linked" => Self::NamespaceLinked,
+            "namespace.unlinked" => Self::NamespaceUnlinked,
             other => {
                 return Err(EventDecodeError::Invalid(format!(
                     "unknown event kind {other:?}"
@@ -269,9 +283,9 @@ impl EventBuilder {
     }
 
     pub fn build(self) -> Result<Event, EventEncodeError> {
-        // All new writes use the v13 Grid-CBOR protocol. Historical rows are
+        // All new writes use the v14 Grid-CBOR protocol. Historical rows are
         // never rebuilt or relabeled. Source: DI-0008.
-        let protocol_cid = event_protocol_v13_cid();
+        let protocol_cid = event_protocol_v14_cid();
         let bytes = encode_envelope(&protocol_cid, self.parent.as_ref(), &self.payload)?;
         let cid = grid_cbor_cid(&bytes);
         Ok(Event {
@@ -497,7 +511,7 @@ fn encode_envelope(
 mod tests {
     use super::{
         EventBuilder, EventKind, PROTOCOL_V1_BYTES, PROTOCOL_V2_BYTES, PROTOCOL_V3_BYTES,
-        PROTOCOL_V4_BYTES, PROTOCOL_V5_BYTES, PROTOCOL_V13_BYTES,
+        PROTOCOL_V4_BYTES, PROTOCOL_V5_BYTES, PROTOCOL_V14_BYTES,
     };
     use crate::{GRID_CBOR_CODEC, GRID_TAG, GridEnvelope, ItemId, raw_cid};
     use chrono::DateTime;
@@ -531,7 +545,7 @@ mod tests {
 
         let parsed = GridEnvelope::parse(&first.bytes).unwrap();
         assert_eq!(parsed.slot_count(), 3);
-        assert_eq!(parsed.protocol_cid(), &raw_cid(PROTOCOL_V13_BYTES));
+        assert_eq!(parsed.protocol_cid(), &raw_cid(PROTOCOL_V14_BYTES));
         assert_eq!(parsed.cid(), first.cid);
     }
 

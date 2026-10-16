@@ -150,8 +150,8 @@ project-scoped work, see [the weekly-notes tutorial](docs/weekly-notes-tutorial.
 Development proceeds from one working local global ledger, to interaction with
 one-to-three repositories, and then to personal/shared spaces and multiple
 users. Exact events can be synchronized through an explicit Git checkout; each
-device keeps its database as a rebuildable local view. New writes use the v13
-payload protocol and import accepts v5 through v13. See
+device keeps its database as a rebuildable local view. New writes use the v14
+payload protocol and import accepts v5 through v14. See
 [DI-0007](DI/DI-0007-staged-global-to-shared-rollout.md) for the staged rollout
 and [DI-0007-git-jsonl-sync](DI/DI-0007-git-jsonl-sync.md) for the transport.
 

@@ -59,6 +59,12 @@ pub struct AppConfig {
     pub default_project: Option<String>,
     #[serde(default)]
     pub project_paths: BTreeMap<PathBuf, String>,
+    /// The operator's actor name, so typed entry can say `by:me`.
+    #[serde(default)]
+    pub me: Option<String>,
+    /// Accept `#tag`, `@actor`, and `+project` in typed entry. Default on.
+    #[serde(default)]
+    pub entry_ascii: Option<bool>,
 }
 
 impl AppConfig {
