@@ -8,8 +8,11 @@ use std::{
     path::{Path, PathBuf},
     process::Command as ProcessCommand,
 };
+use todo_core::entry::{Directive, DirectiveKind, EntrySyntax, parse_entry};
 use todo_core::{ItemId, ItemState, LogLine, NamespaceKind, NamespacePath, Priority, RelationKind};
-use todo_store::{AppConfig, AppPaths, BatchItem, EventRecord, ItemScope, Ledger, StoredItem};
+use todo_store::{
+    AppConfig, AppPaths, BatchItem, EventRecord, ItemScope, Ledger, MEMBER_OF, StoredItem,
+};
 
 #[derive(Parser)]
 #[command(name = "todo", version, about = "A global, local-first todo ledger")]
@@ -155,6 +158,20 @@ enum Command {
     Project(ProjectArgs),
     /// Manage hierarchical namespaces attached to items.
     Tag(TagArgs),
+    /// Apply typed words to an item, or key=value fields to an actor or project.
+    ///
+    /// `todo set kohil p1 to:steve -tag:old` changes an item. `todo set quincy
+    /// kind=person gh=Qu1ncyRy4n` sets fields on actor/quincy, creating it on
+    /// first use; `email=` clears one. `todo set cdint member=quincy` records
+    /// that quincy is a member of cdint.
+    Set {
+        /// An item ID, an actor name, or a full path such as project/todo.
+        target: String,
+        #[arg(required = true, num_args = 1.., allow_hyphen_values = true)]
+        words: Vec<String>,
+    },
+    /// List actors, or show one with its fields, memberships, and items by role.
+    Actor { name: Option<String> },
     /// Import a Markdown checkbox tree in one transaction.
     Import(ImportArgs),
     /// Export a human view, rich view, or exact event archive.
@@ -181,7 +198,12 @@ enum SessionCommand {
 
 #[derive(Args)]
 struct AddArgs {
-    title: String,
+    /// Title words, mixed with typed words: tag:a/b, in:todo, by:me, to:steve,
+    /// as:reviewer/steve, due:2026-10-20, defer:…, p1, est:30m, dep:<id>,
+    /// see:<id>, and #tag, @actor, +project. A quoted phrase is always title,
+    /// so `"Read by:me"` keeps a typed-looking word.
+    #[arg(required = true, num_args = 1..)]
+    title: Vec<String>,
     /// Attach one or more hierarchical namespace paths.
     #[arg(long = "tag", value_name = "PATH")]
     tags: Vec<String>,
@@ -384,20 +406,74 @@ async fn run() -> Result<()> {
     match cli.command {
         Command::Init => bail!("initialization should return before command dispatch"),
         Command::Add(args) => {
-            let project = resolve_project(cli.project.as_deref(), &config, &cwd)?;
-            let tags = args
+            let entry = parse_entry(&args.title, entry_syntax(&config, false))?;
+            if entry.title.is_empty() {
+                bail!("a new item needs a title besides its typed words");
+            }
+            if entry.directives.iter().any(|directive| directive.remove) {
+                bail!("a new item has nothing to remove; drop the leading -");
+            }
+            let mut project = resolve_project(cli.project.as_deref(), &config, &cwd)?;
+            let mut tags = args
                 .tags
                 .iter()
                 .map(|tag| tag.parse())
                 .collect::<Result<Vec<NamespacePath>, _>>()?;
+            // Tags and the project go in with the creation event; the rest follow it.
+            let mut rest = Vec::new();
+            for directive in entry.directives {
+                match directive.kind {
+                    DirectiveKind::Tag(path) => tags.push(path),
+                    DirectiveKind::Project(name) => project = Some(project_path(&name)?),
+                    _ => rest.push(directive),
+                }
+            }
             let item = ledger
-                .add_item_with(&args.title, project.as_ref(), &tags, args.parent.as_deref())
+                .add_item_with(
+                    &entry.title,
+                    project.as_ref(),
+                    &tags,
+                    args.parent.as_deref(),
+                )
                 .await?;
             println!(
                 "Added {} [inbox] {}",
                 short_id(item.item.id),
                 item.item.title
             );
+            apply_to_item(&ledger, &config, &item.item.id.to_string(), &rest).await?;
+        }
+        Command::Set { target, words } => match resolve_target(&ledger, &config, &target).await? {
+            Target::Item(id) => {
+                // Fields are read so they can be refused with a reason.
+                let entry = parse_entry(&words, entry_syntax(&config, true))?;
+                if !entry.title.is_empty() {
+                    bail!(
+                        "unrecognized words {:?}; `todo edit` changes a title",
+                        entry.title
+                    );
+                }
+                apply_to_item(&ledger, &config, &id, &entry.directives).await?;
+            }
+            Target::Node(path) => {
+                let entry = parse_entry(&words, entry_syntax(&config, true))?;
+                if !entry.title.is_empty() {
+                    bail!("unrecognized words {:?}; expected key=value", entry.title);
+                }
+                apply_to_node(&ledger, &config, &path, &entry.directives).await?;
+            }
+        },
+        Command::Actor { name: None } => {
+            for entry in ledger.namespaces().await? {
+                if entry.kind == NamespaceKind::Actor {
+                    let fields = ledger.fields(&entry.path).await?;
+                    let kind = fields.get("kind").map_or("", String::as_str);
+                    println!("{}  {kind}", entry.path);
+                }
+            }
+        }
+        Command::Actor { name: Some(name) } => {
+            show_actor(&ledger, &actor_path(&config, &name)?).await?
         }
         Command::Ls(args) => {
             let project = if args.global {
@@ -1139,6 +1215,181 @@ fn project_path(value: &str) -> Result<NamespacePath> {
     Ok(path)
 }
 
+fn entry_syntax(config: &AppConfig, fields: bool) -> EntrySyntax {
+    EntrySyntax {
+        ascii: config.entry_ascii.unwrap_or(true),
+        fields,
+    }
+}
+
+/// Maps a typed-entry actor name to its path: `quincy` is `actor/quincy`, and
+/// `me` is the configured operator.
+fn actor_path(config: &AppConfig, name: &str) -> Result<NamespacePath> {
+    let name = match name {
+        "me" => config
+            .me
+            .as_deref()
+            .ok_or_else(|| anyhow!("`me` is not set; add me = \"<name>\" to config.toml"))?,
+        other => other,
+    };
+    let name = name.strip_prefix("actor/").unwrap_or(name);
+    Ok(format!("actor/{name}").parse()?)
+}
+
+enum Target {
+    Item(String),
+    Node(NamespacePath),
+}
+
+/// Resolves `todo set`'s target: a full namespace path, else an item, else an
+/// actor name. Anything that reads as a proquint must be an item, so a mistyped
+/// item ID cannot quietly create an actor.
+async fn resolve_target(ledger: &Ledger, config: &AppConfig, target: &str) -> Result<Target> {
+    if let Ok(path) = target.parse::<NamespacePath>()
+        && !matches!(path.kind()?, NamespaceKind::Custom(_))
+    {
+        return Ok(Target::Node(path));
+    }
+    match ledger.get_item(target).await {
+        Ok(item) => Ok(Target::Item(item.item.id.to_string())),
+        Err(error) if todo_core::proquint_to_hex(target).is_some() => Err(error),
+        Err(_) => Ok(Target::Node(actor_path(config, target)?)),
+    }
+}
+
+/// Applies typed words to an existing item, echoing each change in its canonical
+/// form. Each word is its own event; a failure stops at that word.
+async fn apply_to_item(
+    ledger: &Ledger,
+    config: &AppConfig,
+    item: &str,
+    directives: &[Directive],
+) -> Result<()> {
+    for Directive { remove, kind } in directives {
+        let remove = *remove;
+        match kind {
+            DirectiveKind::Tag(path) if remove => ledger.remove_namespace(item, path).await?,
+            DirectiveKind::Tag(path) => ledger.assign_namespace(item, path).await?,
+            DirectiveKind::Project(name) => {
+                let target = if remove {
+                    None
+                } else {
+                    Some(project_path(name)?)
+                };
+                ledger.move_project(item, target.as_ref()).await?;
+            }
+            DirectiveKind::Role { role, actor } => {
+                let path = actor_path(config, actor)?;
+                if remove {
+                    ledger.remove_role(item, role, &path).await?;
+                } else {
+                    ledger.assign_role(item, role, &path).await?;
+                }
+            }
+            DirectiveKind::Due(date) => {
+                ledger.set_due_on(item, (!remove).then_some(*date)).await?;
+            }
+            DirectiveKind::Defer(date) => {
+                ledger
+                    .set_defer_until(item, (!remove).then_some(*date))
+                    .await?;
+            }
+            DirectiveKind::Priority(_) if remove => {
+                bail!("a priority cannot be removed; set p:normal instead")
+            }
+            DirectiveKind::Priority(priority) => {
+                ledger.set_priority(item, *priority).await?;
+            }
+            DirectiveKind::EstimateMinutes(minutes) => {
+                ledger
+                    .set_estimate(item, (!remove).then_some(*minutes))
+                    .await?;
+            }
+            DirectiveKind::Depends(other) if remove => {
+                ledger.remove_dependency(item, other).await?
+            }
+            DirectiveKind::Depends(other) => ledger.add_dependency(item, other).await?,
+            DirectiveKind::Relates(other) if remove => {
+                ledger
+                    .remove_relation(item, RelationKind::RelatesTo, other)
+                    .await?;
+            }
+            DirectiveKind::Relates(other) => {
+                ledger
+                    .add_relation(item, RelationKind::RelatesTo, other)
+                    .await?;
+            }
+            DirectiveKind::Field { .. } => {
+                bail!("items have no fields; key=value applies to actors and projects")
+            }
+        }
+        println!("{} {kind}", if remove { "-" } else { "+" });
+    }
+    Ok(())
+}
+
+/// Applies `key=value` words to a namespace node. `member=<actor>` and
+/// `member-of=<actor>` record membership instead of a field.
+async fn apply_to_node(
+    ledger: &Ledger,
+    config: &AppConfig,
+    path: &NamespacePath,
+    directives: &[Directive],
+) -> Result<()> {
+    if let Some(Directive { kind, .. }) = directives
+        .iter()
+        .find(|directive| !matches!(directive.kind, DirectiveKind::Field { .. }))
+    {
+        bail!("{kind} applies to items, not to {path}");
+    }
+    if ledger.namespace_by_path(path).await?.is_none() {
+        println!("Creating {path}");
+    }
+    for Directive { remove, kind } in directives {
+        let DirectiveKind::Field { key, value } = kind else {
+            continue;
+        };
+        let (member, group) = match key.as_str() {
+            "member" => (actor_path(config, value)?, path.clone()),
+            "member-of" => (path.clone(), actor_path(config, value)?),
+            _ => {
+                let value = (!remove && !value.is_empty()).then_some(value.as_str());
+                ledger.set_field(path, key, value).await?;
+                println!("{path} {key}={}", value.unwrap_or(""));
+                continue;
+            }
+        };
+        if *remove {
+            ledger.unlink_namespace(&member, MEMBER_OF, &group).await?;
+            println!("{member} is no longer {MEMBER_OF} {group}");
+        } else {
+            ledger.link_namespace(&member, MEMBER_OF, &group).await?;
+            println!("{member} {MEMBER_OF} {group}");
+        }
+    }
+    Ok(())
+}
+
+async fn show_actor(ledger: &Ledger, path: &NamespacePath) -> Result<()> {
+    if ledger.namespace_by_path(path).await?.is_none() {
+        bail!("unknown actor {path}");
+    }
+    println!("{path}");
+    for (key, value) in ledger.fields(path).await? {
+        println!("{key}: {value}");
+    }
+    for (relation, group) in ledger.namespace_links(path).await? {
+        println!("{relation}: {group}");
+    }
+    for (_, member) in ledger.namespace_linked_from(path).await? {
+        println!("member: {member}");
+    }
+    for (role, item) in ledger.role_items(path).await? {
+        println!("{role}: {}", describe(ledger, item).await);
+    }
+    Ok(())
+}
+
 fn date_argument(args: &DateArgs) -> Result<Option<NaiveDate>> {
     match (&args.date, args.clear) {
         (_, true) => Ok(None),
@@ -1463,6 +1714,19 @@ async fn show(ledger: &Ledger, reference: &str, include_history: bool) -> Result
             relation.relation,
             describe(ledger, relation.target).await
         );
+    }
+    // A symmetric relation written from the other end belongs here too.
+    for (relation, source) in ledger.related_from(reference).await? {
+        if relation.is_symmetric() {
+            println!("{relation}: {}", describe(ledger, source).await);
+        }
+    }
+    for (role, actor) in ledger.roles(stored.item.id).await? {
+        let name = actor
+            .as_str()
+            .strip_prefix("actor/")
+            .unwrap_or(actor.as_str());
+        println!("{role}: {name}");
     }
     if let Some(difficulty) = stored.item.difficulty {
         println!("difficulty: {difficulty}");

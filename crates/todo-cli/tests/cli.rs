@@ -646,3 +646,57 @@ fn a_void_item_leaves_every_listing_and_comes_back_on_request() {
     assert!(harness.ok(&["ls"]).contains("Mistyped capture"));
     assert!(harness.ok(&["voided"]).contains("No void items."));
 }
+
+#[test]
+fn typed_entry_attributes_items_to_actors() {
+    let harness = Harness::new();
+    harness.ok(&["init"]);
+    let config = harness.config.join("config.toml");
+    let existing = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(&config, format!("me = \"quincy\"\n{existing}")).unwrap();
+
+    harness.ok(&["set", "quincy", "kind=person", "gh=Qu1ncyRy4n"]);
+    harness.ok(&["set", "cdint", "kind=org", "member=quincy"]);
+    let parent = harness.ok(&["add", "Sync work"]);
+    let parent = id_from_add(&parent);
+    let added = harness.ok(&[
+        "add",
+        "Fix",
+        "sync",
+        "race",
+        "#work/gui",
+        "by:me",
+        "due:2026-10-20",
+        "p1",
+        "--parent",
+        parent,
+    ]);
+    assert!(added.contains("Added") && added.contains("Fix sync race\n"));
+    let id = id_from_add(&added).to_owned();
+    harness.ok(&[
+        "set",
+        &id,
+        "-tag:work/gui",
+        "to:steve",
+        &format!("see:{parent}"),
+    ]);
+
+    let shown = harness.ok(&["show", &id]);
+    for line in [
+        "author: quincy",
+        "assignee: steve",
+        "due: 2026-10-20",
+        "relates-to:",
+    ] {
+        assert!(shown.contains(line), "missing {line:?} in\n{shown}");
+    }
+    assert!(!shown.contains("tags:"));
+    assert!(harness.ok(&["show", parent]).contains("relates-to:"));
+
+    let actor = harness.ok(&["actor", "cdint"]);
+    assert!(actor.contains("kind: org") && actor.contains("member: actor/quincy"));
+    assert!(harness.ok(&["actor", "me"]).contains("author:"));
+
+    // Fields belong to actors and projects, never to items.
+    assert!(!harness.run(&["set", &id, "gh=x"]).status.success());
+}
