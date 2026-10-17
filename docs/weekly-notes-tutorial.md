@@ -169,7 +169,6 @@ context, lifecycle, focus, repair, and interchange.
 
 ```sh
 ./dev install
-export PATH="$HOME/.cargo/bin:$PATH"
 todo init
 ```
 

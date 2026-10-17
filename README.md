@@ -44,7 +44,8 @@ Two clients read the same ledger, and neither owns data the other cannot see:
 - `todo`, the CLI, which is the complete surface for capture, focus, import,
   export, backup, and synchronization;
 - `todo-gui`, a native graph editor for arranging, grouping, searching, and
-  inspecting the same items. Run it with `./dev gui`.
+  inspecting the same items. Run it with `./dev gui`, or as `todo-gui` after
+  `./dev install`.
 
 The editor is presentation over the same events. Its appearance is configured in
 `theme.toml` and its node placement in `gui-layout.json`, both beside
@@ -59,12 +60,11 @@ TE / DR / DI -> domain API -> tests -> Turso store -> tests -> CLI -> tests
              -> dogfood handoff -> feedback -> repeat
 ```
 
-Enter the development shell with `nix develop`. Install the CLI through
-`./dev install`; `todo init` initializes the global ledger and configuration
-rather than installing the executable.
-
-Install the graph editor separately with `./dev install-gui`, then launch it
-with `todo-gui`. Both executables are installed in Cargo's bin directory.
+Enter the development shell with `nix develop`. Install `todo` and `todo-gui`
+through `./dev install`, which builds the flake package and adds it to the Nix
+user profile (`~/.nix-profile/bin`); on Linux the GUI's graphics libraries are
+linked into that build. `todo init` initializes the global ledger and
+configuration rather than installing the executable.
 
 ## Development shortcuts
 
@@ -77,7 +77,6 @@ works when Rust is not globally installed:
 ./dev check
 ./dev run -- sync --help
 ./dev install
-./dev install-gui
 ```
 
 The enforced checks, lint policy, and intentionally deferred testing and
@@ -90,7 +89,6 @@ absent, and what is unverified, start from [the project handoff](docs/handoff.md
 
 ```sh
 ./dev install
-export PATH="$HOME/.cargo/bin:$PATH"
 todo init
 todo project attach todo --path /path/to/this/project
 

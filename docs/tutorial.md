@@ -13,7 +13,6 @@ existing ledger. These environment variables apply only to the current shell:
 
 ```sh
 ./dev install
-export PATH="$HOME/.cargo/bin:$PATH"
 export TODO_CONFIG_HOME="$HOME/todo-dogfood/config"
 export TODO_DATA_HOME="$HOME/todo-dogfood/data"
 todo init
