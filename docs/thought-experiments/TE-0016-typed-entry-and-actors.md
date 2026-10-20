@@ -4,7 +4,7 @@ Date: 2026-10-14
 Status: direction agreed with the developer. Implemented: typed entry, actors,
 fields, membership, roles, `relates-to` (protocol v14, `93c4ac6`, `ce7d4ac`) and
 projects keyed by `repo`. Not implemented: emoji forms, project default tags,
-GUI quick entry. The manifest format is reopened (KDL, HOCON, or UCL).
+GUI quick entry. The manifest is TOML for now (see below).
 Items: `farag-susot`, `nafun-rinan`, `popal-nofah`, `jamim-mamin`
 Research: `docs/research/task-field-survey.md`
 
@@ -111,26 +111,68 @@ node with a `repo` field**:
   declared uniformly across machines with Nix, so remotes are the portable key.
 - A project node can carry default tags that its items inherit.
 
-## Editable manifest: KDL
+## Editable manifest: TOML for now
 
-On hold since 2026-10-15: the developer is weighing HOCON and UCL against KDL.
-The pipeline below holds for whichever format is chosen.
+Decided 2026-10-19: TOML. It adds no dependency (`config.toml` already uses
+it) and is good enough for flat records. KDL, HOCON, and UCL were set aside;
+the developer liked none of them. Mogent's small language (below) is the
+likely long-term syntax once it settles.
 
-KDL is the hand-editing format for actor and project records: comments, `/-` to
-disable a node, bare words, natural nesting. The pipeline follows TE-0009: the
-parser compares the file with the current ledger and writes new events. JSON
-remains export only. Our own records convert both ways losslessly because we
-own the mapping. Generic JSON↔KDL is not 1:1.
+The manifest is for reviewing and bulk-editing actor and project records. It is
+optional: `todo set` and `todo project repo` write the same events one record
+at a time. The pipeline follows TE-0009: compare the file with the ledger, show
+the events, then write them.
 
-```kdl
-// actors.kdl
-person quincy email="…" gh=Qu1ncyRy4n
-org cdint url="https://…" {
-    member quincy
-    member steve
-    /- member old-contractor
-}
+```toml
+# Written by `todo manifest export`; edit, then `todo manifest apply`.
+based_on = "bagtsaer…"   # ledger head at export
+
+[actor.quincy]
+kind = "person"
+gh = "Qu1ncyRy4n"
+member_of = ["cdint"]
+
+[actor.cdint]
+kind = "org"
+
+[project.todo]
+repo = "github.com/Qu1ncyRy4n/todo_app_project"
 ```
+
+- `todo manifest export [FILE]` writes every actor and project; `todo manifest
+  apply FILE [--dry-run]` prints the changes as `+`/`-` lines and writes them.
+- A listed node is authoritative for its fields and `member_of`: a removed line
+  clears that field or link. An unlisted node is untouched. Nodes are never
+  deleted.
+- **Stale-file check (from Mogent's input hashes):** `based_on` records the
+  ledger head at export. If the ledger has moved since and the file would change
+  anything, apply refuses, so an old file cannot revert newer `todo set` edits
+  or events synced from another machine. After a successful apply the tool
+  rewrites `based_on` in place, keeping comments. A hand-written file without
+  `based_on` is applied as is.
+- Comment out a line with `#` to disable it; TOML has no node-level disable.
+
+### Ideas kept from Mogent's language
+
+Reviewed 2026-10-19 in `~/dev/cdint/Agents` (`docs/proposals/MOGENT-FIRST-SLICE-SPEC.md`,
+`syntax/`). It is a small block/literal language: HCL-shaped, but no HCL
+expressions, closed schemas, `//` comments, retained source ranges and comments,
+a deterministic formatter. Worth adopting when it is stable and has shared
+conformance cases, by porting its generic lexer/parser (about 650 lines of Go)
+to a small Rust crate. Ideas to keep regardless of syntax:
+
+- **Type aliases:** `person "quincy" { … }` normalizing to
+  `actor "quincy" { kind = "person" }`.
+- **Child lists:** `org "cdint" ["quincy", "steve"]` for membership.
+- **Plan, then apply:** show the exact events before writing any.
+- **Closed schemas with located errors:** an unknown key is an error naming its
+  line, never ignored.
+- **Input records:** the `based_on` check above.
+- **Byte-exact no-op edits:** rewriting one value keeps the rest of the file.
+
+Not adopted: `let` bindings, interpolation, recipes, multiline text. Actor
+records do not need them. Mogent's README grants no license, so porting its code
+needs the owner's permission; writing a parser from the spec avoids copying code.
 
 ## Relation catalog
 
