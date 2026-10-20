@@ -15,7 +15,14 @@ agent signatures".
   the device `actor_id`, which `add` and import used to leave as `local`.
   Not built: linking the device `actor_id` to a person actor, completion
   credit (both in `nafun-rinan`, deferred to 2026-11-01).
-- **Before syncing v15 events,** every machine needs `./dev install`.
+- **Existing items labeled (2026-10-20):** the 19 items agent-assistant
+  created (found in this project's agent transcripts) carry
+  `by:agent-assistant`, an actor with `kind = "agent"`; the other 122 carry
+  `by:quincy`. An author whose kind is agent counts as an agent item for
+  `--agent`, which is how pre-v15 items are filtered. Items created by agents
+  in other projects' sessions were not searched.
+- **Before syncing v15 events,** every machine needs `./dev install`. The real
+  ledger now holds v15 events.
 - **Manifest:** `members = [...]` on orgs as well as `member-of` on members
   (`2d21e8c`); `based_on` now hashes records, not layout (`bc135c8`). Whether
   the manifest is worth keeping is an open question in TE-0016.
