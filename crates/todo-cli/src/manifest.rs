@@ -308,10 +308,14 @@ fn node(kind: &str, name: &str, body: &toml::Value) -> Result<Node> {
     Ok(node)
 }
 
-/// Short SHA-256 of the rendered records: changes whenever any actor or
-/// project record does, and never for ordinary item events.
+/// Short SHA-256 of the records: changes whenever any actor or project record
+/// does, and never for ordinary item events or a change to the file layout.
 fn digest(records: &Records) -> String {
-    let hash = Sha256::digest(render(records).as_bytes());
+    let mut canonical = String::new();
+    for (path, node) in records {
+        let _ = writeln!(canonical, "{path} {:?} {:?}", node.fields, node.member_of);
+    }
+    let hash = Sha256::digest(canonical.as_bytes());
     hash.iter().take(8).fold(String::new(), |mut hex, byte| {
         let _ = write!(hex, "{byte:02x}");
         hex
