@@ -1,39 +1,49 @@
 # Project Handoff
 
-Updated: 2026-10-14
-Covers: workspace v0.3.0, protocol v13, `main` at "docs: update pickup notes
-after the October 14 session".
+Updated: 2026-10-19
+Covers: workspace v0.3.0, protocol v14, `main` at "Add todo scan for
+todo:<id> references in files".
 
-## Where we left off, October 14
+## Where we left off, October 19
 
-- **Shipped:** dark mode with a Ghostty-format palette, and the editor no longer
-  locks the CLI out (both confirmed in a window). Theme watch reloads
-  `theme.toml` and the palette on change (`mopuh-votod`, awaiting the
-  developer's window check). Details are in the graph editor handoff, slices
-  54 to 57.
-- **Design direction agreed, not built:** TE-0016 (one-line typed entry,
-  actors, roles on links, projects keyed by repo, KDL manifests, `relates-to`)
-  and TE-0017 (habits as occurrence events summarized by stats). The
-  quick-entry research is `docs/research/task-field-survey.md`.
+- **Identity sprint (`tafuf-hohob`) built**, per TE-0016:
+  - Protocol v14: fields on namespace nodes, `member-of` links, roles on
+    assignments, symmetric `relates-to` (`93c4ac6`).
+  - Typed entry in `todo add`, plus `todo set` and `todo actor` (`ce7d4ac`). The
+    parser is `todo_core::entry`, ready for the GUI quick-entry bar
+    (`popal-nofah`). `config.toml` takes `me = "<name>"` for `by:me` and
+    `entry_ascii = false` to turn off `#`, `@`, `+`.
+  - Projects keyed by repo (`382342d`): `todo project repo <name> [url]`; a
+    checkout whose `origin` matches infers the project on any machine.
+  - `todo scan [PATH...] [--check]` (`9fccad0`) lists `todo:<id>` references
+    with each item's state.
+- **On hold:** the manifest file (`tobiz-zonab`). The developer is weighing
+  HOCON and UCL against KDL; wait for their pick.
+- **Deferred to 2026-11-01:** sync redesign (`vuzil-gofah`), sync attribution
+  (`nafun-rinan`), mobile stack (`kibut-hupan`).
+- **Not built from TE-0016:** emoji entry forms, `!1` priority (zsh history
+  expansion eats it), project default tags. Multi-word `add`/`set` writes one
+  event per word, not one transaction.
+- **Before syncing v14 events:** every machine needs the new binary
+  (`./dev install`, now a Nix profile package), or import fails with "uses an
+  unknown protocol".
 - **Ledger:** todo-app work lives under the roadmap `ruris-nipal`, split into
   sprints: identity and sync (`tafuf-hohob`), GUI (`kufod-mogar`, with a
   needs-spec views sub-sprint `tibum-zivim`), entry and CLI ergonomics
   (`tasir-visok`), model and relations (`tajam-havag`), naming and config
   (`razam-nobir`), and modes and navigation (`gusol-difon`). Tagged
-  `tag/work/apps/todo-app`, GUI items under `…/gui`. This repo is not attached
-  as a project; tags carry it, pending TE-0016's repo-keyed projects.
+  `tag/work/apps/todo-app`, GUI items under `…/gui`. This repo can now be keyed
+  with `todo project repo`; the developer has not chosen to yet.
 - **Modes (needs spec):** `nogul-darat` holds the developer's sketch of a DO
   sequence (a stack, one open item, no wandering) and a PLAN traversal (fast
   task/subtask/dependency navigation). It depends on the binding layer
   `viguz-nodit`.
-- **Done this session:** appearance snapshot `docs/themes/developer-2026-10.toml`
-  (`kapah-danip`); Graph design tree removed (`higod-rugar`).
-- **In progress:** the `todo-ledger` agent skill (`zitun-funiv`) is drafted in
-  `qmr-agents-library/skills/todo-ledger/`, uncommitted there and not yet
-  rendered into this repo's `.agents/skills/`.
-- **Deferred by the developer:** the rename (`jalil-kimop`, deferred to
-  2026-10-15); `todo import markdown --parent <id>` (`rutas-mumik`; show usage
-  and `--dry-run` output before building).
+- **Skill:** `todo-ledger` (`zitun-funiv`, done) is committed in
+  `qmr-agents-library` and copied into `.agents/skills/` by hand, because
+  `mogent build` fails on a front-matter error in that library's archive.
+- **Deferred by the developer:** the rename (`jalil-kimop`, to 2026-10-22);
+  `todo import markdown --parent <id>` (`rutas-mumik`; show usage and
+  `--dry-run` output before building).
 - **Deferred:** `clap_complete` shell completion (`docs/development.md`). zsh
   binds its `_devtodo` completer to `todo`; `compdef -d todo` silences it.
 - **External:** another agent is wiring matugen through Nix to generate the
@@ -49,7 +59,7 @@ handoff lives.
 ```sh
 nix develop          # everything runs in the pinned shell; ./dev wraps it
 ./dev check          # cargo fmt --check, then clippy -D warnings
-./dev test           # 233 tests
+./dev test           # 247 tests
 ./dev gui            # the graph editor against the real ledger
 ./dev run -- ls --tree
 ```
@@ -133,7 +143,7 @@ Two properties to keep in mind rather than rediscover:
 
 ## Protocol discipline
 
-New writes use v13. Import accepts v5 through v13. Protocol documents in
+New writes use v14. Import accepts v5 through v14. Protocol documents in
 `docs/protocols/` are content-addressed: their bytes are hashed into every event
 that cites them, so **a protocol file is never edited in place**. A new field
 means a new version file and a new CID.
@@ -198,7 +208,7 @@ Not oversights. Each has a reason recorded.
 - Default commit mode is commit-only-when-asked. Atomic commits require an
   explicit goal.
 - Deliberate shortcuts are marked with a `ponytail:` comment naming the ceiling
-  and the upgrade path. There are four, all in `crates/todo-gui/src/geometry.rs`.
+  and the upgrade path. `grep -rn "ponytail:" crates` lists them (eight today).
   The broader list of known-imperfect behavior is "Remaining work" in the graph
   editor handoff, which is seven items and not the same list.
 
