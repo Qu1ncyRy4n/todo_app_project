@@ -1,10 +1,28 @@
 # Project Handoff
 
 Updated: 2026-10-19
-Covers: workspace v0.3.0, protocol v14, `main` at "Update the handoff for
-the TOML manifest".
+Covers: workspace v0.3.0, protocol v15, `main` at "Update the handoff for
+agent signatures".
 
-## Where we left off, October 19
+## Where we left off, October 20
+
+- **Agent signatures (protocol v15, `6678f52`).** Events may carry
+  `agent = "<name>"`. `TODO_AGENT` names the agent (`TODO_AGENT=` is the
+  operator); otherwise `agent_env` variables (default `CLAUDECODE`,
+  `GEMINI_CLI`, `CODEX_SANDBOX`) sign as `agent`. Agent-created items show
+  `[agent]`; `ls`/`ready`/`next --agent show|hide|only`, default from
+  `agent_items`. `todo whoami` reports the signature. Item creation now stamps
+  the device `actor_id`, which `add` and import used to leave as `local`.
+  Not built: linking the device `actor_id` to a person actor, completion
+  credit (both in `nafun-rinan`, deferred to 2026-11-01).
+- **Before syncing v15 events,** every machine needs `./dev install`.
+- **Manifest:** `members = [...]` on orgs as well as `member-of` on members
+  (`2d21e8c`); `based_on` now hashes records, not layout (`bc135c8`). Whether
+  the manifest is worth keeping is an open question in TE-0016.
+- **GUI:** widget visuals follow the palette background (`49721f2`), fixing
+  dark text on dark dropdowns with a light palette. Not yet seen in a window.
+
+## Earlier, October 19
 
 - **Identity sprint (`tafuf-hohob`) built**, per TE-0016:
   - Protocol v14: fields on namespace nodes, `member-of` links, roles on
@@ -61,7 +79,7 @@ handoff lives.
 ```sh
 nix develop          # everything runs in the pinned shell; ./dev wraps it
 ./dev check          # cargo fmt --check, then clippy -D warnings
-./dev test           # 250 tests
+./dev test           # 253 tests
 ./dev gui            # the graph editor against the real ledger
 ./dev run -- ls --tree
 ```
@@ -145,7 +163,7 @@ Two properties to keep in mind rather than rediscover:
 
 ## Protocol discipline
 
-New writes use v14. Import accepts v5 through v14. Protocol documents in
+New writes use v15. Import accepts v5 through v15. Protocol documents in
 `docs/protocols/` are content-addressed: their bytes are hashed into every event
 that cites them, so **a protocol file is never edited in place**. A new field
 means a new version file and a new CID.

@@ -180,6 +180,12 @@ AND every planned dependency is done or canceled
 AND no active blocker remains
 ```
 
+Items an agent created are marked `[agent]` (or `[agent:<name>]`). Filter them
+with `--agent hide`, `--agent only`, or `--agent show` on `ls`, `ready`, and
+`next`, or set the default with `agent_items = "hide"` in `config.toml`.
+`todo whoami` shows whether the current shell signs as an agent; an agent can
+name itself with `TODO_AGENT=<name>`, and `TODO_AGENT=` writes as you.
+
 ### 4. Ask for one deterministic next item
 
 ```text
