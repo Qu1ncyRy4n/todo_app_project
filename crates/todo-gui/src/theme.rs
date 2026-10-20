@@ -438,6 +438,17 @@ impl TerminalPalette {
         }
         palette
     }
+
+    /// Whether the background is dark, so egui's widget fills can match it.
+    pub fn is_dark(&self) -> Option<bool> {
+        self.background.map(is_dark)
+    }
+}
+
+/// Whether a color reads as dark, by perceived luminance.
+pub fn is_dark(color: Color32) -> bool {
+    let luma = u32::from(color.r()) * 299 + u32::from(color.g()) * 587 + u32::from(color.b()) * 114;
+    luma < 128_000
 }
 
 /// Controls how relationship edges and their arrowheads are drawn.
@@ -1153,10 +1164,7 @@ impl Default for TagTheme {
 impl TagTheme {
     /// Returns the cloud mix for a canvas color, choosing by its luminance.
     pub fn cloud_mix_over(&self, backdrop: Color32) -> u8 {
-        let luma = u32::from(backdrop.r()) * 299
-            + u32::from(backdrop.g()) * 587
-            + u32::from(backdrop.b()) * 114;
-        if luma < 128_000 {
+        if is_dark(backdrop) {
             self.cloud_mix_dark
         } else {
             self.cloud_mix
@@ -1225,6 +1233,9 @@ mod tests {
         );
         assert_eq!(palette.selection, Some(Color32::from_rgb(0x7b, 0xa4, 0x28)));
         assert_eq!(palette.accent, Some(Color32::from_rgb(0x9b, 0xc5, 0x3d)));
+        assert_eq!(palette.is_dark(), Some(true));
+        let light = TerminalPalette::parse_ghostty("background = #fdf6f0\n");
+        assert_eq!(light.is_dark(), Some(false));
     }
 
     #[test]

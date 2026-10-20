@@ -2745,7 +2745,13 @@ impl TodoGui {
                 return;
             }
         };
-        let mut visuals = theme.default_visuals();
+        // The palette's background decides the widget fills, not the mode: a
+        // light palette over dark visuals left dark text on dark dropdowns.
+        let mut visuals = match palette.is_dark() {
+            Some(true) => egui::Visuals::dark(),
+            Some(false) => egui::Visuals::light(),
+            None => theme.default_visuals(),
+        };
         if let Some(background) = palette.background {
             visuals.panel_fill = background;
             visuals.window_fill = background;
