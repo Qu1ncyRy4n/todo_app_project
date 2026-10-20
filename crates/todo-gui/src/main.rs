@@ -21,7 +21,10 @@ use theme::{
     RegionShape, TagCloudLinkMode, TagColoring, TagInheritance, TagPalette, TagTheme,
     TerminalPalette, Theme,
 };
-use todo_core::{ItemId, ItemState, NamespacePath, Priority, RelationKind, WeightInputs};
+use todo_core::entry::{ASSIGNEE, AUTHOR, CONTRIBUTOR, REQUESTER};
+use todo_core::{
+    ItemId, ItemState, NamespaceKind, NamespacePath, Priority, RelationKind, WeightInputs,
+};
 use todo_store::{
     AppConfig, AppPaths, Citation, FocusSequence, ItemPatch, ItemScope, Ledger, NamespaceEntry,
     Note, StoredItem, WorkSession,
@@ -49,6 +52,7 @@ fn main() -> Result<()> {
         path: paths.database(),
         actor_id,
     };
+    let agent_filter = AgentFilter::from_config(config.agent_items.as_deref());
     let layout_path = paths.config_dir.join("gui-layout.json");
     let theme_path = paths.config_dir.join("theme.toml");
     eframe::run_native(
@@ -60,6 +64,7 @@ fn main() -> Result<()> {
                 access,
                 layout_path,
                 theme_path,
+                agent_filter,
             )))
         }),
     )
@@ -201,6 +206,45 @@ struct DragAnchor {
     offsets_start: HashMap<String, Vec2>,
 }
 
+/// Which agent-created tasks the graph shows; `agent_items` sets the default.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AgentFilter {
+    Show,
+    Hide,
+    Only,
+}
+
+impl AgentFilter {
+    const ALL: [Self; 3] = [Self::Show, Self::Hide, Self::Only];
+
+    fn from_config(value: Option<&str>) -> Self {
+        match value {
+            Some("hide") => Self::Hide,
+            Some("only") => Self::Only,
+            _ => Self::Show,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Show => "Show",
+            Self::Hide => "Hide",
+            Self::Only => "Only",
+        }
+    }
+
+    fn keeps(self, item: &StoredItem) -> bool {
+        match self {
+            Self::Show => true,
+            Self::Hide => item.agent.is_none(),
+            Self::Only => item.agent.is_some(),
+        }
+    }
+}
+
+/// Roles offered in the inspector; any other role name can still be typed.
+const ROLES: [&str; 4] = [AUTHOR, CONTRIBUTOR, ASSIGNEE, REQUESTER];
+
 struct TodoGui {
     runtime: Runtime,
     ledger: LedgerAccess,
@@ -209,6 +253,11 @@ struct TodoGui {
     items: Vec<StoredItem>,
     namespaces: Vec<NamespaceEntry>,
     notes: Vec<Note>,
+    /// The selected task's people, as (role, actor path).
+    roles: Vec<(String, NamespacePath)>,
+    role_draft: String,
+    actor_draft: String,
+    agent_filter: AgentFilter,
     citations: Vec<Citation>,
     sessions: Vec<WorkSession>,
     focus_sequences: Vec<FocusSequence>,
@@ -329,6 +378,7 @@ impl TodoGui {
         ledger: LedgerAccess,
         layout_path: PathBuf,
         theme_path: PathBuf,
+        agent_filter: AgentFilter,
     ) -> Self {
         let saved_layout = load_layout(&layout_path);
         let node_offsets = saved_layout
@@ -351,6 +401,10 @@ impl TodoGui {
             items: Vec::new(),
             namespaces: Vec::new(),
             notes: Vec::new(),
+            roles: Vec::new(),
+            role_draft: AUTHOR.to_owned(),
+            actor_draft: String::new(),
+            agent_filter,
             citations: Vec::new(),
             sessions: Vec::new(),
             focus_sequences: Vec::new(),
@@ -543,6 +597,20 @@ impl TodoGui {
                         ui.checkbox(&mut self.show_completed, "Completed and canceled");
                         ui.checkbox(&mut self.focus_only, "Active work only");
                         ui.weak("Active work only hides everything that is not active.");
+                        ui.horizontal(|ui| {
+                            ui.label("Agent-created");
+                            egui::ComboBox::from_id_salt("agent-filter")
+                                .selected_text(self.agent_filter.label())
+                                .show_ui(ui, |ui| {
+                                    for filter in AgentFilter::ALL {
+                                        ui.selectable_value(
+                                            &mut self.agent_filter,
+                                            filter,
+                                            filter.label(),
+                                        );
+                                    }
+                                });
+                        });
                     });
                 egui::CollapsingHeader::new("Relationships drawn")
                     .default_open(true)
@@ -1139,6 +1207,9 @@ impl TodoGui {
                 egui::CollapsingHeader::new("Task basics")
                     .default_open(self.inspector.open_status)
                     .show(ui, |ui| self.section_status(ui, &item));
+                egui::CollapsingHeader::new("People")
+                    .default_open(self.inspector.open_status)
+                    .show(ui, |ui| self.section_people(ui, &item));
                 egui::CollapsingHeader::new("Family & dependencies")
                     .default_open(self.inspector.open_relationships)
                     .show(ui, |ui| self.section_relationships(ui, &item));
@@ -1463,6 +1534,54 @@ impl TodoGui {
     }
 
     /// Tags, notes, and linked resources: what the task is about.
+    /// Who made, did, owns, or asked for the task, and who signed its creation.
+    fn section_people(&mut self, ui: &mut egui::Ui, item: &StoredItem) {
+        if let Some(agent) = &item.agent {
+            ui.label(format!("Agent-created: {agent}"));
+        }
+        for (role, actor) in self.roles.clone() {
+            ui.horizontal(|ui| {
+                ui.label(format!("{role}:"));
+                ui.monospace(actor_name(&actor));
+                if ui.small_button("Remove").clicked() {
+                    self.remove_role(&role, &actor);
+                }
+            });
+        }
+        if self.roles.is_empty() {
+            ui.weak("No people");
+        }
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt("role")
+                .selected_text(self.role_draft.clone())
+                .show_ui(ui, |ui| {
+                    for role in ROLES {
+                        ui.selectable_value(&mut self.role_draft, role.to_owned(), role);
+                    }
+                });
+            ui.add(egui::TextEdit::singleline(&mut self.actor_draft).hint_text("Actor"));
+            if ui.button("Add").clicked() {
+                self.add_role();
+            }
+        });
+        let query = self.actor_draft.trim().to_lowercase();
+        if !query.is_empty() {
+            let matches = self
+                .namespaces
+                .iter()
+                .filter(|entry| entry.kind == NamespaceKind::Actor)
+                .map(|entry| actor_name(&entry.path).to_owned())
+                .filter(|name| name.contains(&query) && *name != query)
+                .take(5)
+                .collect::<Vec<_>>();
+            for name in matches {
+                if ui.small_button(format!("Use {name}")).clicked() {
+                    self.actor_draft = name;
+                }
+            }
+        }
+    }
+
     fn section_details(&mut self, ui: &mut egui::Ui, item: &StoredItem) {
         ui.label("Tags");
         for tag in &item.namespaces {
@@ -2646,6 +2765,7 @@ impl TodoGui {
                     || (item.item.state != ItemState::Done
                         && item.item.state != ItemState::Canceled))
                     && (!self.focus_only || item.item.state == ItemState::Active)
+                    && self.agent_filter.keeps(item)
                     && self
                         .tag_states
                         .accepts(self.effective_tags(item).iter().map(String::as_str))
@@ -2941,6 +3061,10 @@ impl TodoGui {
                 Ok(citations) => self.citations = citations,
                 Err(error) => self.message = Some(format!("Could not load links: {error:#}")),
             }
+            match self.with_ledger(async |ledger| ledger.roles(item.item.id).await) {
+                Ok(roles) => self.roles = roles,
+                Err(error) => self.message = Some(format!("Could not load people: {error:#}")),
+            }
             match self.with_ledger(async |ledger| ledger.sessions(item.item.id).await) {
                 Ok(sessions) => self.sessions = sessions,
                 Err(error) => self.message = Some(format!("Could not load sessions: {error:#}")),
@@ -3172,6 +3296,43 @@ impl TodoGui {
                 }
             }
             Err(error) => self.message = Some(format!("Invalid tag: {error}")),
+        }
+    }
+
+    fn add_role(&mut self) {
+        let Some(id) = self.selected.clone() else {
+            return;
+        };
+        let role = self.role_draft.clone();
+        let path = match format!("actor/{}", self.actor_draft.trim()).parse::<NamespacePath>() {
+            Ok(path) => path,
+            Err(error) => {
+                self.message = Some(format!("Invalid actor: {error}"));
+                return;
+            }
+        };
+        match self.with_ledger(async |ledger| ledger.assign_role(&id, &role, &path).await) {
+            Ok(()) => {
+                self.actor_draft.clear();
+                self.message = Some(format!("{role}: {} added.", actor_name(&path)));
+                self.refresh();
+                self.select(id);
+            }
+            Err(error) => self.message = Some(format!("Person not added: {error:#}")),
+        }
+    }
+
+    fn remove_role(&mut self, role: &str, actor: &NamespacePath) {
+        let Some(id) = self.selected.clone() else {
+            return;
+        };
+        match self.with_ledger(async |ledger| ledger.remove_role(&id, role, actor).await) {
+            Ok(()) => {
+                self.message = Some(format!("{role}: {} removed.", actor_name(actor)));
+                self.refresh();
+                self.select(id);
+            }
+            Err(error) => self.message = Some(format!("Person not removed: {error:#}")),
         }
     }
 
@@ -4277,11 +4438,7 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
             painter.text(
                 node.center_bottom() - Vec2::new(0.0, padding / 2.0),
                 Align2::CENTER_BOTTOM,
-                if holds_active && item.item.state != ItemState::Active {
-                    format!("{} · holds active work", item.item.state)
-                } else {
-                    format!("{} · {}", item.item.state, item.item.priority)
-                },
+                node_meta(item, holds_active),
                 meta_font,
                 dim(Color32::LIGHT_GRAY),
             );
@@ -6777,6 +6934,27 @@ fn node_title(title: &str, theme: &Theme) -> String {
     }
 }
 
+/// The card's meta line: state, then priority or a note that it holds active
+/// work, then `agent` when an agent created the task.
+fn node_meta(item: &StoredItem, holds_active: bool) -> String {
+    let mut meta = if holds_active && item.item.state != ItemState::Active {
+        format!("{} · holds active work", item.item.state)
+    } else {
+        format!("{} · {}", item.item.state, item.item.priority)
+    };
+    if item.agent.is_some() {
+        meta.push_str(" · agent");
+    }
+    meta
+}
+
+/// An actor's name without the `actor/` kind.
+fn actor_name(path: &NamespacePath) -> &str {
+    path.as_str()
+        .strip_prefix("actor/")
+        .unwrap_or(path.as_str())
+}
+
 fn short_title(title: &str) -> String {
     title.chars().take(22).collect()
 }
@@ -6788,10 +6966,10 @@ fn short_title(title: &str) -> String {
 )]
 mod tests {
     use super::{
-        FamilyPresentation, GroupBy, LocalGraphLayout, collect_subtree, compare_group_labels,
-        fallback_tag_colors, family_box, family_dependency_bands, family_ring_mesh,
-        family_tree_geometry, file_stamp, focus_is_active, hierarchy_levels, limit_child_depth,
-        matches_query, segment_outside_rect,
+        AgentFilter, FamilyPresentation, GroupBy, LocalGraphLayout, collect_subtree,
+        compare_group_labels, fallback_tag_colors, family_box, family_dependency_bands,
+        family_ring_mesh, family_tree_geometry, file_stamp, focus_is_active, hierarchy_levels,
+        limit_child_depth, matches_query, node_meta, segment_outside_rect,
     };
     use eframe::egui::{Color32, Pos2, Rect, pos2, vec2};
     use std::collections::{HashMap, HashSet};
@@ -7289,5 +7467,19 @@ mod tests {
         assert!(matches_query("BABAD", "Write the report", &ids, &tags));
         assert!(matches_query("cdint", "Write the report", &ids, &tags));
         assert!(!matches_query("missing", "Write the report", &ids, &tags));
+    }
+
+    #[test]
+    fn agent_tasks_are_marked_and_filtered() {
+        let mine = task("1", None, ItemState::Inbox);
+        let mut bot = task("2", None, ItemState::Inbox);
+        bot.agent = Some("agent-assistant".to_owned());
+        assert_eq!(node_meta(&mine, false), "inbox · normal");
+        assert_eq!(node_meta(&bot, false), "inbox · normal · agent");
+        let hide = AgentFilter::from_config(Some("hide"));
+        assert!(hide.keeps(&mine) && !hide.keeps(&bot));
+        let only = AgentFilter::from_config(Some("only"));
+        assert!(!only.keeps(&mine) && only.keeps(&bot));
+        assert_eq!(AgentFilter::from_config(None), AgentFilter::Show);
     }
 }

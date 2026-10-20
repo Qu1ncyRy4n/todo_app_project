@@ -396,6 +396,17 @@ dogfooding notes. Every slice below landed as its own commit with tests.
     records its own write as seen. Unsaved panel edits (live theme differs from
     `theme_loaded`) block the reload and report it instead. A deleted
     `theme.toml` is left alone. Covered by `a_file_stamp_sees_edits_and_repointed_links`.
+58. Attribution (protocol v15). The inspector's **People** section lists the
+    task's roles (author, contributor, assignee, requester, or any typed role)
+    with Remove, adds one from a role menu and an actor name with suggestions
+    from existing actors, and says `Agent-created: <name>` when an agent signed
+    the creation or the author is an actor of kind agent. Cards append
+    `· agent` to the meta line. **Tasks shown → Agent-created** shows, hides,
+    or isolates agent tasks; the default comes from `agent_items`. The editor
+    always writes as the operator, even when launched from an agent's shell.
+    Reset filters leaves the agent filter alone (`ponytail`: keep a default if
+    that matters). Covered by `agent_tasks_are_marked_and_filtered`; the panel
+    itself is unverified in a window.
 
 ## Configuration
 
