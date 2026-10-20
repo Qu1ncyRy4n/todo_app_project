@@ -1,8 +1,8 @@
 # Project Handoff
 
 Updated: 2026-10-19
-Covers: workspace v0.3.0, protocol v14, `main` at "Add todo scan for
-todo:<id> references in files".
+Covers: workspace v0.3.0, protocol v14, `main` at "Update the handoff for
+the TOML manifest".
 
 ## Where we left off, October 19
 
@@ -17,8 +17,10 @@ todo:<id> references in files".
     checkout whose `origin` matches infers the project on any machine.
   - `todo scan [PATH...] [--check]` (`9fccad0`) lists `todo:<id>` references
     with each item's state.
-- **On hold:** the manifest file (`tobiz-zonab`). The developer is weighing
-  HOCON and UCL against KDL; wait for their pick.
+  - `todo manifest export|apply` (`cb678af`): actor and project records as
+    TOML, with a `based_on` digest that refuses stale files. TOML is a
+    stopgap; Mogent's small language (`~/dev/cdint/Agents`) is the likely
+    long-term syntax once it settles. Reasoning and ideas kept: TE-0016.
 - **Deferred to 2026-11-01:** sync redesign (`vuzil-gofah`), sync attribution
   (`nafun-rinan`), mobile stack (`kibut-hupan`).
 - **Not built from TE-0016:** emoji entry forms, `!1` priority (zsh history
@@ -59,7 +61,7 @@ handoff lives.
 ```sh
 nix develop          # everything runs in the pinned shell; ./dev wraps it
 ./dev check          # cargo fmt --check, then clippy -D warnings
-./dev test           # 247 tests
+./dev test           # 250 tests
 ./dev gui            # the graph editor against the real ledger
 ./dev run -- ls --tree
 ```
@@ -208,7 +210,7 @@ Not oversights. Each has a reason recorded.
 - Default commit mode is commit-only-when-asked. Atomic commits require an
   explicit goal.
 - Deliberate shortcuts are marked with a `ponytail:` comment naming the ceiling
-  and the upgrade path. `grep -rn "ponytail:" crates` lists them (eight today).
+  and the upgrade path. `grep -rn "ponytail:" crates` lists them (nine today).
   The broader list of known-imperfect behavior is "Remaining work" in the graph
   editor handoff, which is seven items and not the same list.
 

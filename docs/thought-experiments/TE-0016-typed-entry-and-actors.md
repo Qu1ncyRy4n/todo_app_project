@@ -4,7 +4,7 @@ Date: 2026-10-14
 Status: direction agreed with the developer. Implemented: typed entry, actors,
 fields, membership, roles, `relates-to` (protocol v14, `93c4ac6`, `ce7d4ac`) and
 projects keyed by `repo`. Not implemented: emoji forms, project default tags,
-GUI quick entry. The manifest is TOML for now (see below).
+GUI quick entry. The TOML manifest is implemented (`cb678af`).
 Items: `farag-susot`, `nafun-rinan`, `popal-nofah`, `jamim-mamin`
 Research: `docs/research/task-field-survey.md`
 
@@ -125,12 +125,12 @@ the events, then write them.
 
 ```toml
 # Written by `todo manifest export`; edit, then `todo manifest apply`.
-based_on = "bagtsaer…"   # ledger head at export
+based_on = "3f9c0e1a72b4d856"   # digest of the records at export
 
 [actor.quincy]
-kind = "person"
 gh = "Qu1ncyRy4n"
-member_of = ["cdint"]
+kind = "person"
+member-of = ["cdint"]
 
 [actor.cdint]
 kind = "org"
@@ -141,15 +141,19 @@ repo = "github.com/Qu1ncyRy4n/todo_app_project"
 
 - `todo manifest export [FILE]` writes every actor and project; `todo manifest
   apply FILE [--dry-run]` prints the changes as `+`/`-` lines and writes them.
-- A listed node is authoritative for its fields and `member_of`: a removed line
+- A listed node is authoritative for its fields and `member-of`: a removed line
   clears that field or link. An unlisted node is untouched. Nodes are never
-  deleted.
-- **Stale-file check (from Mogent's input hashes):** `based_on` records the
-  ledger head at export. If the ledger has moved since and the file would change
-  anything, apply refuses, so an old file cannot revert newer `todo set` edits
-  or events synced from another machine. After a successful apply the tool
-  rewrites `based_on` in place, keeping comments. A hand-written file without
-  `based_on` is applied as is.
+  deleted. The list key is `member-of`, matching `todo set x member-of=y`;
+  `member_of` could collide with a field, since keys allow `_`.
+- **Stale-file check (from Mogent's input hashes):** `based_on` is a short
+  SHA-256 of the actor and project records at export, not the ledger head, so
+  adding ordinary items never makes the file stale. If the records have changed
+  since and the file would change anything, apply refuses, so an old file cannot
+  revert newer `todo set` edits or records synced from another machine. After a
+  successful apply only the `based_on` line is rewritten; comments and layout
+  stay. A hand-written file without `based_on` is applied as is.
+- Ceiling: `member-of` names actors. A link to a non-actor would export as a
+  full path that does not parse back; nothing creates one today.
 - Comment out a line with `#` to disable it; TOML has no node-level disable.
 
 ### Ideas kept from Mogent's language
