@@ -197,5 +197,9 @@ Documented, not adopted until a real case appears:
 
 - Whether `kind` constrains containment beyond "agents nest under one owner".
 - Whether to re-enumerate TE/DR/DI records with proquint IDs.
+- Whether the manifest is right at all (raised by the developer 2026-10-20,
+  after it was built). Built and kept for now; unresolved: is a bulk-edit file
+  worth having beside `todo set`, is TOML tolerable until Mogent's language
+  settles, and is `member-of` a list on the member or should orgs list members.
 
 Recorded by agent-assistant.
