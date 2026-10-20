@@ -2,17 +2,26 @@
 
 use anyhow::{Context, Result, bail};
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeMap, fmt, fmt::Write as _, fs, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+    fmt::Write as _,
+    fs,
+    path::Path,
+};
 use todo_core::{NamespaceKind, NamespacePath, validate_segment};
 use todo_store::{Ledger, MEMBER_OF};
 
 const KINDS: [&str; 2] = ["actor", "project"];
 const LINK_KEY: &str = "member-of";
+/// The same link written on the org's side; export uses it for `kind = "org"`.
+const MEMBERS_KEY: &str = "members";
 
 #[derive(Default)]
 struct Node {
     fields: BTreeMap<String, String>,
     member_of: Vec<NamespacePath>,
+    members: Vec<NamespacePath>,
 }
 
 type Records = BTreeMap<NamespacePath, Node>;
@@ -112,7 +121,14 @@ async fn current(ledger: &Ledger) -> Result<Records> {
             .filter(|(relation, _)| relation == MEMBER_OF)
             .map(|(_, target)| target)
             .collect();
-        records.insert(entry.path, Node { fields, member_of });
+        records.insert(
+            entry.path,
+            Node {
+                fields,
+                member_of,
+                members: Vec::new(),
+            },
+        );
     }
     Ok(records)
 }
@@ -135,22 +151,57 @@ fn diff(have: &Records, wanted: &Records) -> Vec<Change> {
                 changes.push(Change::Clear(path.clone(), key.clone()));
             }
         }
-        for target in &node.member_of {
-            if !current.member_of.contains(target) {
-                changes.push(Change::Link(path.clone(), target.clone()));
-            }
+    }
+    // A link is wanted if either end lists it. A link neither end lists any
+    // more is removed when at least one end is in the file.
+    let wanted_links = links(wanted);
+    for (member, org) in &wanted_links {
+        if !have
+            .get(member)
+            .is_some_and(|node| node.member_of.contains(org))
+        {
+            changes.push(Change::Link(member.clone(), org.clone()));
         }
-        for target in &current.member_of {
-            if !node.member_of.contains(target) {
-                changes.push(Change::Unlink(path.clone(), target.clone()));
-            }
+    }
+    for (member, org) in links(have) {
+        if !wanted_links.contains(&(member.clone(), org.clone()))
+            && (wanted.contains_key(&member) || wanted.contains_key(&org))
+        {
+            changes.push(Change::Unlink(member, org));
         }
     }
     changes
 }
 
+/// Every `member-of` link as (member, org), from both sides of the file.
+fn links(records: &Records) -> BTreeSet<(NamespacePath, NamespacePath)> {
+    let mut links = BTreeSet::new();
+    for (path, node) in records {
+        for org in &node.member_of {
+            links.insert((path.clone(), org.clone()));
+        }
+        for member in &node.members {
+            links.insert((member.clone(), path.clone()));
+        }
+    }
+    links
+}
+
+fn is_org(records: &Records, path: &NamespacePath) -> bool {
+    records
+        .get(path)
+        .and_then(|node| node.fields.get("kind"))
+        .is_some_and(|kind| kind == "org")
+}
+
 /// The records as TOML tables, without the `based_on` header.
 fn render(records: &Records) -> String {
+    let mut members: BTreeMap<&NamespacePath, Vec<&NamespacePath>> = BTreeMap::new();
+    for (path, node) in records {
+        for org in node.member_of.iter().filter(|org| is_org(records, org)) {
+            members.entry(org).or_default().push(path);
+        }
+    }
     let mut text = String::new();
     for kind in KINDS {
         for (path, node) in records {
@@ -161,20 +212,34 @@ fn render(records: &Records) -> String {
             for (field, value) in &node.fields {
                 let _ = writeln!(text, "{} = {}", key(field), quote(value));
             }
-            if !node.member_of.is_empty() {
-                // ponytail: member-of names are actor names; a non-actor target
-                // is written as its full path and would not parse back.
-                let targets: Vec<String> = node
-                    .member_of
-                    .iter()
-                    .map(|target| quote(name_in(target, "actor").unwrap_or(target.as_str())))
-                    .collect();
-                let _ = writeln!(text, "{LINK_KEY} = [{}]", targets.join(", "));
-            }
+            let member_of: Vec<&NamespacePath> = node
+                .member_of
+                .iter()
+                .filter(|org| !is_org(records, org))
+                .collect();
+            write_names(&mut text, LINK_KEY, &member_of);
+            write_names(
+                &mut text,
+                MEMBERS_KEY,
+                members.get(path).map_or(&[][..], Vec::as_slice),
+            );
             text.push('\n');
         }
     }
     text
+}
+
+fn write_names(text: &mut String, key: &str, paths: &[&NamespacePath]) {
+    if paths.is_empty() {
+        return;
+    }
+    // ponytail: link lists hold actor names; a non-actor end is written as its
+    // full path and would not parse back.
+    let names: Vec<String> = paths
+        .iter()
+        .map(|path| quote(name_in(path, "actor").unwrap_or(path.as_str())))
+        .collect();
+    let _ = writeln!(text, "{key} = [{}]", names.join(", "));
 }
 
 fn parse(text: &str) -> Result<(Option<String>, Records)> {
@@ -215,7 +280,7 @@ fn node(kind: &str, name: &str, body: &toml::Value) -> Result<Node> {
         .with_context(|| format!("{kind}.{name}: expected a table"))?;
     let mut node = Node::default();
     for (key, value) in body {
-        if key == LINK_KEY {
+        if key == LINK_KEY || key == MEMBERS_KEY {
             let items = value
                 .as_array()
                 .with_context(|| format!("{}: expected a list of actor names", at(key)))?;
@@ -223,11 +288,14 @@ fn node(kind: &str, name: &str, body: &toml::Value) -> Result<Node> {
                 let target = item
                     .as_str()
                     .with_context(|| format!("{}: expected actor names", at(key)))?;
-                node.member_of.push(
-                    format!("actor/{target}")
-                        .parse()
-                        .with_context(|| format!("{}: invalid actor {target:?}", at(key)))?,
-                );
+                let target = format!("actor/{target}")
+                    .parse()
+                    .with_context(|| format!("{}: invalid actor {target:?}", at(key)))?;
+                if key == LINK_KEY {
+                    node.member_of.push(target);
+                } else {
+                    node.members.push(target);
+                }
             }
             continue;
         }
@@ -298,7 +366,7 @@ fn quote(value: &str) -> String {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, reason = "test assertions")]
 mod tests {
-    use super::{parse, with_based_on};
+    use super::{diff, parse, render, with_based_on};
 
     #[test]
     fn based_on_is_rewritten_in_place_and_tables_are_left_alone() {
@@ -321,5 +389,30 @@ mod tests {
             parse("based_on = \"x\"\n[actor.a]\nkind = \"person\"\nmember-of = [\"b\"]").unwrap();
         assert_eq!(based_on.as_deref(), Some("x"));
         assert_eq!(records.len(), 1);
+    }
+
+    #[test]
+    fn membership_reads_from_either_side_and_exports_on_the_org() {
+        let (_, have) = parse(
+            "[actor.cdint]\nkind = \"org\"\n[actor.quincy]\nmember-of = [\"cdint\"]\n\
+             [actor.steve]\nmember-of = [\"cdint\"]\n",
+        )
+        .unwrap();
+        assert!(
+            render(&have)
+                .contains("[actor.cdint]\nkind = \"org\"\nmembers = [\"quincy\", \"steve\"]\n")
+        );
+        assert!(!render(&have).contains("member-of"));
+        // steve is dropped from the roster; quincy is listed on both sides.
+        let (_, wanted) = parse(
+            "[actor.cdint]\nkind = \"org\"\nmembers = [\"quincy\"]\n\
+             [actor.quincy]\nmember-of = [\"cdint\"]\n",
+        )
+        .unwrap();
+        let changes: Vec<String> = diff(&have, &wanted)
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(changes, ["- actor/steve member-of actor/cdint"]);
     }
 }

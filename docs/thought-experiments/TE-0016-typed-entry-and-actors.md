@@ -127,13 +127,13 @@ the events, then write them.
 # Written by `todo manifest export`; edit, then `todo manifest apply`.
 based_on = "3f9c0e1a72b4d856"   # digest of the records at export
 
+[actor.cdint]
+kind = "org"
+members = ["quincy", "steve"]
+
 [actor.quincy]
 gh = "Qu1ncyRy4n"
 kind = "person"
-member-of = ["cdint"]
-
-[actor.cdint]
-kind = "org"
 
 [project.todo]
 repo = "github.com/Qu1ncyRy4n/todo_app_project"
@@ -152,7 +152,11 @@ repo = "github.com/Qu1ncyRy4n/todo_app_project"
   revert newer `todo set` edits or records synced from another machine. After a
   successful apply only the `based_on` line is rewritten; comments and layout
   stay. A hand-written file without `based_on` is applied as is.
-- Ceiling: `member-of` names actors. A link to a non-actor would export as a
+- Membership can be written on either end: `member-of = [...]` on the member,
+  `members = [...]` on the org. Both mean the same link; it is wanted if either
+  end lists it, and removed when one end is in the file and neither lists it.
+  Export writes `members` on `kind = "org"` actors and `member-of` otherwise.
+- Ceiling: link lists name actors. A link to a non-actor would export as a
   full path that does not parse back; nothing creates one today.
 - Comment out a line with `#` to disable it; TOML has no node-level disable.
 
@@ -199,7 +203,7 @@ Documented, not adopted until a real case appears:
 - Whether to re-enumerate TE/DR/DI records with proquint IDs.
 - Whether the manifest is right at all (raised by the developer 2026-10-20,
   after it was built). Built and kept for now; unresolved: is a bulk-edit file
-  worth having beside `todo set`, is TOML tolerable until Mogent's language
-  settles, and is `member-of` a list on the member or should orgs list members.
+  worth having beside `todo set`, and is TOML tolerable until Mogent's language
+  settles. (Which side lists membership: both, decided 2026-10-20.)
 
 Recorded by agent-assistant.
