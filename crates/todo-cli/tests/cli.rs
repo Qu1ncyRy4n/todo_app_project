@@ -880,6 +880,12 @@ fn agents_sign_their_events_and_their_items_can_be_filtered() {
             .contains("created by agent: review-bot")
     );
 
+    // An unsigned item is labeled after the fact by an author whose kind is agent.
+    harness.ok(&["set", "helper", "kind=agent"]);
+    harness.ok(&["set", &mine, "by:helper"]);
+    let only = harness.ok(&["ls", "--agent", "only"]);
+    assert!(only.contains("Operator task  [agent:helper]"), "{only}");
+
     std::fs::write(
         harness.config.join("config.toml"),
         format!(

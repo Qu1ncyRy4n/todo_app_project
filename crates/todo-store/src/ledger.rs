@@ -1972,11 +1972,13 @@ impl Ledger {
         Ok(result)
     }
 
+    /// The signing agent of the item's creation, or else an author actor whose
+    /// `kind` is `agent`, which is how items from before v15 are labeled.
     async fn item_agent(&self, item: ItemId) -> Result<Option<String>> {
         let mut rows = self
             .connection
             .query(
-                "SELECT created_by_agent FROM items WHERE id = ?1",
+                "SELECT COALESCE(i.created_by_agent, (SELECT substr(n.canonical_path, 7) FROM item_roles r JOIN namespaces n ON n.id = r.namespace_id JOIN namespace_fields f ON f.namespace_id = n.id AND f.key = 'kind' AND f.value = 'agent' WHERE r.item_id = i.id AND r.role = 'author' ORDER BY n.canonical_path LIMIT 1)) FROM items i WHERE i.id = ?1",
                 values([item.to_string()]),
             )
             .await?;
