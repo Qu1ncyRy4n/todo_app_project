@@ -102,6 +102,7 @@ todo note <id> "What happened while doing it"
 todo cite <id> docs/architecture.md --label design
 todo done <id>
 todo show <id> --history
+todo scan --check             # todo:<id> comments in this repo; fails on closed or unknown
 todo backup /path/to/new/backup-directory
 todo sync init --repo /path/to/todo-ledger
 todo sync

@@ -86,6 +86,17 @@ todo tag mv topic/promisegrid/cbor topic/promisegrid/encoding
 todo tag ls --tree
 ```
 
+Code can point at an item with a `todo:<id>` comment. `todo scan` lists every
+such reference with the item's current state, so finished or mistyped ones
+stand out; `--check` makes that an exit status for scripts:
+
+```text
+// todo:kajif-sudaj handle the empty case
+$ todo scan
+src/lib.rs:12 todo:kajif-sudaj [x] Handle empty input
+1 references, 1 closed or unknown
+```
+
 ### 5. Inspect the ledger history
 
 ```text

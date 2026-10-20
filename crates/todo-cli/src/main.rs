@@ -172,6 +172,16 @@ enum Command {
     },
     /// List actors, or show one with its fields, memberships, and items by role.
     Actor { name: Option<String> },
+    /// Find `todo:<id>` references in files and show each item's state.
+    ///
+    /// Uses `git grep`, so ignored files are skipped; outside a checkout every
+    /// file is searched. `--check` exits non-zero on closed or unknown items.
+    Scan {
+        #[arg(default_value = ".")]
+        paths: Vec<PathBuf>,
+        #[arg(long)]
+        check: bool,
+    },
     /// Import a Markdown checkbox tree in one transaction.
     Import(ImportArgs),
     /// Export a human view, rich view, or exact event archive.
@@ -478,6 +488,35 @@ async fn run() -> Result<()> {
         }
         Command::Actor { name: Some(name) } => {
             show_actor(&ledger, &actor_path(&config, &name)?).await?
+        }
+        Command::Scan { paths, check } => {
+            let mut stale = 0_usize;
+            let mut total = 0_usize;
+            for root in &paths {
+                for (file, line, reference) in todo_references(root)? {
+                    total += 1;
+                    let id = reference.trim_start_matches("todo:");
+                    let status = match ledger.get_item(id).await {
+                        Ok(stored) => {
+                            if !matches!(stored.item.state, ItemState::Inbox | ItemState::Active) {
+                                stale += 1;
+                            }
+                            format!("{} {}", state_mark(stored.item.state), stored.item.title)
+                        }
+                        Err(_) => {
+                            stale += 1;
+                            "unknown".to_owned()
+                        }
+                    };
+                    let shown = root.join(file);
+                    let shown = shown.strip_prefix(".").unwrap_or(&shown);
+                    println!("{}:{line} {reference} {status}", shown.display());
+                }
+            }
+            println!("{total} references, {stale} closed or unknown");
+            if check && stale > 0 {
+                bail!("{stale} references point at closed or unknown items");
+            }
         }
         Command::Ls(args) => {
             let project = if args.global {
@@ -1242,6 +1281,45 @@ async fn resolve_project(
         .as_deref()
         .map(project_path)
         .transpose()
+}
+
+/// `(file, line, "todo:<proquint>")` for every reference under `root`, with
+/// files relative to `root`.
+fn todo_references(root: &Path) -> Result<Vec<(String, String, String)>> {
+    const C: &str = "[bdfghjklmnprstvz]";
+    const V: &str = "[aiou]";
+    let word = format!("{C}{V}{C}{V}{C}");
+    let pattern = format!("todo:{word}(-{word})+");
+    let mut arguments = vec!["grep", "-I", "-n", "-o", "-z", "-E", pattern.as_str()];
+    if !git_succeeds(root, &["rev-parse", "--is-inside-work-tree"])? {
+        arguments.insert(1, "--no-index");
+    } else {
+        arguments.insert(1, "--untracked");
+    }
+    arguments.extend(["--", "."]);
+    let output = ProcessCommand::new("git")
+        .args(&arguments)
+        .current_dir(root)
+        .output()
+        .with_context(|| format!("run git grep in {}", root.display()))?;
+    // git grep exits 1 when nothing matches.
+    if !output.status.success() && output.status.code() != Some(1) {
+        bail!(
+            "git grep failed in {}: {}",
+            root.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let mut result = Vec::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let mut parts = line.splitn(3, '\0');
+        if let (Some(file), Some(number), Some(reference)) =
+            (parts.next(), parts.next(), parts.next())
+        {
+            result.push((file.to_owned(), number.to_owned(), reference.to_owned()));
+        }
+    }
+    Ok(result)
 }
 
 /// The `origin` URL of the checkout containing `cwd`, if there is one.

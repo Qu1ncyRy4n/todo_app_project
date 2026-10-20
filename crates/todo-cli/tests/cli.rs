@@ -738,3 +738,30 @@ fn a_checkout_infers_its_project_from_the_origin_remote() {
     let outside = id_from_add(&harness.ok(&["add", "Outside"])).to_owned();
     assert!(!harness.ok(&["show", &outside]).contains("project/todo"));
 }
+
+#[test]
+fn scan_reports_references_and_checks_for_stale_ones() {
+    let harness = Harness::new();
+    harness.ok(&["init"]);
+    let open = id_from_add(&harness.ok(&["add", "Still open"])).to_owned();
+    let done = id_from_add(&harness.ok(&["add", "Finished"])).to_owned();
+    harness.ok(&["done", &done]);
+    let source = harness.work.join("src");
+    std::fs::create_dir(&source).unwrap();
+    std::fs::write(
+        source.join("lib.rs"),
+        format!("// todo:{open} keep\n// todo:{done} and todo:babab-babab\n"),
+    )
+    .unwrap();
+
+    let report = harness.ok(&["scan"]);
+    for line in [
+        format!("src/lib.rs:1 todo:{open} [ ] Still open"),
+        format!("src/lib.rs:2 todo:{done} [x] Finished"),
+        "src/lib.rs:2 todo:babab-babab unknown".to_owned(),
+        "3 references, 2 closed or unknown".to_owned(),
+    ] {
+        assert!(report.contains(&line), "missing {line:?} in\n{report}");
+    }
+    assert!(!harness.run(&["scan", "--check"]).status.success());
+}
