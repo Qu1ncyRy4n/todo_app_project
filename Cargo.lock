@@ -4887,10 +4887,12 @@ dependencies = [
  "minicbor",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "todo-core",
  "todo-store",
  "tokio",
+ "toml",
 ]
 
 [[package]]

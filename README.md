@@ -103,6 +103,8 @@ todo cite <id> docs/architecture.md --label design
 todo done <id>
 todo show <id> --history
 todo scan --check             # todo:<id> comments in this repo; fails on closed or unknown
+todo manifest export people.toml   # actors and projects as TOML; edit, then:
+todo manifest apply people.toml --dry-run
 todo backup /path/to/new/backup-directory
 todo sync init --repo /path/to/todo-ledger
 todo sync

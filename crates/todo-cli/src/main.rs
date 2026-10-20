@@ -1,3 +1,5 @@
+mod manifest;
+
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{Local, NaiveDate};
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -172,6 +174,11 @@ enum Command {
     },
     /// List actors, or show one with its fields, memberships, and items by role.
     Actor { name: Option<String> },
+    /// Edit actor and project records in bulk as a TOML file.
+    Manifest {
+        #[command(subcommand)]
+        command: ManifestCommand,
+    },
     /// Find `todo:<id>` references in files and show each item's state.
     ///
     /// Uses `git grep`, so ignored files are skipped; outside a checkout every
@@ -340,6 +347,19 @@ enum ProjectCommand {
     },
 }
 
+#[derive(Subcommand)]
+enum ManifestCommand {
+    /// Write every actor and project record to FILE, or print it.
+    Export { file: Option<PathBuf> },
+    /// Show and write the changes FILE makes. A removed line clears that
+    /// field; refuses if the records changed since the file was exported.
+    Apply {
+        file: PathBuf,
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
 #[derive(Args)]
 struct TagArgs {
     #[command(subcommand)]
@@ -489,6 +509,12 @@ async fn run() -> Result<()> {
         Command::Actor { name: Some(name) } => {
             show_actor(&ledger, &actor_path(&config, &name)?).await?
         }
+        Command::Manifest { command } => match command {
+            ManifestCommand::Export { file } => manifest::export(&ledger, file.as_deref()).await?,
+            ManifestCommand::Apply { file, dry_run } => {
+                manifest::apply(&ledger, &file, dry_run).await?
+            }
+        },
         Command::Scan { paths, check } => {
             let mut stale = 0_usize;
             let mut total = 0_usize;

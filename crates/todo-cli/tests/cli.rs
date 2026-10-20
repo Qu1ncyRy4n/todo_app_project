@@ -765,3 +765,62 @@ fn scan_reports_references_and_checks_for_stale_ones() {
     }
     assert!(!harness.run(&["scan", "--check"]).status.success());
 }
+
+#[test]
+fn manifest_round_trips_and_refuses_a_stale_file() {
+    let harness = Harness::new();
+    harness.ok(&["init"]);
+    harness.ok(&["set", "quincy", "kind=person", "gh=old"]);
+    let file = harness.work.join("records.toml");
+    let path = file.to_str().unwrap();
+    harness.ok(&["manifest", "export", path]);
+    let exported = std::fs::read_to_string(&file).unwrap();
+    assert!(exported.contains("[actor.quincy]\ngh = \"old\"\nkind = \"person\"\n"));
+    assert!(!harness.run(&["manifest", "export", path]).status.success());
+
+    // Change a field, drop one, and add an org with a member.
+    let edited = exported.replace("gh = \"old\"\n", "").replace(
+        "kind = \"person\"",
+        "kind = \"person\"\nemail = \"q@example.org\"",
+    ) + "# a comment that must survive\n[actor.cdint]\nkind = \"org\"\n\n[actor.steve]\nmember-of = [\"cdint\"]\n";
+    std::fs::write(&file, &edited).unwrap();
+    let preview = harness.ok(&["manifest", "apply", path, "--dry-run"]);
+    for line in [
+        "+ actor/quincy email=q@example.org",
+        "- actor/quincy gh",
+        "+ actor/cdint",
+        "+ actor/steve member-of actor/cdint",
+    ] {
+        assert!(preview.contains(line), "missing {line:?} in\n{preview}");
+    }
+    assert!(harness.ok(&["actor", "quincy"]).contains("gh: old"));
+
+    harness.ok(&["manifest", "apply", path]);
+    let quincy = harness.ok(&["actor", "quincy"]);
+    assert!(quincy.contains("email: q@example.org") && !quincy.contains("gh:"));
+    assert!(
+        harness
+            .ok(&["actor", "cdint"])
+            .contains("member: actor/steve")
+    );
+    assert!(
+        std::fs::read_to_string(&file)
+            .unwrap()
+            .contains("# a comment that must survive")
+    );
+    assert_eq!(harness.ok(&["manifest", "apply", path]), "No changes.\n");
+
+    // An item does not make the file stale, but a record change does.
+    harness.ok(&["add", "Unrelated"]);
+    std::fs::write(
+        &file,
+        std::fs::read_to_string(&file)
+            .unwrap()
+            .replace("org", "team"),
+    )
+    .unwrap();
+    harness.ok(&["set", "quincy", "gh=new"]);
+    let stale = harness.run(&["manifest", "apply", path]);
+    assert!(!stale.status.success());
+    assert!(String::from_utf8_lossy(&stale.stderr).contains("changed since"));
+}
