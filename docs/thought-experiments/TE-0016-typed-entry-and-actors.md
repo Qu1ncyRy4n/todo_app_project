@@ -1,7 +1,10 @@
 # TE-0016: Typed Entry, Actors, and Namespace Records
 
 Date: 2026-10-14
-Status: direction agreed with the developer; not yet implemented
+Status: direction agreed with the developer. Implemented: typed entry, actors,
+fields, membership, roles, `relates-to` (protocol v14, `93c4ac6`, `ce7d4ac`) and
+projects keyed by `repo`. Not implemented: emoji forms, project default tags,
+GUI quick entry. The manifest format is reopened (KDL, HOCON, or UCL).
 Items: `farag-susot`, `nafun-rinan`, `popal-nofah`, `jamim-mamin`
 Research: `docs/research/task-field-survey.md`
 
@@ -109,6 +112,9 @@ node with a `repo` field**:
 - A project node can carry default tags that its items inherit.
 
 ## Editable manifest: KDL
+
+On hold since 2026-10-15: the developer is weighing HOCON and UCL against KDL.
+The pipeline below holds for whichever format is chosen.
 
 KDL is the hand-editing format for actor and project records: comments, `/-` to
 disable a node, bare words, natural nesting. The pipeline follows TE-0009: the

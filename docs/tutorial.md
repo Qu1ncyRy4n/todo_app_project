@@ -35,6 +35,17 @@ The longest matching directory mapping wins. An explicit `--project cdint`
 always overrides inference. Outside a mapped directory, capture goes to the
 unscoped global inbox.
 
+Directory mappings are per machine. To have every clone of a repository infer
+its project on any machine, record the repository once instead; it syncs with
+the ledger:
+
+```text
+cd ~/dev/cdint && todo project repo cdint     # uses this checkout's origin
+todo project repo todo git@github.com:o/todo_app_project.git
+```
+
+An attached directory still wins over a matching remote.
+
 ```text
 todo ls             # current project, or unscoped inbox
 todo ls --global    # open items across every scope

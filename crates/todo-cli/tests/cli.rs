@@ -51,7 +51,11 @@ impl Harness {
     }
 
     fn ok(&self, args: &[&str]) -> String {
-        let output = self.run(args);
+        self.ok_in(&self.work, args)
+    }
+
+    fn ok_in(&self, cwd: &Path, args: &[&str]) -> String {
+        let output = self.run_in(cwd, args);
         assert!(
             output.status.success(),
             "{}",
@@ -699,4 +703,38 @@ fn typed_entry_attributes_items_to_actors() {
 
     // Fields belong to actors and projects, never to items.
     assert!(!harness.run(&["set", &id, "gh=x"]).status.success());
+}
+
+#[test]
+fn a_checkout_infers_its_project_from_the_origin_remote() {
+    let harness = Harness::new();
+    harness.ok(&["init"]);
+    let checkout = harness.work.join("checkout");
+    std::fs::create_dir(&checkout).unwrap();
+    git(&checkout, &["init", "-q"]);
+    git(
+        &checkout,
+        &["remote", "add", "origin", "git@github.com:o/todo.git"],
+    );
+
+    let recorded = harness.ok_in(&checkout, &["project", "repo", "todo"]);
+    assert_eq!(recorded, "project/todo repo=git@github.com:o/todo.git\n");
+    assert!(
+        harness
+            .ok(&["project", "ls"])
+            .contains("  repo: git@github.com:o/todo.git")
+    );
+
+    // A nested directory of another clone, written as HTTPS, still matches.
+    let nested = checkout.join("src");
+    std::fs::create_dir(&nested).unwrap();
+    git(
+        &checkout,
+        &["remote", "set-url", "origin", "https://github.com/o/todo"],
+    );
+    let inside = id_from_add(&harness.ok_in(&nested, &["add", "Inside"])).to_owned();
+    assert!(harness.ok(&["show", &inside]).contains("project/todo"));
+
+    let outside = id_from_add(&harness.ok(&["add", "Outside"])).to_owned();
+    assert!(!harness.ok(&["show", &outside]).contains("project/todo"));
 }

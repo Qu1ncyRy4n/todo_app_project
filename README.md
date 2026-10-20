@@ -90,7 +90,7 @@ absent, and what is unverified, start from [the project handoff](docs/handoff.md
 ```sh
 ./dev install
 todo init
-todo project attach todo --path /path/to/this/project
+todo project repo todo        # run inside a clone: every clone infers project/todo
 
 todo add "Dogfood the first workflow" --tag goal/todo/v0_1
 todo ls --tree

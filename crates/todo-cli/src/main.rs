@@ -313,6 +313,9 @@ enum ProjectCommand {
         #[arg(long, default_value = ".")]
         path: PathBuf,
     },
+    /// Record a project's Git repository so any checkout of it, on any
+    /// machine, infers the project. URL defaults to this checkout's `origin`.
+    Repo { name: String, url: Option<String> },
     /// Set the fallback project used outside attached directories.
     Default { name: String },
     /// List project namespaces and attached roots.
@@ -413,7 +416,8 @@ async fn run() -> Result<()> {
             if entry.directives.iter().any(|directive| directive.remove) {
                 bail!("a new item has nothing to remove; drop the leading -");
             }
-            let mut project = resolve_project(cli.project.as_deref(), &config, &cwd)?;
+            let mut project =
+                resolve_project(cli.project.as_deref(), &config, &ledger, &cwd).await?;
             let mut tags = args
                 .tags
                 .iter()
@@ -479,7 +483,7 @@ async fn run() -> Result<()> {
             let project = if args.global {
                 None
             } else {
-                resolve_project(cli.project.as_deref(), &config, &cwd)?
+                resolve_project(cli.project.as_deref(), &config, &ledger, &cwd).await?
             };
             let scope = match (args.global, project.as_ref()) {
                 (true, _) => ItemScope::All,
@@ -707,7 +711,7 @@ async fn run() -> Result<()> {
             let project = if args.global {
                 None
             } else {
-                resolve_project(cli.project.as_deref(), &config, &cwd)?
+                resolve_project(cli.project.as_deref(), &config, &ledger, &cwd).await?
             };
             let scope = selected_scope(args.global, project.as_ref());
             let items = ledger.list_ready(scope, Local::now().date_naive()).await?;
@@ -723,7 +727,7 @@ async fn run() -> Result<()> {
             let project = if focus.global {
                 None
             } else {
-                resolve_project(cli.project.as_deref(), &config, &cwd)?
+                resolve_project(cli.project.as_deref(), &config, &ledger, &cwd).await?
             };
             let scope = selected_scope(focus.global, project.as_ref());
             match ledger.next_item(scope, Local::now().date_naive()).await? {
@@ -752,6 +756,17 @@ async fn run() -> Result<()> {
                 config.save(&paths.config())?;
                 println!("Attached {} -> {project}", root.display());
             }
+            ProjectCommand::Repo { name, url } => {
+                let project = project_path(&name)?;
+                let url = match url {
+                    Some(url) => url,
+                    None => git_origin(&cwd).ok_or_else(|| {
+                        anyhow::anyhow!("no `origin` remote here; pass the repository URL")
+                    })?,
+                };
+                ledger.set_field(&project, "repo", Some(&url)).await?;
+                println!("{project} repo={url}");
+            }
             ProjectCommand::Default { name } => {
                 let project = project_path(&name)?;
                 ledger.ensure_namespace(&project).await?;
@@ -767,6 +782,9 @@ async fn run() -> Result<()> {
                     .filter(|entry| entry.path.as_str().starts_with("project/"))
                 {
                     println!("{}", entry.path);
+                    if let Some(repo) = ledger.fields(&entry.path).await?.get("repo") {
+                        println!("  repo: {repo}");
+                    }
                     for (root, mapped) in &config.project_paths {
                         if mapped == entry.path.as_str() {
                             println!("  {}", root.display());
@@ -826,7 +844,8 @@ async fn run() -> Result<()> {
                 if args.dry_run {
                     print!("{}", markdown_for_batch(&items)?);
                 } else {
-                    let project = resolve_project(cli.project.as_deref(), &config, &cwd)?;
+                    let project =
+                        resolve_project(cli.project.as_deref(), &config, &ledger, &cwd).await?;
                     let source = if args.cite_source {
                         Some(
                             args.file
@@ -891,7 +910,7 @@ async fn run() -> Result<()> {
                 let project = if args.global {
                     None
                 } else {
-                    resolve_project(cli.project.as_deref(), &config, &cwd)?
+                    resolve_project(cli.project.as_deref(), &config, &ledger, &cwd).await?
                 };
                 let scope = selected_scope(args.global, project.as_ref());
                 let items = ledger.list_items(scope, args.all).await?;
@@ -1191,15 +1210,49 @@ fn encode_event_archive(envelopes: Vec<Vec<u8>>) -> Result<Vec<u8>> {
     Ok(encoder.into_writer())
 }
 
-fn resolve_project(
+/// Explicit `--project`, then an attached directory, then a project whose
+/// `repo` field matches this checkout's `origin`, then `default_project`.
+async fn resolve_project(
     explicit: Option<&str>,
     config: &AppConfig,
+    ledger: &Ledger,
     cwd: &Path,
 ) -> Result<Option<NamespacePath>> {
     if let Some(explicit) = explicit {
         return Ok(Some(project_path(explicit)?));
     }
-    config.project_for(cwd)?.map(project_path).transpose()
+    if let Some(project) = config.project_for(cwd)? {
+        return Ok(Some(project_path(project)?));
+    }
+    if let Some(remote) = git_origin(cwd) {
+        let mut matches = ledger.projects_for_repo(&remote).await?;
+        if matches.len() > 1 {
+            let names: Vec<String> = matches.iter().map(ToString::to_string).collect();
+            bail!(
+                "{remote} is the repo of {}; pass --project to choose",
+                names.join(", ")
+            );
+        }
+        if let Some(project) = matches.pop() {
+            return Ok(Some(project));
+        }
+    }
+    config
+        .default_project
+        .as_deref()
+        .map(project_path)
+        .transpose()
+}
+
+/// The `origin` URL of the checkout containing `cwd`, if there is one.
+fn git_origin(cwd: &Path) -> Option<String> {
+    let output = ProcessCommand::new("git")
+        .args(["remote", "get-url", "origin"])
+        .current_dir(cwd)
+        .output()
+        .ok()?;
+    let url = String::from_utf8(output.stdout).ok()?;
+    (output.status.success() && !url.trim().is_empty()).then(|| url.trim().to_owned())
 }
 
 fn project_path(value: &str) -> Result<NamespacePath> {
@@ -1682,6 +1735,17 @@ async fn show(ledger: &Ledger, reference: &str, include_history: bool) -> Result
     println!("id: {} ({})", stored.item.id.short(), stored.item.id);
     println!("state: {}", stored.item.state);
     println!("priority: {}", stored.item.priority);
+    if let Some(project) = stored.item.project_id {
+        // ponytail: scans every namespace; add a by-id lookup if show gets slow.
+        if let Some(entry) = ledger
+            .namespaces()
+            .await?
+            .into_iter()
+            .find(|entry| entry.id == project)
+        {
+            println!("project: {}", entry.path);
+        }
+    }
     if let Some(due) = stored.item.due_on {
         println!("due: {due}");
     }

@@ -14,13 +14,17 @@ configuration maps absolute directory roots to project IDs. Resolution uses:
 ```text
 explicit --project
   -> longest matching configured directory root
+  -> project whose `repo` field matches `git remote get-url origin`
   -> configured default project
   -> global space
 ```
 
-The mapping stays in global configuration rather than placing control files in
-every repository. A later project-local pointer format can be added if
-dogfooding shows the global mapping is awkward.
+Directory roots are per machine and stay in `config.toml`. The `repo` field is
+a namespace field (protocol v14), so it syncs with the ledger and every clone of
+the repository, on any machine, infers the same project. `todo project repo
+<name> [url]` records it, defaulting to the current checkout's `origin`. Remotes
+are compared as `host/owner/name`, so SSH and HTTPS forms match. Two projects
+naming the same repository is an error that asks for `--project`.
 
 ## Durable records and local views
 

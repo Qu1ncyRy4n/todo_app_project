@@ -106,7 +106,8 @@ impl AppConfig {
     }
 
     /// Resolve by longest matching directory root so nested projects override
-    /// broader workspace mappings. Source: docs/architecture.md.
+    /// broader workspace mappings. Source: docs/architecture.md. The caller
+    /// tries the Git remote and then `default_project` when this is `None`.
     pub fn project_for(&self, cwd: &Path) -> Result<Option<&str>> {
         let canonical = cwd
             .canonicalize()
@@ -116,8 +117,7 @@ impl AppConfig {
             .iter()
             .filter(|(root, _)| canonical.starts_with(root))
             .max_by_key(|(root, _)| root.components().count())
-            .map(|(_, project)| project.as_str())
-            .or(self.default_project.as_deref()))
+            .map(|(_, project)| project.as_str()))
     }
 }
 

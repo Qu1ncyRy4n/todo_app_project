@@ -21,6 +21,30 @@ use uuid::Uuid;
 /// The one namespace relation protocol v14 defines: an actor belongs to another.
 pub const MEMBER_OF: &str = "member-of";
 
+/// Reduces a Git remote to `host/owner/name` so that
+/// `git@github.com:o/n.git` and `https://github.com/o/n` compare equal.
+///
+/// ponytail: ignores ports and lowercases the whole path, which suits GitHub-style
+/// hosts; keep the raw value if a case-sensitive host ever matters.
+pub fn repo_key(remote: &str) -> String {
+    let mut rest = remote.trim();
+    let scheme = rest.split_once("://");
+    if let Some((_, after)) = scheme {
+        rest = after;
+    }
+    if let Some((_, after)) = rest.split_once('@') {
+        rest = after;
+    }
+    let rest = rest.trim_end_matches('/');
+    let rest = rest.strip_suffix(".git").unwrap_or(rest);
+    let rest = if scheme.is_none() {
+        rest.replacen(':', "/", 1)
+    } else {
+        rest.to_owned()
+    };
+    rest.to_lowercase()
+}
+
 const OPEN_RETRY_ATTEMPTS: usize = 50;
 const OPEN_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(20);
 
@@ -2237,6 +2261,26 @@ impl Ledger {
         Ok(result)
     }
 
+    /// Returns the projects whose `repo` field names the same repository as
+    /// `remote`, compared by [`repo_key`] so SSH and HTTPS forms agree.
+    pub async fn projects_for_repo(&self, remote: &str) -> Result<Vec<NamespacePath>> {
+        let wanted = repo_key(remote);
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT n.canonical_path, f.value FROM namespace_fields f JOIN namespaces n ON n.id = f.namespace_id WHERE f.key = 'repo' AND n.kind = 'project' ORDER BY n.canonical_path",
+                (),
+            )
+            .await?;
+        let mut result = Vec::new();
+        while let Some(row) = rows.next().await? {
+            if repo_key(&text(&row, 1)?) == wanted {
+                result.push(text(&row, 0)?.parse()?);
+            }
+        }
+        Ok(result)
+    }
+
     /// Links one namespace to another, such as a person `member-of` an org.
     pub async fn link_namespace(
         &self,
@@ -3029,7 +3073,7 @@ fn optional_integer(row: &turso::Row, index: usize) -> Result<Option<i64>> {
     reason = "test fixtures use direct setup and assertion values"
 )]
 mod tests {
-    use super::{BatchItem, ItemPatch, ItemScope, Ledger, MEMBER_OF};
+    use super::{BatchItem, ItemPatch, ItemScope, Ledger, MEMBER_OF, repo_key};
     use chrono::{DateTime, NaiveDate};
     use tempfile::tempdir;
     use todo_core::RelationKind;
@@ -3773,5 +3817,47 @@ mod tests {
             .await
             .unwrap();
         assert!(ledger.get_item(&one).await.unwrap().relations.is_empty());
+    }
+
+    #[test]
+    fn repo_key_equates_ssh_and_https_remotes() {
+        let key = "github.com/qu1ncyry4n/todo_app_project";
+        for remote in [
+            "git@github.com:Qu1ncyRy4n/todo_app_project.git",
+            "https://github.com/Qu1ncyRy4n/todo_app_project",
+            "ssh://git@github.com/Qu1ncyRy4n/todo_app_project.git",
+            "github.com/Qu1ncyRy4n/todo_app_project/",
+        ] {
+            assert_eq!(repo_key(remote), key, "{remote}");
+        }
+    }
+
+    #[tokio::test]
+    async fn projects_are_found_by_repo_field() {
+        let ledger = ledger().await;
+        let todo: NamespacePath = "project/todo".parse().unwrap();
+        let tag: NamespacePath = "tag/todo".parse().unwrap();
+        ledger
+            .set_field(&todo, "repo", Some("github.com/o/todo"))
+            .await
+            .unwrap();
+        ledger
+            .set_field(&tag, "repo", Some("github.com/o/todo"))
+            .await
+            .unwrap();
+        assert_eq!(
+            ledger
+                .projects_for_repo("git@github.com:o/todo.git")
+                .await
+                .unwrap(),
+            vec![todo]
+        );
+        assert!(
+            ledger
+                .projects_for_repo("github.com/o/other")
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }
