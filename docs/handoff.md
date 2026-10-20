@@ -19,8 +19,8 @@ agent signatures".
   created (found in this project's agent transcripts) carry
   `by:agent-assistant`, an actor with `kind = "agent"`; the other 122 carry
   `by:quincy`. An author whose kind is agent counts as an agent item for
-  `--agent`, which is how pre-v15 items are filtered. Items created by agents
-  in other projects' sessions were not searched.
+  `--agent`, which is how pre-v15 items are filtered. The developer confirmed
+  no other agent has added items, so the labels are complete.
 - **Before syncing v15 events,** every machine needs `./dev install`. The real
   ledger now holds v15 events.
 - **Manifest:** `members = [...]` on orgs as well as `member-of` on members
