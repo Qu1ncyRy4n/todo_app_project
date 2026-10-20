@@ -45,7 +45,8 @@ case "$command" in
     ;;
   install)
     # A second `nix profile install` adds a duplicate entry, so upgrade in place.
-    if nix profile list | grep -Eq '^Name:[[:space:]]+todo$'; then
+    # grep -q would exit early and make nix report a broken pipe.
+    if nix profile list | grep -E '^Name:[[:space:]]+todo$' >/dev/null; then
       nix profile upgrade todo
     else
       nix profile install .#todo
