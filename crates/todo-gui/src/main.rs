@@ -6868,6 +6868,7 @@ mod tests {
             dependencies: Vec::new(),
             blocked_by: Vec::new(),
             relations: Vec::new(),
+            agent: None,
         }
     }
 

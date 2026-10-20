@@ -65,9 +65,37 @@ pub struct AppConfig {
     /// Accept `#tag`, `@actor`, and `+project` in typed entry. Default on.
     #[serde(default)]
     pub entry_ascii: Option<bool>,
+    /// Environment variables whose presence means an agent is running `todo`.
+    /// Default: [`DEFAULT_AGENT_ENV`].
+    #[serde(default)]
+    pub agent_env: Option<Vec<String>>,
+    /// Whether listings `show`, `hide`, or `only` show agent-created items.
+    /// Default `show`.
+    #[serde(default)]
+    pub agent_items: Option<String>,
 }
 
+/// Variables agent harnesses set in the shells they run.
+// ponytail: a fixed guess at today's harnesses; `agent_env` overrides it and
+// `TODO_AGENT` always wins.
+pub const DEFAULT_AGENT_ENV: [&str; 3] = ["CLAUDECODE", "GEMINI_CLI", "CODEX_SANDBOX"];
+
 impl AppConfig {
+    /// The agent this process writes as, read through `var`.
+    ///
+    /// `TODO_AGENT=<name>` names it and `TODO_AGENT=` (empty) means the
+    /// operator; otherwise any `agent_env` variable signs as `agent`.
+    pub fn agent(&self, var: impl Fn(&str) -> Option<String>) -> Option<String> {
+        if let Some(name) = var("TODO_AGENT") {
+            return (!name.is_empty()).then_some(name);
+        }
+        let detected = match &self.agent_env {
+            Some(names) => names.iter().any(|name| var(name).is_some()),
+            None => DEFAULT_AGENT_ENV.iter().any(|name| var(name).is_some()),
+        };
+        detected.then(|| "agent".to_owned())
+    }
+
     pub fn ensure_actor_id(&mut self) -> &str {
         self.actor_id
             .get_or_insert_with(|| Uuid::now_v7().to_string())
@@ -140,5 +168,40 @@ mod tests {
         config.attach_project(root.path(), "project/root").unwrap();
         config.attach_project(&nested, "project/nested").unwrap();
         assert_eq!(config.project_for(&nested).unwrap(), Some("project/nested"));
+    }
+
+    #[test]
+    fn todo_agent_wins_and_agent_env_detects() {
+        let config = AppConfig::default();
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                pairs
+                    .iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| (*value).to_owned())
+            }
+        };
+        assert_eq!(config.agent(env(&[])), None);
+        assert_eq!(
+            config.agent(env(&[("CLAUDECODE", "1")])).as_deref(),
+            Some("agent")
+        );
+        assert_eq!(
+            config.agent(env(&[("CLAUDECODE", "1"), ("TODO_AGENT", "")])),
+            None
+        );
+        assert_eq!(
+            config.agent(env(&[("TODO_AGENT", "bot")])).as_deref(),
+            Some("bot")
+        );
+        let custom = AppConfig {
+            agent_env: Some(vec!["MY_AGENT".to_owned()]),
+            ..AppConfig::default()
+        };
+        assert_eq!(custom.agent(env(&[("CLAUDECODE", "1")])), None);
+        assert_eq!(
+            custom.agent(env(&[("MY_AGENT", "x")])).as_deref(),
+            Some("agent")
+        );
     }
 }

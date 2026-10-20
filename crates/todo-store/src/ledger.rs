@@ -9,11 +9,11 @@ use std::{
     str::FromStr,
 };
 use todo_core::{
-    Event, EventBuilder, EventKind, GRID_CBOR_CODEC, GridEnvelope, Item, ItemId, ItemState,
-    NamespaceId, NamespaceKind, NamespacePath, Priority, RelationKind, decode_envelope,
+    AGENT_FIELD, Event, EventBuilder, EventKind, GRID_CBOR_CODEC, GridEnvelope, Item, ItemId,
+    ItemState, NamespaceId, NamespaceKind, NamespacePath, Priority, RelationKind, decode_envelope,
     event_protocol_v5_cid, event_protocol_v6_cid, event_protocol_v7_cid, event_protocol_v8_cid,
     event_protocol_v9_cid, event_protocol_v10_cid, event_protocol_v11_cid, event_protocol_v12_cid,
-    event_protocol_v13_cid, event_protocol_v14_cid, validate_segment,
+    event_protocol_v13_cid, event_protocol_v14_cid, event_protocol_v15_cid, validate_segment,
 };
 use turso::{Builder, Connection, Value};
 use uuid::Uuid;
@@ -173,6 +173,8 @@ pub struct StoredItem {
     pub blocked_by: Vec<ItemId>,
     /// Typed relations that may cross projects and never affect readiness.
     pub relations: Vec<ItemRelation>,
+    /// The agent that created the item, if one did. Source: protocol v15.
+    pub agent: Option<String>,
 }
 
 /// One typed relation from an item to another item.
@@ -241,6 +243,8 @@ pub struct HistoryEntry {
     pub cid: String,
     pub kind: String,
     pub recorded_at: String,
+    /// The agent that wrote the event, if one did.
+    pub agent: Option<String>,
 }
 
 /// An immutable event as it was accepted by this ledger. The stored CID is
@@ -274,6 +278,7 @@ pub struct NextItem {
 pub struct Ledger {
     connection: Connection,
     actor_id: String,
+    agent: Option<String>,
 }
 
 impl Ledger {
@@ -307,9 +312,16 @@ impl Ledger {
         let ledger = Self {
             connection,
             actor_id: actor_id.into(),
+            agent: None,
         };
         ledger.migrate().await?;
         Ok(ledger)
+    }
+
+    /// Signs every event this ledger writes as the named agent.
+    pub fn with_agent(mut self, agent: Option<String>) -> Self {
+        self.agent = agent;
+        self
     }
 
     async fn migrate(&self) -> Result<()> {
@@ -337,6 +349,8 @@ impl Ledger {
         self.add_column_if_missing("difficulty", "difficulty INTEGER")
             .await?;
         self.add_column_if_missing("estimate_minutes", "estimate_minutes INTEGER")
+            .await?;
+        self.add_column_if_missing("created_by_agent", "created_by_agent TEXT")
             .await?;
         self.connection
             .execute(
@@ -494,31 +508,34 @@ impl Ledger {
         let project_id = project.as_ref().map(|entry| entry.id);
         let mut previous = self.head().await?;
         let mut events = Vec::new();
-        let created = EventBuilder::for_item(EventKind::ItemCreated, id)
-            .project(project_id)
-            .parent(previous)
-            .data("title", title)
-            .data("state", ItemState::Inbox.to_string())
-            .build()?;
+        let created = self.sign(
+            EventBuilder::for_item(EventKind::ItemCreated, id)
+                .project(project_id)
+                .parent(previous)
+                .data("title", title)
+                .data("state", ItemState::Inbox.to_string()),
+        )?;
         previous = Some(created.cid);
         let mut head = created.cid;
         events.push(created);
         for namespace in &namespace_entries {
-            let event = EventBuilder::for_item(EventKind::NamespaceAssigned, id)
-                .project(project_id)
-                .parent(previous)
-                .link("namespace", namespace.id.to_string())
-                .build()?;
+            let event = self.sign(
+                EventBuilder::for_item(EventKind::NamespaceAssigned, id)
+                    .project(project_id)
+                    .parent(previous)
+                    .link("namespace", namespace.id.to_string()),
+            )?;
             previous = Some(event.cid);
             head = event.cid;
             events.push(event);
         }
         if let Some(parent) = &parent {
-            let event = EventBuilder::for_item(EventKind::ItemParentSet, id)
-                .project(project_id)
-                .parent(previous)
-                .link("parent", parent.item.id.to_string())
-                .build()?;
+            let event = self.sign(
+                EventBuilder::for_item(EventKind::ItemParentSet, id)
+                    .project(project_id)
+                    .parent(previous)
+                    .link("parent", parent.item.id.to_string()),
+            )?;
             head = event.cid;
             events.push(event);
         }
@@ -530,13 +547,14 @@ impl Ledger {
             }
             self.connection
                 .execute(
-                    "INSERT INTO items(id, title, state, project_id, parent_id) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    "INSERT INTO items(id, title, state, project_id, parent_id, created_by_agent) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                     vec![
                         Value::Text(id.to_string()),
                         Value::Text(title.to_owned()),
                         Value::Text(ItemState::Inbox.to_string()),
                         project.as_ref().map_or(Value::Null, |entry| Value::Text(entry.id.to_string())),
                         parent.as_ref().map_or(Value::Null, |stored| Value::Text(stored.item.id.to_string())),
+                        self.agent.clone().map_or(Value::Null, Value::Text),
                     ],
                 )
                 .await?;
@@ -567,6 +585,7 @@ impl Ledger {
                 estimate_minutes: None,
             },
             relations: Vec::new(),
+            agent: self.agent.clone(),
             namespaces: namespace_entries
                 .into_iter()
                 .map(|entry| entry.path)
@@ -610,34 +629,37 @@ impl Ledger {
                 .get(index)
                 .ok_or_else(|| anyhow!("import item ID is missing"))?;
             let mut events = Vec::new();
-            let created = EventBuilder::for_item(EventKind::ItemCreated, id)
-                .project(project_id)
-                .parent(previous)
-                .data("title", item.title.trim())
-                .data("state", item.state.to_string())
-                .data("imported", "true")
-                .build()?;
+            let created = self.sign(
+                EventBuilder::for_item(EventKind::ItemCreated, id)
+                    .project(project_id)
+                    .parent(previous)
+                    .data("title", item.title.trim())
+                    .data("state", item.state.to_string())
+                    .data("imported", "true"),
+            )?;
             previous = Some(created.cid);
             events.push(created);
             if let Some(parent_index) = item.parent_index {
                 let parent_id = ids
                     .get(parent_index)
                     .ok_or_else(|| anyhow!("import item parent ID is missing"))?;
-                let parent = EventBuilder::for_item(EventKind::ItemParentSet, id)
-                    .project(project_id)
-                    .parent(previous)
-                    .link("parent", parent_id.to_string())
-                    .build()?;
+                let parent = self.sign(
+                    EventBuilder::for_item(EventKind::ItemParentSet, id)
+                        .project(project_id)
+                        .parent(previous)
+                        .link("parent", parent_id.to_string()),
+                )?;
                 previous = Some(parent.cid);
                 events.push(parent);
             }
             if let Some(source) = source_citation {
-                let citation = EventBuilder::for_item(EventKind::ItemCitationAdded, id)
-                    .project(project_id)
-                    .parent(previous)
-                    .data("target", source)
-                    .data("label", "import source")
-                    .build()?;
+                let citation = self.sign(
+                    EventBuilder::for_item(EventKind::ItemCitationAdded, id)
+                        .project(project_id)
+                        .parent(previous)
+                        .data("target", source)
+                        .data("label", "import source"),
+                )?;
                 previous = Some(citation.cid);
                 events.push(citation);
             }
@@ -662,13 +684,14 @@ impl Ledger {
                     .unwrap_or(Value::Null);
                 self.connection
                     .execute(
-                        "INSERT INTO items(id, title, state, project_id, parent_id) VALUES (?1, ?2, ?3, ?4, ?5)",
+                        "INSERT INTO items(id, title, state, project_id, parent_id, created_by_agent) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                         vec![
                             Value::Text(id.to_string()),
                             Value::Text(item.title.trim().to_owned()),
                             Value::Text(item.state.to_string()),
                             project_id.map_or(Value::Null, |id| Value::Text(id.to_string())),
                             parent,
+                            self.agent.clone().map_or(Value::Null, Value::Text),
                         ],
                     )
                     .await?;
@@ -919,12 +942,14 @@ impl Ledger {
             let dependencies = self.item_dependencies(item.id).await?;
             let blocked_by = self.item_active_blockers(item.id).await?;
             let relations = self.item_relations(item.id).await?;
+            let agent = self.item_agent(item.id).await?;
             items.push(StoredItem {
                 item,
                 namespaces,
                 dependencies,
                 blocked_by,
                 relations,
+                agent,
             });
         }
         Ok(items)
@@ -1631,12 +1656,14 @@ impl Ledger {
             let dependencies = self.item_dependencies(item.id).await?;
             let blocked_by = self.item_active_blockers(item.id).await?;
             let relations = self.item_relations(item.id).await?;
+            let agent = self.item_agent(item.id).await?;
             items.push(StoredItem {
                 item,
                 namespaces,
                 dependencies,
                 blocked_by,
                 relations,
+                agent,
             });
         }
         Ok(items)
@@ -1662,12 +1689,15 @@ impl Ledger {
         Ok(ready)
     }
 
+    /// The highest-ranked ready item among those `keep` accepts.
     pub async fn next_item(
         &self,
         scope: ItemScope<'_>,
         today: NaiveDate,
+        keep: impl Fn(&StoredItem) -> bool,
     ) -> Result<Option<NextItem>> {
         let mut ready = self.list_ready(scope, today).await?;
+        ready.retain(|item| keep(item));
         ready.sort_by(compare_focus);
         let Some(item) = ready.into_iter().next() else {
             return Ok(None);
@@ -1712,12 +1742,14 @@ impl Ledger {
         let dependencies = self.item_dependencies(item.id).await?;
         let blocked_by = self.item_active_blockers(item.id).await?;
         let relations = self.item_relations(item.id).await?;
+        let agent = self.item_agent(item.id).await?;
         Ok(StoredItem {
             item,
             namespaces,
             dependencies,
             blocked_by,
             relations,
+            agent,
         })
     }
 
@@ -1918,18 +1950,40 @@ impl Ledger {
 
     pub async fn history(&self, item: ItemId) -> Result<Vec<HistoryEntry>> {
         let mut rows = self.connection.query(
-            "SELECT cid, kind, recorded_at FROM events WHERE subject_id = ?1 ORDER BY recorded_at, event_id",
+            "SELECT cid, kind, recorded_at, envelope FROM events WHERE subject_id = ?1 ORDER BY recorded_at, event_id",
             values([item.to_string()]),
         ).await?;
         let mut result = Vec::new();
         while let Some(row) = rows.next().await? {
+            // Only v5+ envelopes decode here; older ones never carry an agent.
+            let agent = match row.get_value(3)? {
+                Value::Blob(bytes) => decode_envelope(&bytes)
+                    .ok()
+                    .and_then(|event| event.payload.data.get(AGENT_FIELD).cloned()),
+                _ => None,
+            };
             result.push(HistoryEntry {
                 cid: text(&row, 0)?,
                 kind: text(&row, 1)?,
                 recorded_at: text(&row, 2)?,
+                agent,
             });
         }
         Ok(result)
+    }
+
+    async fn item_agent(&self, item: ItemId) -> Result<Option<String>> {
+        let mut rows = self
+            .connection
+            .query(
+                "SELECT created_by_agent FROM items WHERE id = ?1",
+                values([item.to_string()]),
+            )
+            .await?;
+        match rows.next().await? {
+            Some(row) => optional_text(&row, 0),
+            None => Ok(None),
+        }
     }
 
     pub async fn event_records(&self) -> Result<Vec<EventRecord>> {
@@ -1982,6 +2036,7 @@ impl Ledger {
                 && envelope.protocol_cid() != &event_protocol_v12_cid()
                 && envelope.protocol_cid() != &event_protocol_v13_cid()
                 && envelope.protocol_cid() != &event_protocol_v14_cid()
+                && envelope.protocol_cid() != &event_protocol_v15_cid()
             {
                 bail!("event {} uses an unknown protocol", record.cid);
             }
@@ -2640,11 +2695,16 @@ impl Ledger {
 
     async fn event(&self, builder: EventBuilder) -> Result<Event> {
         let parent = self.head().await?;
-        builder
-            .parent(parent)
-            .actor(&self.actor_id)
-            .build()
-            .context("build event")
+        self.sign(builder.parent(parent))
+    }
+
+    /// Stamps this ledger's actor and any agent, then builds the event.
+    fn sign(&self, builder: EventBuilder) -> Result<Event> {
+        let builder = match &self.agent {
+            Some(agent) => builder.data(AGENT_FIELD, agent),
+            None => builder,
+        };
+        builder.actor(&self.actor_id).build().context("build event")
     }
 
     async fn head(&self) -> Result<Option<Cid>> {
@@ -2781,12 +2841,13 @@ impl Ledger {
                 let id = ItemId::parse(&event.payload.subject_id)?;
                 let state: ItemState = value("state")?.parse()?;
                 self.connection.execute(
-                    "INSERT INTO items(id, title, state, project_id, parent_id) VALUES (?1, ?2, ?3, ?4, NULL)",
+                    "INSERT INTO items(id, title, state, project_id, parent_id, created_by_agent) VALUES (?1, ?2, ?3, ?4, NULL, ?5)",
                     vec![
                         Value::Text(id.to_string()),
                         Value::Text(value("title")?.to_owned()),
                         Value::Text(state.to_string()),
                         event.payload.project_id.map_or(Value::Null, |id| Value::Text(id.to_string())),
+                        event.payload.data.get(AGENT_FIELD).map_or(Value::Null, |agent| Value::Text(agent.clone())),
                     ],
                 ).await?
             }
@@ -3561,7 +3622,7 @@ mod tests {
             .unwrap();
 
         let next = ledger
-            .next_item(ItemScope::Unscoped, today)
+            .next_item(ItemScope::Unscoped, today, |_| true)
             .await
             .unwrap()
             .unwrap();
@@ -3572,7 +3633,7 @@ mod tests {
             .await
             .unwrap();
         let next = ledger
-            .next_item(ItemScope::Unscoped, today)
+            .next_item(ItemScope::Unscoped, today, |_| true)
             .await
             .unwrap()
             .unwrap();

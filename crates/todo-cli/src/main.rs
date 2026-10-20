@@ -11,7 +11,10 @@ use std::{
     process::Command as ProcessCommand,
 };
 use todo_core::entry::{Directive, DirectiveKind, EntrySyntax, parse_entry};
-use todo_core::{ItemId, ItemState, LogLine, NamespaceKind, NamespacePath, Priority, RelationKind};
+use todo_core::{
+    ItemId, ItemState, LogLine, NamespaceKind, NamespacePath, Priority, RelationKind,
+    validate_segment,
+};
 use todo_store::{
     AppConfig, AppPaths, BatchItem, EventRecord, ItemScope, Ledger, MEMBER_OF, StoredItem,
 };
@@ -174,6 +177,8 @@ enum Command {
     },
     /// List actors, or show one with its fields, memberships, and items by role.
     Actor { name: Option<String> },
+    /// Show how this shell signs events: its device ID and any agent name.
+    Whoami,
     /// Edit actor and project records in bulk as a TOML file.
     Manifest {
         #[command(subcommand)]
@@ -240,6 +245,35 @@ struct ListArgs {
     /// Ignore project inference and list across the global ledger.
     #[arg(long, conflicts_with = "project")]
     global: bool,
+    /// Show, hide, or show only agent-created items. Default: `agent_items`.
+    #[arg(long, value_name = "MODE")]
+    agent: Option<AgentFilter>,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum AgentFilter {
+    Show,
+    Hide,
+    Only,
+}
+
+impl AgentFilter {
+    fn resolve(flag: Option<Self>, config: &AppConfig) -> Result<Self> {
+        match (flag, config.agent_items.as_deref()) {
+            (Some(filter), _) => Ok(filter),
+            (None, None) => Ok(Self::Show),
+            (None, Some(value)) => Self::from_str(value, true)
+                .map_err(|_| anyhow!("agent_items = {value:?}; expected show, hide, or only")),
+        }
+    }
+
+    fn keeps(self, stored: &StoredItem) -> bool {
+        match self {
+            Self::Show => true,
+            Self::Hide => stored.agent.is_none(),
+            Self::Only => stored.agent.is_some(),
+        }
+    }
 }
 
 #[derive(Args)]
@@ -257,6 +291,9 @@ struct FocusArgs {
     /// Ignore project inference and consider the whole ledger.
     #[arg(long, conflicts_with = "project")]
     global: bool,
+    /// Show, hide, or show only agent-created items. Default: `agent_items`.
+    #[arg(long, value_name = "MODE")]
+    agent: Option<AgentFilter>,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -433,7 +470,13 @@ async fn run() -> Result<()> {
             actor_id
         }
     };
-    let ledger = Ledger::open_with_actor(&paths.database(), actor_id).await?;
+    let agent = config.agent(|name| env::var(name).ok());
+    if let Some(agent) = &agent {
+        validate_segment(agent).with_context(|| format!("TODO_AGENT={agent}"))?;
+    }
+    let ledger = Ledger::open_with_actor(&paths.database(), actor_id.clone())
+        .await?
+        .with_agent(agent.clone());
     let cwd = env::current_dir().context("determine current directory")?;
 
     match cli.command {
@@ -509,6 +552,16 @@ async fn run() -> Result<()> {
         Command::Actor { name: Some(name) } => {
             show_actor(&ledger, &actor_path(&config, &name)?).await?
         }
+        Command::Whoami => {
+            println!("device: {actor_id}");
+            match &agent {
+                Some(agent) => println!("agent: {agent}"),
+                None => println!("agent: none; events are the operator's"),
+            }
+            if let Some(me) = &config.me {
+                println!("me: actor/{me}");
+            }
+        }
         Command::Manifest { command } => match command {
             ManifestCommand::Export { file } => manifest::export(&ledger, file.as_deref()).await?,
             ManifestCommand::Apply { file, dry_run } => {
@@ -555,7 +608,9 @@ async fn run() -> Result<()> {
                 (false, Some(project)) => ItemScope::Project(project),
                 (false, None) => ItemScope::Unscoped,
             };
-            let items = ledger.list_items(scope, args.all).await?;
+            let filter = AgentFilter::resolve(args.agent, &config)?;
+            let mut items = ledger.list_items(scope, args.all).await?;
+            items.retain(|item| filter.keeps(item));
             if items.is_empty() {
                 println!("No items.");
             } else if args.tree {
@@ -779,7 +834,9 @@ async fn run() -> Result<()> {
                 resolve_project(cli.project.as_deref(), &config, &ledger, &cwd).await?
             };
             let scope = selected_scope(args.global, project.as_ref());
-            let items = ledger.list_ready(scope, Local::now().date_naive()).await?;
+            let filter = AgentFilter::resolve(args.agent, &config)?;
+            let mut items = ledger.list_ready(scope, Local::now().date_naive()).await?;
+            items.retain(|item| filter.keeps(item));
             if items.is_empty() {
                 println!("No ready items.");
             } else {
@@ -795,7 +852,11 @@ async fn run() -> Result<()> {
                 resolve_project(cli.project.as_deref(), &config, &ledger, &cwd).await?
             };
             let scope = selected_scope(focus.global, project.as_ref());
-            match ledger.next_item(scope, Local::now().date_naive()).await? {
+            let filter = AgentFilter::resolve(focus.agent, &config)?;
+            match ledger
+                .next_item(scope, Local::now().date_naive(), |item| filter.keeps(item))
+                .await?
+            {
                 Some(next) => {
                     print_item(&next.item, 0);
                     if explain {
@@ -1614,6 +1675,11 @@ fn print_item(stored: &StoredItem, depth: usize) {
     if !stored.blocked_by.is_empty() {
         focus.push(format!("blocked:{}", stored.blocked_by.len()));
     }
+    match stored.agent.as_deref() {
+        Some("agent") => focus.push("[agent]".to_owned()),
+        Some(agent) => focus.push(format!("[agent:{agent}]")),
+        None => {}
+    }
     let focus = if focus.is_empty() {
         String::new()
     } else {
@@ -1839,6 +1905,9 @@ async fn show(ledger: &Ledger, reference: &str, include_history: bool) -> Result
     println!("id: {} ({})", stored.item.id.short(), stored.item.id);
     println!("state: {}", stored.item.state);
     println!("priority: {}", stored.item.priority);
+    if let Some(agent) = &stored.agent {
+        println!("created by agent: {agent}");
+    }
     if let Some(project) = stored.item.project_id {
         // ponytail: scans every namespace; add a by-id lookup if show gets slow.
         if let Some(entry) = ledger
@@ -1918,7 +1987,14 @@ async fn show(ledger: &Ledger, reference: &str, include_history: bool) -> Result
     if include_history {
         println!("history:");
         for event in ledger.history(stored.item.id).await? {
-            println!("  {} {} {}", event.recorded_at, event.kind, event.cid);
+            let agent = event
+                .agent
+                .map(|agent| format!(" agent:{agent}"))
+                .unwrap_or_default();
+            println!(
+                "  {} {} {}{agent}",
+                event.recorded_at, event.kind, event.cid
+            );
         }
     }
     Ok(())

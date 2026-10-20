@@ -32,6 +32,12 @@ const PROTOCOL_V13_BYTES: &[u8] =
     include_bytes!("../../../docs/protocols/todo-ledger-event-v13.md");
 const PROTOCOL_V14_BYTES: &[u8] =
     include_bytes!("../../../docs/protocols/todo-ledger-event-v14.md");
+const PROTOCOL_V15_BYTES: &[u8] =
+    include_bytes!("../../../docs/protocols/todo-ledger-event-v15.md");
+
+/// Data key naming the agent that wrote an event; absent for the operator.
+/// Source: protocol v15.
+pub const AGENT_FIELD: &str = "agent";
 
 pub fn event_protocol_v4_cid() -> Cid {
     raw_cid(PROTOCOL_V4_BYTES)
@@ -68,6 +74,9 @@ pub fn event_protocol_v13_cid() -> Cid {
 }
 pub fn event_protocol_v14_cid() -> Cid {
     raw_cid(PROTOCOL_V14_BYTES)
+}
+pub fn event_protocol_v15_cid() -> Cid {
+    raw_cid(PROTOCOL_V15_BYTES)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -283,9 +292,9 @@ impl EventBuilder {
     }
 
     pub fn build(self) -> Result<Event, EventEncodeError> {
-        // All new writes use the v14 Grid-CBOR protocol. Historical rows are
+        // All new writes use the v15 Grid-CBOR protocol. Historical rows are
         // never rebuilt or relabeled. Source: DI-0008.
-        let protocol_cid = event_protocol_v14_cid();
+        let protocol_cid = event_protocol_v15_cid();
         let bytes = encode_envelope(&protocol_cid, self.parent.as_ref(), &self.payload)?;
         let cid = grid_cbor_cid(&bytes);
         Ok(Event {
@@ -511,7 +520,7 @@ fn encode_envelope(
 mod tests {
     use super::{
         EventBuilder, EventKind, PROTOCOL_V1_BYTES, PROTOCOL_V2_BYTES, PROTOCOL_V3_BYTES,
-        PROTOCOL_V4_BYTES, PROTOCOL_V5_BYTES, PROTOCOL_V14_BYTES,
+        PROTOCOL_V4_BYTES, PROTOCOL_V5_BYTES, PROTOCOL_V15_BYTES,
     };
     use crate::{GRID_CBOR_CODEC, GRID_TAG, GridEnvelope, ItemId, raw_cid};
     use chrono::DateTime;
@@ -545,7 +554,7 @@ mod tests {
 
         let parsed = GridEnvelope::parse(&first.bytes).unwrap();
         assert_eq!(parsed.slot_count(), 3);
-        assert_eq!(parsed.protocol_cid(), &raw_cid(PROTOCOL_V14_BYTES));
+        assert_eq!(parsed.protocol_cid(), &raw_cid(PROTOCOL_V15_BYTES));
         assert_eq!(parsed.cid(), first.cid);
     }
 

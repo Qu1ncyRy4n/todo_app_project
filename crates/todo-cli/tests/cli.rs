@@ -47,7 +47,26 @@ impl Harness {
             .current_dir(cwd)
             .env("TODO_CONFIG_HOME", &self.config)
             .env("TODO_DATA_HOME", &self.data);
+        // The suite may itself run under an agent; tests write as the operator
+        // unless they set these.
+        for name in ["TODO_AGENT", "CLAUDECODE", "GEMINI_CLI", "CODEX_SANDBOX"] {
+            command.env_remove(name);
+        }
         command
+    }
+
+    fn ok_with(&self, env: &[(&str, &str)], args: &[&str]) -> String {
+        let output = self
+            .command_in(&self.work, args)
+            .envs(env.iter().copied())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
     }
 
     fn ok(&self, args: &[&str]) -> String {
@@ -823,4 +842,54 @@ fn manifest_round_trips_and_refuses_a_stale_file() {
     let stale = harness.run(&["manifest", "apply", path]);
     assert!(!stale.status.success());
     assert!(String::from_utf8_lossy(&stale.stderr).contains("changed since"));
+}
+
+#[test]
+fn agents_sign_their_events_and_their_items_can_be_filtered() {
+    let harness = Harness::new();
+    harness.ok(&["init"]);
+    let mine = harness.ok(&["add", "Operator task"]);
+    let mine = id_from_add(&mine).to_owned();
+    let bot = harness.ok_with(&[("TODO_AGENT", "review-bot")], &["add", "Bot task"]);
+    let bot = id_from_add(&bot).to_owned();
+    harness.ok_with(&[("CLAUDECODE", "1")], &["add", "Detected task"]);
+    // An empty TODO_AGENT is the operator, even inside an agent harness.
+    harness.ok_with(
+        &[("CLAUDECODE", "1"), ("TODO_AGENT", "")],
+        &["add", "Typed"],
+    );
+
+    let all = harness.ok(&["ls"]);
+    assert!(all.contains("Bot task  [agent:review-bot]"), "{all}");
+    assert!(all.contains("Detected task  [agent]"), "{all}");
+    assert!(all.contains("Typed\n"), "{all}");
+    let hidden = harness.ok(&["ls", "--agent", "hide"]);
+    assert!(hidden.contains("Operator task") && hidden.contains("Typed"));
+    assert!(!hidden.contains("Bot task") && !hidden.contains("Detected task"));
+    let only = harness.ok(&["ready", "--agent", "only"]);
+    assert!(only.contains("Bot task") && !only.contains("Operator task"));
+
+    // Agent notes on the operator's item are signed but do not hide it.
+    harness.ok_with(&[("TODO_AGENT", "review-bot")], &["note", &mine, "looked"]);
+    let history = harness.ok(&["show", &mine, "--history"]);
+    assert!(history.contains("item.note-added") && history.contains("agent:review-bot"));
+    assert!(!history.contains("created by agent"));
+    assert!(
+        harness
+            .ok(&["show", &bot])
+            .contains("created by agent: review-bot")
+    );
+
+    std::fs::write(
+        harness.config.join("config.toml"),
+        format!(
+            "agent_items = \"hide\"\n{}",
+            std::fs::read_to_string(harness.config.join("config.toml")).unwrap()
+        ),
+    )
+    .unwrap();
+    assert!(!harness.ok(&["ls"]).contains("Bot task"));
+    let whoami = harness.ok_with(&[("TODO_AGENT", "review-bot")], &["whoami"]);
+    assert!(whoami.contains("agent: review-bot"), "{whoami}");
+    assert!(harness.ok(&["whoami"]).contains("agent: none"));
 }
