@@ -298,6 +298,38 @@ enum FilterChip {
 enum Edit {
     Title,
     Person,
+    Due,
+    Defer,
+    Scheduled,
+    Estimate,
+    Difficulty,
+}
+
+impl Edit {
+    /// The time fields, in the order the Time band lists them.
+    const TIME: [Self; 5] = [
+        Self::Due,
+        Self::Defer,
+        Self::Scheduled,
+        Self::Estimate,
+        Self::Difficulty,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Title => "title",
+            Self::Person => "person",
+            Self::Due => "due",
+            Self::Defer => "defer",
+            Self::Scheduled => "scheduled",
+            Self::Estimate => "estimate",
+            Self::Difficulty => "difficulty",
+        }
+    }
+
+    fn is_date(self) -> bool {
+        matches!(self, Self::Due | Self::Defer | Self::Scheduled)
+    }
 }
 
 /// Roles offered in the inspector; any other role name can still be typed.
@@ -1457,9 +1489,7 @@ impl TodoGui {
                 egui::CollapsingHeader::new("Tags, notes & links")
                     .default_open(self.inspector.open_details)
                     .show(ui, |ui| self.section_details(ui, &item));
-                egui::CollapsingHeader::new("Schedule & effort")
-                    .default_open(self.inspector.open_schedule)
-                    .show(ui, |ui| self.section_schedule(ui, &item));
+                self.band_time(ui, &item);
                 ui.separator();
                 self.inspector_footer(ui, &item);
                 if let Some(message) = self.message.clone() {
@@ -1611,6 +1641,17 @@ impl TodoGui {
                 .default_open(self.inspector.open_advanced)
                 .show(ui, |ui| self.section_advanced(ui));
         }
+        // Weight is computed for display; nothing is stored for it.
+        let children = child_index(&self.items);
+        ui.weak(format!(
+            "weight {:.2}{}",
+            item_weight(item, &children, &self.theme),
+            if self.theme.weight.size_nodes_by_weight {
+                " · sizes the card"
+            } else {
+                ""
+            }
+        ));
         ui.horizontal(|ui| {
             ui.weak(format!("id {id}"));
             if ui
@@ -2096,92 +2137,140 @@ impl TodoGui {
         }
     }
 
-    /// Dates, sessions, effort, and the weight they feed.
-    fn section_schedule(&mut self, ui: &mut egui::Ui, item: &StoredItem) {
-        if self.inspector.show_dates {
-            ui.horizontal(|ui| {
-                ui.label("Due");
-                ui.text_edit_singleline(&mut self.due_draft);
-                if ui.small_button("Today").clicked() {
-                    self.due_draft = Local::now().date_naive().to_string();
+    /// Dates, effort, and work sessions. Only fields with a value get a row;
+    /// `+ ▾` offers the rest.
+    fn band_time(&mut self, ui: &mut egui::Ui, item: &StoredItem) {
+        let today = Local::now().date_naive();
+        let values = Edit::TIME.map(|edit| (edit, time_value(item, edit, today)));
+        let running = self
+            .sessions
+            .iter()
+            .any(|session| session.finished_at.is_none());
+        let summary = values
+            .iter()
+            .filter_map(|(edit, value)| Some(format!("{} {}", edit.label(), value.as_ref()?)))
+            .chain(running.then(|| "session running".to_owned()))
+            .collect::<Vec<_>>()
+            .join(" · ");
+        let empty = values.iter().all(|(_, value)| value.is_none()) && self.sessions.is_empty();
+        let unset = values
+            .iter()
+            .filter(|(_, value)| value.is_none())
+            .map(|(edit, _)| *edit)
+            .collect::<Vec<_>>();
+        let color = band_color(&self.theme.colors.inspector.time);
+        self.band(
+            ui,
+            "TIME",
+            color,
+            self.inspector.open_schedule,
+            summary,
+            empty,
+            |app, ui| {
+                if app.inspector.show_dates {
+                    for edit in unset {
+                        if ui.button(edit.label()).clicked() {
+                            app.time_draft(edit).clear();
+                            app.begin(edit);
+                        }
+                    }
                 }
-                calendar_picker(ui, "due", &mut self.due_draft);
-                if ui.button("Save due").clicked() {
-                    self.save_date(true);
+                if app.inspector.show_sessions {
+                    ui.separator();
+                    let label = if running {
+                        "stop session"
+                    } else {
+                        "start session"
+                    };
+                    if ui.button(label).clicked() {
+                        app.toggle_session();
+                    }
                 }
-            });
-            ui.horizontal(|ui| {
-                ui.label("Defer");
-                ui.text_edit_singleline(&mut self.defer_draft);
-                if ui.small_button("Today").clicked() {
-                    self.defer_draft = Local::now().date_naive().to_string();
+            },
+            |app, ui| {
+                if app.inspector.show_dates {
+                    for (edit, value) in values {
+                        if app.editing == Some(edit) {
+                            app.time_editor(ui, edit, item);
+                        } else if let Some(value) = value {
+                            let (clicked, remove) = inspector_row(ui, edit.label(), value, true);
+                            if clicked {
+                                app.begin(edit);
+                            }
+                            if remove {
+                                app.time_draft(edit).clear();
+                                app.commit_time(edit);
+                            }
+                        }
+                    }
                 }
-                calendar_picker(ui, "defer", &mut self.defer_draft);
-                if ui.button("Save defer").clicked() {
-                    self.save_date(false);
+                if app.inspector.show_sessions && !app.sessions.is_empty() {
+                    let count = app.sessions.len();
+                    let state = if running { " · running" } else { "" };
+                    inspector_row(ui, "sessions", format!("{count}{state}"), false);
                 }
-            });
-            ui.horizontal(|ui| {
-                ui.label("Scheduled");
-                ui.text_edit_singleline(&mut self.scheduled_draft);
-                if ui.small_button("Today").clicked() {
-                    self.scheduled_draft = Local::now().date_naive().to_string();
+            },
+        );
+    }
+
+    /// The in-place editor for one time field, with Today and a calendar for
+    /// dates. Escape reloads the drafts so the field shows its stored value.
+    fn time_editor(&mut self, ui: &mut egui::Ui, edit: Edit, item: &StoredItem) {
+        let mut focus = std::mem::take(&mut self.edit_focus);
+        let hint = match edit {
+            Edit::Estimate => "minutes",
+            Edit::Difficulty => "1 to 5",
+            _ => "YYYY-MM-DD",
+        };
+        let outcome = ui
+            .horizontal(|ui| {
+                inspector_key(ui, edit.label());
+                let mut outcome = inline_text(ui, self.time_draft(edit), &mut focus, hint);
+                if edit.is_date() {
+                    if ui.small_button("today").clicked() {
+                        *self.time_draft(edit) = Local::now().date_naive().to_string();
+                        outcome = Some(true);
+                    }
+                    calendar_picker(ui, edit.label(), self.time_draft(edit));
                 }
-                calendar_picker(ui, "scheduled", &mut self.scheduled_draft);
-                if ui.button("Save scheduled").clicked() {
-                    self.save_scheduled();
-                }
-            });
-            ui.horizontal(|ui| {
-                ui.label("Difficulty 1-5");
-                ui.text_edit_singleline(&mut self.difficulty_draft);
-                if ui.button("Save difficulty").clicked() {
-                    self.save_difficulty();
-                }
-            });
-            ui.horizontal(|ui| {
-                ui.label("Estimate minutes");
-                ui.text_edit_singleline(&mut self.estimate_draft);
-                if ui.button("Save estimate").clicked() {
-                    self.save_estimate();
-                }
-            });
-            // Weight is computed for display; nothing is stored for it.
-            let children = child_index(&self.items);
-            ui.weak(format!(
-                "Weight {:.2} · size by weight is {}",
-                item_weight(item, &children, &self.theme),
-                if self.theme.weight.size_nodes_by_weight {
-                    "on"
-                } else {
-                    "off"
-                }
-            ));
+                outcome
+            })
+            .inner;
+        match outcome {
+            Some(true) => {
+                self.commit_time(edit);
+                self.editing = None;
+            }
+            Some(false) => {
+                self.editing = None;
+                self.select(item.item.id.to_string());
+            }
+            None => {}
         }
-        if self.inspector.show_sessions {
-            ui.separator();
-            ui.label("Work sessions");
-            let active_session = self
-                .sessions
-                .iter()
-                .any(|session| session.finished_at.is_none());
-            if ui
-                .button(if active_session {
-                    "Stop session"
-                } else {
-                    "Start session"
-                })
-                .clicked()
-            {
-                self.toggle_session();
-            }
-            for session in &self.sessions {
-                ui.weak(format!(
-                    "{} → {}",
-                    session.started_at,
-                    session.finished_at.as_deref().unwrap_or("active")
-                ));
-            }
+    }
+
+    /// The draft behind an editable field.
+    fn time_draft(&mut self, edit: Edit) -> &mut String {
+        match edit {
+            Edit::Title => &mut self.title_draft,
+            Edit::Person => &mut self.actor_draft,
+            Edit::Due => &mut self.due_draft,
+            Edit::Defer => &mut self.defer_draft,
+            Edit::Scheduled => &mut self.scheduled_draft,
+            Edit::Estimate => &mut self.estimate_draft,
+            Edit::Difficulty => &mut self.difficulty_draft,
+        }
+    }
+
+    /// Saves a time field from its draft, where an empty draft clears it.
+    fn commit_time(&mut self, edit: Edit) {
+        match edit {
+            Edit::Due => self.save_date(true),
+            Edit::Defer => self.save_date(false),
+            Edit::Scheduled => self.save_scheduled(),
+            Edit::Estimate => self.save_estimate(),
+            Edit::Difficulty => self.save_difficulty(),
+            Edit::Title | Edit::Person => {}
         }
     }
 
@@ -7391,6 +7480,45 @@ fn node_meta(item: &StoredItem, holds_active: bool) -> String {
 }
 
 /// An actor's name without the `actor/` kind.
+/// How a time field reads in the inspector, or `None` when it is unset.
+fn time_value(item: &StoredItem, edit: Edit, today: NaiveDate) -> Option<String> {
+    match edit {
+        Edit::Due => item.item.due_on.map(|date| day_label(date, today)),
+        Edit::Defer => item.item.defer_until.map(|date| day_label(date, today)),
+        Edit::Scheduled => item.item.scheduled_on.map(|date| day_label(date, today)),
+        Edit::Estimate => item.item.estimate_minutes.map(minutes_label),
+        Edit::Difficulty => item.item.difficulty.map(|value| format!("{value} / 5")),
+        Edit::Title | Edit::Person => None,
+    }
+}
+
+/// A date as a person says it, with how far away it is: "Nov 1 · in 12 days".
+fn day_label(date: NaiveDate, today: NaiveDate) -> String {
+    let format = if date.year() == today.year() {
+        "%b %-d"
+    } else {
+        "%b %-d %Y"
+    };
+    let days = (date - today).num_days();
+    let distance = match days {
+        0 => "today".to_owned(),
+        1 => "tomorrow".to_owned(),
+        -1 => "yesterday".to_owned(),
+        2.. => format!("in {days} days"),
+        _ => format!("{} days ago", -days),
+    };
+    format!("{} · {distance}", date.format(format))
+}
+
+/// Minutes as hours and minutes: "45 min", "2 h", "1 h 30 min".
+fn minutes_label(minutes: u32) -> String {
+    match (minutes / 60, minutes % 60) {
+        (0, rest) => format!("{rest} min"),
+        (hours, 0) => format!("{hours} h"),
+        (hours, rest) => format!("{hours} h {rest} min"),
+    }
+}
+
 /// The dim, fixed-width key at the start of an inspector row.
 fn inspector_key(ui: &mut egui::Ui, key: &str) {
     let size = Vec2::new(76.0, ui.spacing().interact_size.y);
@@ -7989,6 +8117,23 @@ mod tests {
             super::FAMILY_BLUE
         );
         assert_eq!(band_color("not a color"), Color32::GRAY);
+    }
+
+    #[test]
+    fn time_values_read_as_spoken_dates_and_durations() {
+        use super::{day_label, minutes_label};
+        use chrono::NaiveDate;
+        let today = NaiveDate::from_ymd_opt(2026, 10, 20).unwrap();
+        let day = |m, d| NaiveDate::from_ymd_opt(2026, m, d).unwrap();
+        assert_eq!(day_label(day(11, 1), today), "Nov 1 · in 12 days");
+        assert_eq!(day_label(today, today), "Oct 20 · today");
+        assert_eq!(day_label(day(10, 21), today), "Oct 21 · tomorrow");
+        assert_eq!(day_label(day(10, 17), today), "Oct 17 · 3 days ago");
+        let next_year = NaiveDate::from_ymd_opt(2027, 1, 2).unwrap();
+        assert_eq!(day_label(next_year, today), "Jan 2 2027 · in 74 days");
+        assert_eq!(minutes_label(45), "45 min");
+        assert_eq!(minutes_label(120), "2 h");
+        assert_eq!(minutes_label(90), "1 h 30 min");
     }
 
     /// An editor over paths that do not exist, so nothing is read or written.
