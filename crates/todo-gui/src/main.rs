@@ -19,7 +19,7 @@ use theme::{
     Channel, CloudMemberShape, ColorMode, ConnectorStyle, FamilyChildStyle, FamilyHeaderStyle,
     FamilyView, FamilyWellFill, InspectorTheme, NodeShape, NormalizeStyle, ParentRegionStyle,
     RegionShape, TagCloudLinkMode, TagColoring, TagInheritance, TagPalette, TagTheme,
-    TerminalPalette, Theme,
+    TerminalPalette, Theme, band_color,
 };
 use todo_core::entry::{ASSIGNEE, AUTHOR, CONTRIBUTOR, REQUESTER};
 use todo_core::{
@@ -297,6 +297,7 @@ enum FilterChip {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Edit {
     Title,
+    Person,
 }
 
 /// Roles offered in the inspector; any other role name can still be typed.
@@ -399,6 +400,8 @@ struct TodoGui {
     show_settings: bool,
     settings_tab: SettingsTab,
     editing: Option<Edit>,
+    /// Set when an edit begins, so its field takes focus once and only once.
+    edit_focus: bool,
     /// The selected task's events, loaded when the footer opens and dropped on
     /// refresh so it never shows a stale list.
     history: Option<(String, Vec<HistoryEntry>)>,
@@ -549,6 +552,7 @@ impl TodoGui {
             show_settings: false,
             settings_tab: SettingsTab::default(),
             editing: None,
+            edit_focus: false,
             history: None,
         };
         app.refresh_if_ledger_changed();
@@ -1446,9 +1450,7 @@ impl TodoGui {
                 };
                 self.inspector_header(ui, &item);
                 ui.separator();
-                egui::CollapsingHeader::new("People")
-                    .default_open(self.inspector.open_status)
-                    .show(ui, |ui| self.section_people(ui, &item));
+                self.band_people(ui, &item);
                 egui::CollapsingHeader::new("Family & dependencies")
                     .default_open(self.inspector.open_relationships)
                     .show(ui, |ui| self.section_relationships(ui, &item));
@@ -1858,52 +1860,146 @@ impl TodoGui {
         }
     }
 
-    /// Tags, notes, and linked resources: what the task is about.
-    /// Who made, did, owns, or asked for the task, and who signed its creation.
-    fn section_people(&mut self, ui: &mut egui::Ui, item: &StoredItem) {
-        if let Some(agent) = &item.agent {
-            ui.label(format!("Agent-created: {agent}"));
-        }
-        for (role, actor) in self.roles.clone() {
-            ui.horizontal(|ui| {
-                ui.label(format!("{role}:"));
-                ui.monospace(actor_name(&actor));
-                if ui.small_button("Remove").clicked() {
-                    self.remove_role(&role, &actor);
-                }
+    /// Starts editing one inspector value in place.
+    fn begin(&mut self, edit: Edit) {
+        self.editing = Some(edit);
+        self.edit_focus = true;
+    }
+
+    /// Draws one inspector band: a colored stripe down its left edge, a colored
+    /// label, a one-line summary while collapsed, and a `+ ▾` add menu.
+    ///
+    /// The color is only ever a stripe and a label, never a fill behind text. An
+    /// empty band dims both, so it reads as "nothing here yet" at a glance.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "each band differs in exactly these parts; a struct would only rename them"
+    )]
+    fn band(
+        &mut self,
+        ui: &mut egui::Ui,
+        label: &str,
+        color: Color32,
+        open: bool,
+        summary: String,
+        empty: bool,
+        add: impl FnOnce(&mut Self, &mut egui::Ui),
+        body: impl FnOnce(&mut Self, &mut egui::Ui),
+    ) {
+        let id = ui.make_persistent_id(("band", label));
+        let state =
+            egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, open);
+        let collapsed = !state.is_open();
+        let color = if empty {
+            color.gamma_multiply(0.5)
+        } else {
+            color
+        };
+        let frame = egui::Frame::NONE
+            .inner_margin(egui::Margin {
+                left: 8,
+                ..Default::default()
+            })
+            .show(ui, |ui| {
+                state
+                    .show_header(ui, |ui| {
+                        ui.label(egui::RichText::new(label).color(color).strong());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.menu_button("+ ▾", |ui| add(self, ui));
+                            if collapsed && !summary.is_empty() {
+                                ui.add(
+                                    egui::Label::new(egui::RichText::new(summary).weak())
+                                        .truncate(),
+                                );
+                            }
+                        });
+                    })
+                    .body(|ui| body(self, ui));
             });
-        }
-        if self.roles.is_empty() {
-            ui.weak("No people");
-        }
-        ui.horizontal(|ui| {
-            egui::ComboBox::from_id_salt("role")
-                .selected_text(self.role_draft.clone())
-                .show_ui(ui, |ui| {
-                    for role in ROLES {
-                        ui.selectable_value(&mut self.role_draft, role.to_owned(), role);
+        let rect = frame.response.rect;
+        ui.painter().rect_filled(
+            Rect::from_min_size(rect.min, Vec2::new(3.0, rect.height())),
+            1.0,
+            color,
+        );
+        ui.add_space(4.0);
+    }
+
+    /// Who made, did, owns, or asked for the task, and who signed its creation.
+    fn band_people(&mut self, ui: &mut egui::Ui, item: &StoredItem) {
+        let summary = self
+            .roles
+            .iter()
+            .map(|(role, actor)| format!("{role} {}", actor_name(actor)))
+            .collect::<Vec<_>>()
+            .join(" · ");
+        let empty = self.roles.is_empty() && item.agent.is_none();
+        let color = band_color(&self.theme.colors.inspector.people);
+        self.band(
+            ui,
+            "PEOPLE",
+            color,
+            self.inspector.open_status,
+            summary,
+            empty,
+            |app, ui| {
+                for role in ROLES {
+                    if ui.button(role).clicked() {
+                        app.role_draft = role.to_owned();
+                        app.actor_draft.clear();
+                        app.begin(Edit::Person);
                     }
-                });
-            ui.add(egui::TextEdit::singleline(&mut self.actor_draft).hint_text("Actor"));
-            if ui.button("Add").clicked() {
-                self.add_role();
+                }
+            },
+            |app, ui| {
+                if let Some(agent) = &item.agent {
+                    inspector_row(ui, "signed", format!("{agent} · agent"), false);
+                }
+                for (role, actor) in app.roles.clone() {
+                    if inspector_row(ui, &role, actor_name(&actor), true).1 {
+                        app.remove_role(&role, &actor);
+                    }
+                }
+                if app.editing == Some(Edit::Person) {
+                    app.person_editor(ui);
+                }
+            },
+        );
+    }
+
+    /// The add-a-person row: the chosen role, a name, and known names to pick.
+    fn person_editor(&mut self, ui: &mut egui::Ui) {
+        let mut outcome = ui
+            .horizontal(|ui| {
+                inspector_key(ui, &self.role_draft);
+                inline_text(ui, &mut self.actor_draft, &mut self.edit_focus, "name")
+            })
+            .inner;
+        let query = self.actor_draft.trim().to_lowercase();
+        let matches = self
+            .namespaces
+            .iter()
+            .filter(|entry| entry.kind == NamespaceKind::Actor)
+            .map(|entry| actor_name(&entry.path).to_owned())
+            .filter(|name| name.contains(&query) && *name != query)
+            .take(5)
+            .collect::<Vec<_>>();
+        ui.horizontal_wrapped(|ui| {
+            for name in matches {
+                if ui.small_button(&name).clicked() {
+                    self.actor_draft = name;
+                    outcome = Some(true);
+                }
             }
         });
-        let query = self.actor_draft.trim().to_lowercase();
-        if !query.is_empty() {
-            let matches = self
-                .namespaces
-                .iter()
-                .filter(|entry| entry.kind == NamespaceKind::Actor)
-                .map(|entry| actor_name(&entry.path).to_owned())
-                .filter(|name| name.contains(&query) && *name != query)
-                .take(5)
-                .collect::<Vec<_>>();
-            for name in matches {
-                if ui.small_button(format!("Use {name}")).clicked() {
-                    self.actor_draft = name;
-                }
+        ui.weak("Enter adds · Esc cancels");
+        match outcome {
+            Some(true) => {
+                self.add_role();
+                self.editing = None;
             }
+            Some(false) => self.editing = None,
+            None => {}
         }
     }
 
@@ -7295,6 +7391,61 @@ fn node_meta(item: &StoredItem, holds_active: bool) -> String {
 }
 
 /// An actor's name without the `actor/` kind.
+/// The dim, fixed-width key at the start of an inspector row.
+fn inspector_key(ui: &mut egui::Ui, key: &str) {
+    let size = Vec2::new(76.0, ui.spacing().interact_size.y);
+    ui.allocate_ui_with_layout(
+        size,
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.set_min_size(size);
+            ui.weak(key);
+        },
+    );
+}
+
+/// One read-first inspector row: a key, its value, and `✕` while hovered.
+/// Returns whether the value and whether `✕` were clicked.
+fn inspector_row(
+    ui: &mut egui::Ui,
+    key: &str,
+    value: impl Into<egui::WidgetText>,
+    removable: bool,
+) -> (bool, bool) {
+    ui.horizontal(|ui| {
+        let hovered = ui.rect_contains_pointer(ui.max_rect());
+        inspector_key(ui, key);
+        let value = ui.add(egui::Label::new(value).sense(Sense::click()).truncate());
+        let remove = removable && hovered && ui.small_button("✕").on_hover_text("Remove").clicked();
+        (value.clicked(), remove)
+    })
+    .inner
+}
+
+/// A one-line in-place editor. Returns `Some(true)` on Enter or `✓`,
+/// `Some(false)` on Escape, and `None` while still editing.
+fn inline_text(
+    ui: &mut egui::Ui,
+    draft: &mut String,
+    focus: &mut bool,
+    hint: &str,
+) -> Option<bool> {
+    let field = ui.add(
+        egui::TextEdit::singleline(draft)
+            .desired_width(140.0)
+            .hint_text(hint),
+    );
+    if std::mem::take(focus) {
+        field.request_focus();
+    }
+    if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+        return Some(false);
+    }
+    let entered = field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+    let confirmed = ui.small_button("✓").clicked();
+    (entered || confirmed).then_some(true)
+}
+
 fn actor_name(path: &NamespacePath) -> &str {
     path.as_str()
         .strip_prefix("actor/")
@@ -7828,6 +7979,16 @@ mod tests {
         let only = AgentFilter::from_config(Some("only"));
         assert!(!only.keeps(&mine) && only.keeps(&bot));
         assert_eq!(AgentFilter::from_config(None), AgentFilter::Show);
+    }
+
+    #[test]
+    fn the_structure_band_shares_the_family_blue_and_bad_colors_fall_back() {
+        use crate::theme::{BandColors, band_color};
+        assert_eq!(
+            band_color(&BandColors::default().structure),
+            super::FAMILY_BLUE
+        );
+        assert_eq!(band_color("not a color"), Color32::GRAY);
     }
 
     /// An editor over paths that do not exist, so nothing is read or written.

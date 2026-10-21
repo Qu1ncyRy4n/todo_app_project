@@ -369,6 +369,8 @@ pub struct ColorsTheme {
     /// A leading `~/` is the home directory, so a terminal theme or a matugen
     /// template output can be pointed at directly.
     pub palette_file: String,
+    /// The stripe and label color of each inspector band.
+    pub inspector: BandColors,
 }
 
 impl Default for ColorsTheme {
@@ -376,8 +378,40 @@ impl Default for ColorsTheme {
         Self {
             mode: ColorMode::Dark,
             palette_file: String::new(),
+            inspector: BandColors::default(),
         }
     }
+}
+
+/// Inspector band colors as `#rrggbb`. They color only a thin stripe and the
+/// band label, never a fill behind text, so contrast never depends on them.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BandColors {
+    pub people: String,
+    pub time: String,
+    /// The family connector blue, so structure reads the same on the canvas.
+    pub structure: String,
+    pub context: String,
+    pub notes: String,
+}
+
+impl Default for BandColors {
+    fn default() -> Self {
+        Self {
+            people: "#b48ce6".to_owned(),
+            time: "#e6b450".to_owned(),
+            structure: "#93aeda".to_owned(),
+            context: "#7fc28e".to_owned(),
+            notes: "#8c8c8c".to_owned(),
+        }
+    }
+}
+
+/// Parses a `#rrggbb` band color, or grey when it does not parse.
+pub fn band_color(hex: &str) -> Color32 {
+    let hex = hex.trim().trim_start_matches('#');
+    Color32::from_hex(&format!("#{hex}")).unwrap_or(Color32::GRAY)
 }
 
 impl ColorsTheme {
