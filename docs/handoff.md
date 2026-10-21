@@ -1,6 +1,6 @@
 # Project Handoff
 
-Updated: 2026-10-19
+Updated: 2026-10-20
 Covers: workspace v0.3.0, protocol v15, `main` at "Update the handoff for
 agent signatures".
 
@@ -28,6 +28,12 @@ agent signatures".
   the manifest is worth keeping is an open question in TE-0016.
 - **GUI:** widget visuals follow the palette background (`49721f2`), fixing
   dark text on dark dropdowns with a light palette. Not yet seen in a window.
+- **GUI layout (TE-0018, `9de2b72`..`31c7fe2`).** Filter drawer (`F`),
+  floating Settings window (`,`), read-first inspector (`I`) with colored
+  People, Time, Structure, Context, and Notes bands and in-place editing; a
+  filter chip row above the canvas; `[colors.inspector]` theme keys. Pickup
+  slices 59-60 list what to try. Not yet seen in a window. Removing a link
+  needs a ledger call that does not exist yet.
 
 ## Earlier, October 19
 

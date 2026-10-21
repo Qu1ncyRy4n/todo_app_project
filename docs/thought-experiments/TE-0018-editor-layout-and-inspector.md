@@ -1,7 +1,8 @@
 # TE-0018: Editor Layout and a Calmer Inspector
 
 Date: 2026-10-20
-Status: proposal with sketches; awaiting the developer's choices (see Open).
+Status: implemented 2026-10-20 with every proposed choice (see Outcome);
+awaiting a check in a running window.
 Area: `crates/todo-gui`, handoff `docs/gui-graph-pickup.md`
 
 ## Decision Under Test
@@ -260,20 +261,41 @@ Each slice ships alone and is checked in a running window before the next.
    fields, colored stripes, collapsed summaries. One band per commit, People
    first since it is the newest.
 
-## Open
+## Outcome
 
-Choices for the developer:
+The developer approved the proposal as sketched, so each open choice took
+the proposed option:
 
-1. Settings as a floating window (proposed) or a full-height panel that
-   replaces the filter drawer while open.
-2. Hide empty fields (proposed), or show them dimmed so the full shape of a
-   task is always visible.
-3. Band colors: the defaults above, or derived from the palette's ANSI colors
-   so the inspector matches the terminal theme.
-4. Keyboard keys: `F` filter, `,` settings, `I` inspector. These must not clash
-   with the graph hotkeys (`/`, `G`) or the planned binding layer
-   (`viguz-nodit`).
-5. Whether Lines drawn and Overlays belong in the filter drawer (proposed) or
-   in Settings.
+1. Settings is a floating window.
+2. Empty fields are hidden; an empty band shows its header dimmed.
+3. Band colors are the defaults above, set in `[colors.inspector]`; deriving
+   them from the palette's ANSI colors stays open.
+4. `F`, `,`, and `I` toggle the drawer, Settings, and the inspector, only while
+   no text field has focus. They do not clash with `/` or `G`; `viguz-nodit`
+   should absorb them when the binding layer lands.
+5. Lines drawn and Overlays stay in the filter drawer, as two-column grids.
+
+Landed as seven commits: the Settings window; toolbar, chips, and keys; the
+inspector header and footer; then the People, Time, Structure, and
+Context-with-Notes bands. Where the build differs from the sketches:
+
+- The drawer has no search box of its own; the toolbar's search is the one
+  search, and an active search shows as a chip.
+- Chips name what differs from a fresh window ("showing done", "tag work
+  only", "agent tasks hidden") rather than a fixed "hiding:" list. Agent
+  filtering counts whenever it hides anything, even as the configured
+  default. Reset filters now returns the agent filter to `agent_items`.
+- `Layout ▾` also holds Timeline, Unstack, and Separate tags.
+- Rows offer `✕` on hover; clicking a value edits it. People rows have no
+  `✎`: changing a person is remove and add.
+- Links cannot be removed: the ledger has no remove-citation call. Adding one
+  is an API change for a later slice.
+- The footer also carries the computed weight, and history loads only when its
+  section is opened.
+
+Verified: `./dev check`, and unit tests for the chips, the band colors, and the
+date and duration labels. Not verified: anything in a running window, because
+this session could not capture the screen. `docs/gui-graph-pickup.md` lists
+what to try first.
 
 Recorded by agent-assistant.

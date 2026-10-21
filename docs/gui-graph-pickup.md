@@ -49,7 +49,7 @@ remote boxed cluster keeps the ordinary family tree. An explicitly Boxed family
 still draws a true, potentially wide frame around all of its direct children.
 
 The reviewed Dynamic policy is now serialized in `ParentTheme` and exposed in
-the Appearance inspector, saved via the ordinary theme workflow.
+Settings → Families, saved via the ordinary theme workflow.
 
 ## Pickup: the current family-design decision
 
@@ -92,7 +92,7 @@ because the distance value is raised.
 
 The developer later authorized live implementation. These are defaults, not
 constants: each is persisted in `[parent]` in `theme.toml` and is editable in
-the Appearance inspector.
+Settings → Families.
 
 | Theme key | Default | Live behavior |
 | --- | --- | --- |
@@ -263,9 +263,9 @@ Deletion is deliberately absent from the editor. `todo rm --force` and
   places active-holding parents with them, and omits spanning family fills.
 - Cloud fills are pre-blended once against the active canvas and drawn opaque, so
   a same-tag circle and its connecting tube remain one color at every overlap.
-- Appearance is a dedicated inspector section. It owns card silhouette and
-  wrapping, tag-cloud treatment, family treatment, and motion/arrow presentation;
-  View remains for hierarchy depth and arrangement behavior. Cloud members may be
+- Appearance lives in the Settings window's Cards, Tags, Families, and Motion
+  tabs (formerly one sidebar section); Layout holds hierarchy depth and
+  arrangement behavior. Cloud members may be
   the original circles or optional card-sized rounded rectangles joined by rails.
   The latter keeps a tag visibly attached to the cards it annotates without
   turning it into a parent board. Card clouds use each card's measured bounds,
@@ -404,21 +404,47 @@ dogfooding notes. Every slice below landed as its own commit with tests.
     `· agent` to the meta line. **Tasks shown → Agent-created** shows, hides,
     or isolates agent tasks; the default comes from `agent_items`. The editor
     always writes as the operator, even when launched from an agent's shell.
-    Reset filters leaves the agent filter alone (`ponytail`: keep a default if
-    that matters). Covered by `agent_tasks_are_marked_and_filtered`; the panel
-    itself is unverified in a window.
+    Covered by `agent_tasks_are_marked_and_filtered`.
+59. Layout (TE-0018). Three surfaces, one job each:
+    - **Filter drawer** (left, `F`): Tasks shown, Tags, Lines drawn, Overlays.
+    - **Settings** (floating window, `,` or `⚙`): tabs Layout, Cards,
+      Families, Tags, Motion, Colors, Inspector; the footer says whether the
+      live theme differs from `theme.toml` and holds Revert, Save, and Reload
+      from disk.
+    - **Inspector** (right, `I` or `▣`).
+    The toolbar is `+ New`, `Filter · n`, `Layout ▾` (the arrangement
+    commands), zoom with its percentage, `⌖` reset view, search, `⚙`, `▣`.
+    Reload theme and Refresh left it; both happen on their own. A chip row above
+    the canvas lists each filter that differs from a fresh window; a chip clears
+    its filter and `clear all` is Reset filters, which now returns the agent
+    filter to `agent_items`. Covered by
+    `each_changed_filter_is_one_chip_that_clears_itself`.
+60. Inspector, read first (TE-0018). A header with the title (click or `✎` to
+    edit; Enter or click-away saves, Escape restores), state and priority chips
+    whose menus save on choice, complete or reopen, the spoken id with copy, and
+    the parent as a link. Then five bands, each a colored stripe and label with
+    a summary while collapsed and a `+ ▾` add menu: **People**, **Time**,
+    **Structure**, **Context**, **Notes**. Only set fields get a row; a row
+    edits in place on click and offers `✕` on hover. Colors are
+    `[colors.inspector]` hex keys; `structure` defaults to the family connector
+    blue. A quiet footer holds history (loaded on open), raw JSON, weight, and
+    the full id. No Save buttons remain. Covered by
+    `time_values_read_as_spoken_dates_and_durations` and
+    `the_structure_band_shares_the_family_blue_and_bad_colors_fall_back`; slices
+    59 and 60 are unverified in a window.
 
 ## Configuration
 
 Presentation lives in `theme.toml` beside `config.toml` in the config directory.
 A missing file keeps the defaults; a malformed file or an unknown key is reported
-rather than ignored. Reload theme re-reads it in place, and writes the current
+rather than ignored. Settings → Reload from disk re-reads it in place, and writes the current
 defaults the first time as an editable starting point.
 
 Sections: `[node]`, `[edge]`, `[tag]`, `[layout]`, `[focus]`, `[timeline]`,
 `[parent]`, `[weight]`, `[inspector]`, `[colors]`. `[colors]` takes `mode`
 (`dark`, `light`, `system`) and `palette_file` (a Ghostty theme path, `~/`
-allowed); see `docs/themes/README.md`. In `[tag]`, `cloud_mix` and
+allowed), and `[colors.inspector]` takes `#rrggbb` band colors `people`,
+`time`, `structure`, `context`, and `notes`; see `docs/themes/README.md`. In `[tag]`, `cloud_mix` and
 `cloud_mix_dark` set cloud fill strength over light and dark canvases. In `[parent]`, `header_style` accepts
 `header` or `attached_tab`, and `child_style` accepts `recessed_board` or
 `nested_family`. `well_fill` accepts `transparent` or `dark`. `family_view`
@@ -443,7 +469,7 @@ Values that carry data or protocol meaning are deliberately not configurable.
 
 ```sh
 ./dev check   # cargo fmt --check, then clippy --workspace --all-targets -D warnings
-./dev test    # 233 tests: 162 todo-gui, 35 todo-core, 22 todo-store, 14 todo-cli (2026-10-14)
+./dev test    # 257 tests: 166 todo-gui, 42 todo-core, 27 todo-store, 22 todo-cli (2026-10-20)
 ```
 
 `./dev check` passed after the live Dynamic-family update. A full `./dev test` run
@@ -464,6 +490,10 @@ to panel wiring, hotkeys, or focus handling has to be confirmed by running
 `./dev gui`. The following have not been exercised in a running window and are
 what to check there first:
 
+- the TE-0018 layout (slices 59 and 60): `F`, `,`, and `I` toggles; filter
+  chips; the Settings tabs and footer; inspector bands, their stripes and
+  collapsed summaries; in-place edits for title, dates, people, links, tags,
+  and notes, including Escape restoring a date and the calendar beside it;
 - the `/` hotkey and its focus handoff;
 - the `G` hotkey over a card versus over empty canvas;
 - whether a family band now reads as a border at every parent-to-child distance,

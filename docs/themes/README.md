@@ -1,7 +1,8 @@
 # Theme examples
 
 Copy one of these to `theme.toml` in the configuration directory, next to
-`config.toml`, and press Reload theme. A missing file means defaults; an unknown
+`config.toml`; the editor picks it up within a second, or use Settings (`,`) →
+Reload from disk. A missing file means defaults; an unknown
 key is reported rather than ignored, so a typo is visible.
 
 Every file here sets only the keys it cares about. Anything left out keeps its
@@ -41,5 +42,20 @@ editor: point a matugen Ghostty template's output path here.
 
 The editor watches `theme.toml` and the palette file and reloads within about a
 second of either changing, including a re-pointed home-manager symlink. If the
-settings panel holds unsaved edits, it says the file changed instead of
-discarding them; Reload theme then applies the file.
+Settings window holds unsaved edits, it says the file changed instead of
+discarding them; Reload from disk then applies the file, and Revert drops the
+edits.
+
+## Inspector band colors
+
+```toml
+[colors.inspector]
+people = "#b48ce6"     # violet
+time = "#e6b450"       # amber
+structure = "#93aeda"  # the family connector blue
+context = "#7fc28e"    # green
+notes = "#8c8c8c"      # grey
+```
+
+Each colors only a thin stripe and the band label, never a fill behind text,
+so any value keeps body text readable. A value that does not parse draws grey.

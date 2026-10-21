@@ -216,7 +216,7 @@ This fixture settled the live tag-cloud defaults: full inherited hierarchy,
 deterministic sibling hue spans relative to the top-level group's available
 wheel span, five nearest same-path neighbors,
 local gap fill, and cutout of hierarchy layers a nearby task does not carry.
-The Appearance inspector exposes hierarchy depth, sibling hue spread, depth
+Settings → Tags exposes hierarchy depth, sibling hue spread, depth
 hue drift, nearest-vs-radius links, local gap fill, and cutout/outline toggles.
 The wheel is rebuilt from visible tasks on every frame. Its root and sibling
 spans are weighted by visible terminal tag assignments, so filtering to a view
@@ -248,7 +248,7 @@ box**, and **tree only**—with fewer connector primitives. The live renderer
 uses the same core rule the sketch did: direct-child count and transitive
 center-to-center proximity.
 
-The live default configuration, all exposed under **Appearance**, is:
+The live default configuration, all exposed under **Settings → Families**, is:
 
 | Theme key | Default | Meaning |
 | --- | --- | --- |
@@ -260,6 +260,6 @@ The live default configuration, all exposed under **Appearance**, is:
 | `well_fill` | `dark` | The child well has a background by default. |
 
 The first four values, nested/recessed child treatment, and dark/transparent
-well fill are configurable in `theme.toml` and the Appearance inspector.
+well fill are configurable in `theme.toml` and Settings → Families.
 Existing `max_board_span` remains a compatibility key for old themes and is no
 longer an active Dynamic control.
