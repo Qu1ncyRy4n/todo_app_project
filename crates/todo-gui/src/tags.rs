@@ -95,6 +95,18 @@ impl TagFilter {
         self.states.clear();
     }
 
+    /// Drops one tag's own state, leaving it to inherit again.
+    pub fn reset(&mut self, path: &str) {
+        self.states.remove(path);
+    }
+
+    /// The tags that hold a state of their own, in path order.
+    pub fn set(&self) -> impl Iterator<Item = (&str, TagFilterState)> {
+        self.states
+            .iter()
+            .map(|(path, state)| (path.as_str(), *state))
+    }
+
     /// Returns whether any tag is filtering at all.
     pub fn is_active(&self) -> bool {
         !self.states.is_empty()

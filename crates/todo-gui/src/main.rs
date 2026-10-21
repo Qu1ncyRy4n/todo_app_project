@@ -279,6 +279,19 @@ impl SettingsTab {
     }
 }
 
+/// One filter that differs from its default, shown as a chip above the canvas so
+/// what is hidden stays visible while the filter drawer is closed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum FilterChip {
+    Completed,
+    ActiveOnly,
+    Agent,
+    Tag(String, TagFilterState),
+    Search,
+    Lines,
+    Overlays,
+}
+
 /// Roles offered in the inspector; any other role name can still be typed.
 const ROLES: [&str; 4] = [AUTHOR, CONTRIBUTOR, ASSIGNEE, REQUESTER];
 
@@ -295,6 +308,8 @@ struct TodoGui {
     role_draft: String,
     actor_draft: String,
     agent_filter: AgentFilter,
+    /// The configured `agent_items`, which Reset filters returns to.
+    agent_default: AgentFilter,
     citations: Vec<Citation>,
     sessions: Vec<WorkSession>,
     focus_sequences: Vec<FocusSequence>,
@@ -444,6 +459,7 @@ impl TodoGui {
             role_draft: AUTHOR.to_owned(),
             actor_draft: String::new(),
             agent_filter,
+            agent_default: agent_filter,
             citations: Vec::new(),
             sessions: Vec::new(),
             focus_sequences: Vec::new(),
@@ -641,25 +657,33 @@ impl TodoGui {
                                 });
                         });
                     });
-                egui::CollapsingHeader::new("Relationships drawn")
+                egui::CollapsingHeader::new("Tags")
+                    .default_open(true)
+                    .show(ui, |ui| self.draw_tag_filters(ui));
+                egui::CollapsingHeader::new("Lines drawn")
                     .default_open(true)
                     .show(ui, |ui| {
-                        ui.checkbox(&mut self.show_parent_graph, "Parent tasks");
-                        ui.checkbox(&mut self.show_dependency_graph, "Depends on");
-                        ui.checkbox(&mut self.show_blocker_graph, "Blocked by");
-                        ui.checkbox(&mut self.show_relations, "Typed relations");
+                        egui::Grid::new("lines-drawn").show(ui, |ui| {
+                            ui.checkbox(&mut self.show_parent_graph, "Parents");
+                            ui.checkbox(&mut self.show_dependency_graph, "Depends on");
+                            ui.end_row();
+                            ui.checkbox(&mut self.show_blocker_graph, "Blocked by");
+                            ui.checkbox(&mut self.show_relations, "Relations");
+                            ui.end_row();
+                        });
                     });
                 egui::CollapsingHeader::new("Overlays")
                     .default_open(true)
                     .show(ui, |ui| {
-                        ui.checkbox(&mut self.show_tag_constellation, "Tag regions");
-                        ui.checkbox(&mut self.show_parent_regions, "Parent regions");
-                        ui.checkbox(&mut self.show_focus_window, "Focus Window");
-                        ui.checkbox(&mut self.show_timeline_ruler, "Timeline ruler");
+                        egui::Grid::new("overlays").show(ui, |ui| {
+                            ui.checkbox(&mut self.show_tag_constellation, "Tag regions");
+                            ui.checkbox(&mut self.show_parent_regions, "Parent regions");
+                            ui.end_row();
+                            ui.checkbox(&mut self.show_focus_window, "Focus window");
+                            ui.checkbox(&mut self.show_timeline_ruler, "Timeline ruler");
+                            ui.end_row();
+                        });
                     });
-                egui::CollapsingHeader::new("Tags")
-                    .default_open(true)
-                    .show(ui, |ui| self.draw_tag_filters(ui));
             });
     }
 
@@ -677,10 +701,109 @@ impl TodoGui {
         self.show_parent_regions = true;
         self.show_focus_window = true;
         self.show_timeline_ruler = true;
+        self.agent_filter = self.agent_default;
         self.tag_filter.clear();
         self.tag_states.clear();
         self.search.clear();
         self.message = Some("Filters restored to their defaults.".to_owned());
+    }
+
+    /// The filters that differ from a fresh window, one chip each.
+    ///
+    /// Agent filtering counts whenever it hides anything, even when that is the
+    /// configured default, because it still answers "where is my task?".
+    fn active_filters(&self) -> Vec<FilterChip> {
+        let mut chips = Vec::new();
+        if self.show_completed {
+            chips.push(FilterChip::Completed);
+        }
+        if self.focus_only {
+            chips.push(FilterChip::ActiveOnly);
+        }
+        if self.agent_filter != AgentFilter::Show {
+            chips.push(FilterChip::Agent);
+        }
+        chips.extend(
+            self.tag_states
+                .set()
+                .map(|(path, state)| FilterChip::Tag(path.to_owned(), state)),
+        );
+        if !self.search.trim().is_empty() {
+            chips.push(FilterChip::Search);
+        }
+        if !(self.show_parent_graph
+            && self.show_dependency_graph
+            && self.show_blocker_graph
+            && self.show_relations)
+        {
+            chips.push(FilterChip::Lines);
+        }
+        if !(self.show_tag_constellation
+            && self.show_parent_regions
+            && self.show_focus_window
+            && self.show_timeline_ruler)
+        {
+            chips.push(FilterChip::Overlays);
+        }
+        chips
+    }
+
+    fn chip_label(&self, chip: &FilterChip) -> String {
+        match chip {
+            FilterChip::Completed => "showing done".to_owned(),
+            FilterChip::ActiveOnly => "active only".to_owned(),
+            FilterChip::Agent => match self.agent_filter {
+                AgentFilter::Only => "agent tasks only".to_owned(),
+                _ => "agent tasks hidden".to_owned(),
+            },
+            FilterChip::Tag(path, TagFilterState::Hidden) => format!("tag {path} hidden"),
+            FilterChip::Tag(path, _) => format!("tag {path} only"),
+            FilterChip::Search => format!("search “{}”", self.search.trim()),
+            FilterChip::Lines => "some lines hidden".to_owned(),
+            FilterChip::Overlays => "some overlays off".to_owned(),
+        }
+    }
+
+    /// Returns one filter to its default, which is what clicking its chip does.
+    fn clear_filter(&mut self, chip: &FilterChip) {
+        match chip {
+            FilterChip::Completed => self.show_completed = false,
+            FilterChip::ActiveOnly => self.focus_only = false,
+            FilterChip::Agent => self.agent_filter = AgentFilter::Show,
+            FilterChip::Tag(path, _) => self.tag_states.reset(path),
+            FilterChip::Search => self.search.clear(),
+            FilterChip::Lines => {
+                self.show_parent_graph = true;
+                self.show_dependency_graph = true;
+                self.show_blocker_graph = true;
+                self.show_relations = true;
+            }
+            FilterChip::Overlays => {
+                self.show_tag_constellation = true;
+                self.show_parent_regions = true;
+                self.show_focus_window = true;
+                self.show_timeline_ruler = true;
+            }
+        }
+    }
+
+    /// The chip row above the canvas, shown only while something is filtered.
+    fn draw_filter_bar(&mut self, ui: &mut egui::Ui, chips: &[FilterChip]) {
+        ui.horizontal_wrapped(|ui| {
+            ui.weak("filtered:");
+            for chip in chips {
+                if ui
+                    .small_button(format!("{} ✕", self.chip_label(chip)))
+                    .on_hover_text("Clear this filter")
+                    .clicked()
+                {
+                    self.clear_filter(chip);
+                }
+            }
+            if ui.small_button("clear all").clicked() {
+                self.reset_filters();
+            }
+        });
     }
 
     /// The commands that rearrange the graph, listed in the toolbar's Layout menu.
@@ -3867,6 +3990,14 @@ impl eframe::App for TodoGui {
         if ui.input(|input| input.key_pressed(egui::Key::Escape)) && !self.search.is_empty() {
             self.search.clear();
         }
+        // F, comma, and I open the filter drawer, Settings, and the inspector.
+        if !ui.ctx().egui_wants_keyboard_input() {
+            ui.input(|input| {
+                self.show_filters ^= input.key_pressed(egui::Key::F);
+                self.show_settings ^= input.key_pressed(egui::Key::Comma);
+                self.show_inspector ^= input.key_pressed(egui::Key::I);
+            });
+        }
         if !ui.ctx().egui_wants_keyboard_input() {
             let step = if ui.input(|input| input.modifiers.shift) {
                 80.0
@@ -3886,46 +4017,42 @@ impl eframe::App for TodoGui {
                 self.graph_pan.y -= step;
             }
         }
-        // The toolbar carries actions only. Every view toggle lives in the filter
-        // sidebar, so there is one place to look for what is shown.
+        // The toolbar carries actions and the three surface toggles. The ledger
+        // and theme reload on their own, so neither needs a button here.
+        let chips = self.active_filters();
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.heading("Todo Ledger");
-                if ui.button("New task").clicked() {
+                if ui.button("+ New").clicked() {
                     self.new_task_parent = None;
                     self.new_task_title.clear();
                     self.new_task_open = true;
                 }
+                let filter_label = if chips.is_empty() {
+                    "Filter".to_owned()
+                } else {
+                    format!("Filter · {}", chips.len())
+                };
+                ui.toggle_value(&mut self.show_filters, filter_label)
+                    .on_hover_text("Filter drawer (F)");
+                ui.menu_button("Layout ▾", |ui| self.arrangement_buttons(ui));
                 ui.separator();
                 if ui.button("−").clicked() {
                     self.graph_zoom = (self.graph_zoom / 1.2).max(0.2);
                 }
+                ui.weak(format!("{:.0}%", self.graph_zoom * 100.0));
                 if ui.button("+").clicked() {
                     self.graph_zoom = (self.graph_zoom * 1.2).min(4.0);
                 }
-                if ui.button("Reset view").clicked() {
+                if ui.button("⌖").on_hover_text("Reset view").clicked() {
                     // The graph viewport is only known after both side panels
                     // have claimed their space, so framing is deferred to canvas draw.
                     self.reset_view_requested = true;
                 }
-                ui.menu_button("Layout ▾", |ui| self.arrangement_buttons(ui));
                 ui.separator();
-                if ui.button("Reload theme").clicked() {
-                    self.reload_theme();
-                }
-                if ui.button("Refresh").clicked() {
-                    self.refresh();
-                }
-                ui.separator();
-                ui.toggle_value(&mut self.show_filters, "Filters");
-                ui.toggle_value(&mut self.show_inspector, "Inspector");
-                ui.toggle_value(&mut self.show_settings, "⚙");
-                ui.separator();
-                ui.label("Search");
                 let search = ui.add(
                     egui::TextEdit::singleline(&mut self.search)
                         .desired_width(180.0)
-                        .hint_text("/ to search"),
+                        .hint_text("/ search"),
                 );
                 if self.search_focus {
                     search.request_focus();
@@ -3941,10 +4068,13 @@ impl eframe::App for TodoGui {
                         .filter(|item| self.search_matches(item))
                         .count();
                     ui.weak(format!("{hits} match"));
-                    if ui.button("Clear").clicked() {
-                        self.search.clear();
-                    }
                 }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.toggle_value(&mut self.show_inspector, "▣")
+                        .on_hover_text("Inspector (I)");
+                    ui.toggle_value(&mut self.show_settings, "⚙")
+                        .on_hover_text("Settings (,)");
+                });
             });
         });
         if self.new_task_open {
@@ -3993,6 +4123,11 @@ impl eframe::App for TodoGui {
                 .max_size(480.0)
                 .resizable(true)
                 .show(ui, |ui| self.draw_inspector(ui));
+        }
+        // Declared after the side panels so it spans the canvas only.
+        let chips = self.active_filters();
+        if !chips.is_empty() {
+            egui::Panel::top("filter-bar").show(ui, |ui| self.draw_filter_bar(ui, &chips));
         }
         egui::CentralPanel::default().show(ui, |ui| draw_graph(ui, self));
     }
@@ -7076,10 +7211,11 @@ fn short_title(title: &str) -> String {
 )]
 mod tests {
     use super::{
-        AgentFilter, FamilyPresentation, GroupBy, LocalGraphLayout, collect_subtree,
-        compare_group_labels, fallback_tag_colors, family_box, family_dependency_bands,
-        family_ring_mesh, family_tree_geometry, file_stamp, focus_is_active, hierarchy_levels,
-        limit_child_depth, matches_query, node_meta, segment_outside_rect,
+        AgentFilter, FamilyPresentation, FilterChip, GroupBy, LedgerAccess, LocalGraphLayout,
+        Runtime, TodoGui, collect_subtree, compare_group_labels, fallback_tag_colors, family_box,
+        family_dependency_bands, family_ring_mesh, family_tree_geometry, file_stamp,
+        focus_is_active, hierarchy_levels, limit_child_depth, matches_query, node_meta,
+        segment_outside_rect,
     };
     use eframe::egui::{Color32, Pos2, Rect, pos2, vec2};
     use std::collections::{HashMap, HashSet};
@@ -7591,5 +7727,41 @@ mod tests {
         let only = AgentFilter::from_config(Some("only"));
         assert!(!only.keeps(&mine) && only.keeps(&bot));
         assert_eq!(AgentFilter::from_config(None), AgentFilter::Show);
+    }
+
+    /// An editor over paths that do not exist, so nothing is read or written.
+    fn app(agent_filter: AgentFilter) -> TodoGui {
+        let missing = std::env::temp_dir().join("todo-gui-test-missing");
+        TodoGui::new(
+            Runtime::new().unwrap(),
+            LedgerAccess {
+                path: missing.join("ledger.db"),
+                actor_id: "test".to_owned(),
+            },
+            missing.join("layout.json"),
+            missing.join("theme.toml"),
+            agent_filter,
+        )
+    }
+
+    #[test]
+    fn each_changed_filter_is_one_chip_that_clears_itself() {
+        let mut app = app(AgentFilter::Hide);
+        assert_eq!(app.active_filters(), vec![FilterChip::Agent]);
+        app.show_completed = true;
+        app.tag_states.cycle("work");
+        app.show_relations = false;
+        app.show_timeline_ruler = false;
+        app.search = "sync".to_owned();
+        let chips = app.active_filters();
+        assert_eq!(chips.len(), 6);
+        for chip in &chips {
+            app.clear_filter(chip);
+        }
+        assert!(app.active_filters().is_empty());
+        app.show_completed = true;
+        app.reset_filters();
+        // Reset returns to the configured agent default, which still hides.
+        assert_eq!(app.active_filters(), vec![FilterChip::Agent]);
     }
 }
