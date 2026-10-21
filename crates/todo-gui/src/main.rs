@@ -308,6 +308,9 @@ enum Edit {
     Blocker,
     Relation,
     Focus,
+    Tag,
+    Link,
+    Note,
 }
 
 /// The color of an active blocker, in the inspector as on the canvas.
@@ -337,6 +340,9 @@ impl Edit {
             Self::Blocker => "blocked by",
             Self::Relation => "related",
             Self::Focus => "focus",
+            Self::Tag => "tag",
+            Self::Link => "link",
+            Self::Note => "note",
         }
     }
 
@@ -445,6 +451,8 @@ struct TodoGui {
     editing: Option<Edit>,
     /// Set when an edit begins, so its field takes focus once and only once.
     edit_focus: bool,
+    /// Whether the Notes band lists every note rather than the latest two.
+    notes_all: bool,
     /// The selected task's events, loaded when the footer opens and dropped on
     /// refresh so it never shows a stale list.
     history: Option<(String, Vec<HistoryEntry>)>,
@@ -593,6 +601,7 @@ impl TodoGui {
             settings_tab: SettingsTab::default(),
             editing: None,
             edit_focus: false,
+            notes_all: false,
             history: None,
         };
         app.refresh_if_ledger_changed();
@@ -1493,9 +1502,8 @@ impl TodoGui {
                 self.band_people(ui, &item);
                 self.band_time(ui, &item);
                 self.band_structure(ui, &item);
-                egui::CollapsingHeader::new("Tags, notes & links")
-                    .default_open(self.inspector.open_details)
-                    .show(ui, |ui| self.section_details(ui, &item));
+                self.band_context(ui, &item);
+                self.band_notes(ui);
                 ui.separator();
                 self.inspector_footer(ui, &item);
                 if let Some(message) = self.message.clone() {
@@ -2056,97 +2064,203 @@ impl TodoGui {
         }
     }
 
-    fn section_details(&mut self, ui: &mut egui::Ui, item: &StoredItem) {
-        ui.label("Tags");
-        for tag in &item.namespaces {
-            ui.horizontal(|ui| {
-                ui.monospace(tag.as_str());
-                if ui.small_button("Remove").clicked() {
-                    self.remove_tag(tag);
-                }
-            });
-        }
-        if item.namespaces.is_empty() {
-            ui.weak("No tags");
-        }
+    /// Tags and linked resources: what the task is about and where it points.
+    fn band_context(&mut self, ui: &mut egui::Ui, item: &StoredItem) {
         // Inherited tags are shown apart from assigned ones, so it is always clear
         // which tags the task holds in its own right.
-        let inherited = self.inherited_tags(&item.clone());
-        if !inherited.is_empty() {
-            let explicit = self.theme.tag.inherit == TagInheritance::Explicit;
-            ui.weak(if explicit {
-                "From parent tasks, not yet assigned:"
-            } else {
-                "From parent tasks:"
-            });
-            for tag in inherited {
-                ui.horizontal(|ui| {
-                    ui.weak(format!("({tag})"));
-                    if explicit && ui.small_button("Assign").clicked() {
-                        self.tag_draft = tag.clone();
-                        self.add_tag();
-                    }
-                });
-            }
+        let inherited = self.inherited_tags(item);
+        let explicit = self.theme.tag.inherit == TagInheritance::Explicit;
+        let tag_names = item
+            .namespaces
+            .iter()
+            .map(|tag| tag.as_str().trim_start_matches("tag/").to_owned())
+            .collect::<Vec<_>>();
+        let mut parts = tag_names.clone();
+        if self.inspector.show_links && !self.citations.is_empty() {
+            parts.push(format!("{} links", self.citations.len()));
         }
-        let mut show_tag_suggestions = false;
-        ui.horizontal(|ui| {
-            let tag_input = ui
-                .add(egui::TextEdit::singleline(&mut self.tag_draft).hint_text("Search tag paths"));
-            show_tag_suggestions =
-                tag_input.hovered() || tag_input.has_focus() || !self.tag_draft.trim().is_empty();
-            if ui.button("Add tag").clicked() {
-                self.add_tag();
-            }
-        });
-        if show_tag_suggestions {
-            let tag_query = self.tag_draft.to_lowercase();
-            let tag_matches = self
-                .assigned_tag_paths()
-                .into_iter()
-                .filter(|path| {
-                    !item.namespaces.iter().any(|tag| tag.as_str() == path)
-                        && (tag_query.is_empty() || path.to_lowercase().contains(&tag_query))
-                })
-                .take(5)
-                .collect::<Vec<_>>();
-            for namespace in tag_matches {
-                if ui.small_button(format!("Add {namespace}")).clicked() {
-                    self.tag_draft = namespace;
-                    self.add_tag();
+        let empty = parts.is_empty() && inherited.is_empty();
+        let color = band_color(&self.theme.colors.inspector.context);
+        self.band(
+            ui,
+            "CONTEXT",
+            color,
+            self.inspector.open_details,
+            parts.join(" · "),
+            empty,
+            |app, ui| {
+                if ui.button("tag…").clicked() {
+                    app.tag_draft.clear();
+                    app.begin(Edit::Tag);
+                }
+                if app.inspector.show_links && ui.button("link…").clicked() {
+                    app.link_target_draft.clear();
+                    app.link_label_draft.clear();
+                    app.begin(Edit::Link);
+                }
+            },
+            |app, ui| {
+                for (tag, name) in item.namespaces.iter().zip(&tag_names) {
+                    if inspector_row(ui, "tag", name.as_str(), true).1 {
+                        app.remove_tag(tag);
+                    }
+                }
+                for tag in inherited {
+                    let name = tag.trim_start_matches("tag/").to_owned();
+                    let key = if explicit { "offered" } else { "inherited" };
+                    let (clicked, _) =
+                        inspector_row(ui, key, egui::RichText::new(name).weak(), false);
+                    if explicit && clicked {
+                        app.tag_draft = tag;
+                        app.add_tag();
+                    }
+                }
+                if app.inspector.show_links {
+                    for citation in app.citations.clone() {
+                        let label = citation.label.as_deref().unwrap_or(&citation.target);
+                        if inspector_row(ui, "link", label, false).0 {
+                            ui.ctx().open_url(egui::OpenUrl::new_tab(&citation.target));
+                        }
+                    }
+                }
+                match app.editing {
+                    Some(Edit::Tag) => app.tag_editor(ui, item),
+                    Some(Edit::Link) => app.link_editor(ui),
+                    _ => {}
+                }
+            },
+        );
+    }
+
+    /// The add-a-tag row, with existing tag paths to pick.
+    fn tag_editor(&mut self, ui: &mut egui::Ui, item: &StoredItem) {
+        let mut focus = std::mem::take(&mut self.edit_focus);
+        let mut outcome = ui
+            .horizontal(|ui| {
+                inspector_key(ui, "tag");
+                inline_text(ui, &mut self.tag_draft, &mut focus, "work/apps")
+            })
+            .inner;
+        let query = self.tag_draft.trim().to_lowercase();
+        let matches = self
+            .assigned_tag_paths()
+            .into_iter()
+            .filter(|path| {
+                !item.namespaces.iter().any(|tag| tag.as_str() == path)
+                    && (query.is_empty() || path.to_lowercase().contains(&query))
+            })
+            .take(5)
+            .collect::<Vec<_>>();
+        ui.horizontal_wrapped(|ui| {
+            for path in matches {
+                if ui.small_button(path.trim_start_matches("tag/")).clicked() {
+                    self.tag_draft = path;
+                    outcome = Some(true);
                 }
             }
+        });
+        match outcome {
+            Some(true) => {
+                self.add_tag();
+                self.editing = None;
+            }
+            Some(false) => self.editing = None,
+            None => {}
         }
-        if self.inspector.show_notes {
-            ui.separator();
-            ui.label("Notes / description");
-            for note in &self.notes {
-                ui.group(|ui| {
-                    ui.label(&note.body);
-                });
-            }
-            ui.add(egui::TextEdit::multiline(&mut self.note_draft).desired_rows(4));
-            if ui.button("Add note").clicked() {
-                self.add_note();
-            }
-        }
-        if self.inspector.show_links {
-            ui.separator();
-            ui.label("Linked resources");
-            for citation in &self.citations {
-                ui.horizontal(|ui| {
-                    ui.label(citation.label.as_deref().unwrap_or(&citation.target));
-                    if ui.small_button("Open").clicked() {
-                        ui.ctx().open_url(egui::OpenUrl::new_tab(&citation.target));
-                    }
-                });
-            }
-            ui.text_edit_singleline(&mut self.link_target_draft);
-            ui.text_edit_singleline(&mut self.link_label_draft);
-            if ui.button("Add link").clicked() {
+    }
+
+    /// The add-a-link row: where it points, then an optional label.
+    fn link_editor(&mut self, ui: &mut egui::Ui) {
+        let mut focus = std::mem::take(&mut self.edit_focus);
+        let target = ui
+            .horizontal(|ui| {
+                inspector_key(ui, "link");
+                inline_text(ui, &mut self.link_target_draft, &mut focus, "URL or path")
+            })
+            .inner;
+        let label = ui
+            .horizontal(|ui| {
+                inspector_key(ui, "label");
+                inline_text(ui, &mut self.link_label_draft, &mut false, "optional")
+            })
+            .inner;
+        match target.or(label) {
+            Some(true) => {
                 self.add_link();
+                self.editing = None;
             }
+            Some(false) => self.editing = None,
+            None => {}
         }
+    }
+
+    /// Notes, newest last, with the two latest shown until asked for all.
+    fn band_notes(&mut self, ui: &mut egui::Ui) {
+        if !self.inspector.show_notes {
+            return;
+        }
+        let summary = match self.notes.len() {
+            0 => String::new(),
+            1 => "1 note".to_owned(),
+            count => format!("{count} notes"),
+        };
+        let empty = self.notes.is_empty();
+        let color = band_color(&self.theme.colors.inspector.notes);
+        self.band(
+            ui,
+            "NOTES",
+            color,
+            self.inspector.open_details,
+            summary,
+            empty,
+            |app, ui| {
+                if ui.button("note").clicked() {
+                    app.note_draft.clear();
+                    app.begin(Edit::Note);
+                }
+            },
+            |app, ui| {
+                let hidden = if app.notes_all {
+                    0
+                } else {
+                    app.notes.len().saturating_sub(2)
+                };
+                for note in app.notes.iter().skip(hidden) {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.weak(note.recorded_at.get(..10).unwrap_or(&note.recorded_at));
+                        ui.label(&note.body);
+                    });
+                }
+                if hidden > 0
+                    && ui
+                        .small_button(format!("show all {}", app.notes.len()))
+                        .clicked()
+                {
+                    app.notes_all = true;
+                }
+                if app.editing == Some(Edit::Note) {
+                    let field = ui.add(
+                        egui::TextEdit::multiline(&mut app.note_draft)
+                            .desired_rows(3)
+                            .desired_width(f32::INFINITY),
+                    );
+                    if std::mem::take(&mut app.edit_focus) {
+                        field.request_focus();
+                    }
+                    ui.horizontal(|ui| {
+                        if ui.small_button("add note").clicked() {
+                            app.add_note();
+                            app.editing = None;
+                        }
+                        if ui.small_button("cancel").clicked()
+                            || ui.input(|input| input.key_pressed(egui::Key::Escape))
+                        {
+                            app.editing = None;
+                        }
+                    });
+                }
+            },
+        );
     }
 
     /// Dates, effort, and work sessions. Only fields with a value get a row;
@@ -2268,6 +2382,9 @@ impl TodoGui {
             Edit::Person => &mut self.actor_draft,
             Edit::Parent | Edit::Depends | Edit::Blocker | Edit::Relation => &mut self.pick_search,
             Edit::Focus => &mut self.focus_title_draft,
+            Edit::Tag => &mut self.tag_draft,
+            Edit::Link => &mut self.link_target_draft,
+            Edit::Note => &mut self.note_draft,
             Edit::Due => &mut self.due_draft,
             Edit::Defer => &mut self.defer_draft,
             Edit::Scheduled => &mut self.scheduled_draft,
@@ -3579,6 +3696,7 @@ impl TodoGui {
                 .map_or(String::new(), |date| date.to_string());
             if self.selected.as_deref() != Some(id.as_str()) {
                 self.editing = None;
+                self.notes_all = false;
             }
             self.selected = Some(id);
             match self.with_ledger(async |ledger| ledger.notes(item.item.id).await) {
