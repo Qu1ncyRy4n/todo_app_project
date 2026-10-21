@@ -26,8 +26,8 @@ use todo_core::{
     ItemId, ItemState, NamespaceKind, NamespacePath, Priority, RelationKind, WeightInputs,
 };
 use todo_store::{
-    AppConfig, AppPaths, Citation, FocusSequence, ItemPatch, ItemScope, Ledger, NamespaceEntry,
-    Note, StoredItem, WorkSession,
+    AppConfig, AppPaths, Citation, FocusSequence, HistoryEntry, ItemPatch, ItemScope, Ledger,
+    NamespaceEntry, Note, StoredItem, WorkSession,
 };
 use tokio::runtime::Runtime;
 
@@ -292,6 +292,13 @@ enum FilterChip {
     Overlays,
 }
 
+/// The inspector value being edited in place, if any. One at a time: Enter
+/// commits it, Escape or selecting another task drops it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Edit {
+    Title,
+}
+
 /// Roles offered in the inspector; any other role name can still be typed.
 const ROLES: [&str; 4] = [AUTHOR, CONTRIBUTOR, ASSIGNEE, REQUESTER];
 
@@ -391,6 +398,10 @@ struct TodoGui {
     show_inspector: bool,
     show_settings: bool,
     settings_tab: SettingsTab,
+    editing: Option<Edit>,
+    /// The selected task's events, loaded when the footer opens and dropped on
+    /// refresh so it never shows a stale list.
+    history: Option<(String, Vec<HistoryEntry>)>,
 }
 
 /// A local presentation override for one parent family. It belongs to the GUI
@@ -537,6 +548,8 @@ impl TodoGui {
             show_inspector: true,
             show_settings: false,
             settings_tab: SettingsTab::default(),
+            editing: None,
+            history: None,
         };
         app.refresh_if_ledger_changed();
         app.theme_seen = app.theme_stamps();
@@ -1423,7 +1436,6 @@ impl TodoGui {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                ui.heading("Inspector");
                 let Some(item) = self.selected_item().cloned() else {
                     ui.weak("Select a task node to inspect it.");
                     if let Some(message) = self.message.clone() {
@@ -1432,12 +1444,8 @@ impl TodoGui {
                     }
                     return;
                 };
-                ui.label(format!("{} · {}", item.item.state, item.item.id.short()))
-                    .on_hover_text(item.item.id.to_string());
+                self.inspector_header(ui, &item);
                 ui.separator();
-                egui::CollapsingHeader::new("Task basics")
-                    .default_open(self.inspector.open_status)
-                    .show(ui, |ui| self.section_status(ui, &item));
                 egui::CollapsingHeader::new("People")
                     .default_open(self.inspector.open_status)
                     .show(ui, |ui| self.section_people(ui, &item));
@@ -1450,9 +1458,8 @@ impl TodoGui {
                 egui::CollapsingHeader::new("Schedule & effort")
                     .default_open(self.inspector.open_schedule)
                     .show(ui, |ui| self.section_schedule(ui, &item));
-                egui::CollapsingHeader::new("Advanced / raw editing")
-                    .default_open(self.inspector.open_advanced)
-                    .show(ui, |ui| self.section_advanced(ui));
+                ui.separator();
+                self.inspector_footer(ui, &item);
                 if let Some(message) = self.message.clone() {
                     ui.separator();
                     ui.label(message);
@@ -1460,25 +1467,47 @@ impl TodoGui {
             });
     }
 
-    /// Title, state, and priority: the three controls used on most task edits.
-    fn section_status(&mut self, ui: &mut egui::Ui, item: &StoredItem) {
-        ui.label("Title");
-        ui.text_edit_singleline(&mut self.title_draft);
-        let title_valid = !self.title_draft.trim().is_empty();
-        if !title_valid {
-            ui.colored_label(Color32::RED, "Title cannot be empty.");
+    /// The title, state and priority chips, spoken id, and parent link.
+    ///
+    /// The title reads as a heading and edits in place: click it or `✎`, then
+    /// Enter saves and Escape restores it. A chip's menu saves on choice, so no
+    /// edit here needs a Save button.
+    fn inspector_header(&mut self, ui: &mut egui::Ui, item: &StoredItem) {
+        if self.editing == Some(Edit::Title) {
+            let field = ui.add(
+                egui::TextEdit::singleline(&mut self.title_draft)
+                    .desired_width(f32::INFINITY)
+                    .font(egui::TextStyle::Heading),
+            );
+            field.request_focus();
+            if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+                self.title_draft = item.item.title.clone();
+                self.editing = None;
+            } else if field.lost_focus() {
+                // Enter and clicking away both commit, as in any inline editor.
+                if self.title_draft.trim() != item.item.title {
+                    self.save_title();
+                }
+                self.editing = None;
+            }
+        } else {
+            ui.horizontal_wrapped(|ui| {
+                let title = ui.add(
+                    egui::Label::new(egui::RichText::new(&item.item.title).heading())
+                        .sense(Sense::click()),
+                );
+                let pencil = ui.small_button("✎");
+                if title.on_hover_text("Click to edit").clicked() || pencil.clicked() {
+                    self.title_draft = item.item.title.clone();
+                    self.editing = Some(Edit::Title);
+                }
+            });
         }
-        if ui
-            .add_enabled(title_valid, egui::Button::new("Save title"))
-            .clicked()
-        {
-            self.save_title();
-        }
-        ui.separator();
-        ui.label("Status");
-        egui::ComboBox::from_id_salt("state")
-            .selected_text(self.state_draft.to_string())
-            .show_ui(ui, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            let holds = ids_holding_active_work(&self.items).contains(&item.item.id.to_string());
+            let state = egui::RichText::new(format!("{} ▾", item.item.state))
+                .color(status_color(item, holds));
+            ui.menu_button(state, |ui| {
                 for state in [
                     ItemState::Inbox,
                     ItemState::Active,
@@ -1489,39 +1518,107 @@ impl TodoGui {
                 .into_iter()
                 .filter(|state| item.item.state.can_transition_to(*state))
                 {
-                    ui.selectable_value(&mut self.state_draft, state, state.to_string());
+                    if ui.button(state.to_string()).clicked() {
+                        self.state_draft = state;
+                        self.save_state();
+                    }
                 }
             });
-        if ui.button("Save status").clicked() {
-            self.save_state();
-        }
-        if ui
-            .button(if item.item.state == ItemState::Done {
-                "Reopen task"
-            } else {
-                "Complete task"
-            })
-            .clicked()
-        {
-            self.toggle_complete();
-        }
-        ui.separator();
-        ui.label("Priority");
-        egui::ComboBox::from_id_salt("priority")
-            .selected_text(self.priority_draft.to_string())
-            .show_ui(ui, |ui| {
+            ui.menu_button(format!("{} ▾", item.item.priority), |ui| {
                 for priority in [
                     Priority::Low,
                     Priority::Normal,
                     Priority::High,
                     Priority::Critical,
                 ] {
-                    ui.selectable_value(&mut self.priority_draft, priority, priority.to_string());
+                    if ui.button(priority.to_string()).clicked() {
+                        self.priority_draft = priority;
+                        self.save_priority();
+                    }
                 }
             });
-        if ui.button("Save priority").clicked() {
-            self.save_priority();
+            let done = item.item.state == ItemState::Done;
+            if ui
+                .small_button(if done { "↺" } else { "✓" })
+                .on_hover_text(if done { "Reopen" } else { "Complete" })
+                .clicked()
+            {
+                self.toggle_complete();
+            }
+            let short = item.item.id.short();
+            if ui
+                .small_button(format!("{short} ⧉"))
+                .on_hover_text("Copy the spoken id")
+                .clicked()
+            {
+                ui.ctx().copy_text(short.to_string());
+            }
+        });
+        if let Some(parent) = item.item.parent_id
+            && self.inspector.show_parent
+        {
+            let title = self
+                .items
+                .iter()
+                .find(|candidate| candidate.item.id == parent)
+                .map_or_else(
+                    || parent.short().to_string(),
+                    |found| found.item.title.clone(),
+                );
+            ui.horizontal(|ui| {
+                ui.weak("in");
+                if ui.link(title).clicked() {
+                    self.select(parent.to_string());
+                }
+            });
         }
+    }
+
+    /// History, raw JSON, and the full id: rarely needed, so quiet and last.
+    fn inspector_footer(&mut self, ui: &mut egui::Ui, item: &StoredItem) {
+        let id = item.item.id.to_string();
+        egui::CollapsingHeader::new(egui::RichText::new("history").weak())
+            .id_salt("inspector-history")
+            .show(ui, |ui| {
+                if self
+                    .history
+                    .as_ref()
+                    .is_none_or(|(loaded, _)| *loaded != id)
+                {
+                    let subject = item.item.id;
+                    match self.with_ledger(async |ledger| ledger.history(subject).await) {
+                        Ok(entries) => self.history = Some((id.clone(), entries)),
+                        Err(error) => {
+                            self.message = Some(format!("History not loaded: {error:#}"));
+                            self.history = Some((id.clone(), Vec::new()));
+                        }
+                    }
+                }
+                for entry in self.history.iter().flat_map(|(_, entries)| entries) {
+                    let agent = entry
+                        .agent
+                        .as_deref()
+                        .map(|agent| format!(" · {agent}"))
+                        .unwrap_or_default();
+                    ui.weak(format!("{}  {}{agent}", entry.recorded_at, entry.kind));
+                }
+            });
+        if self.inspector.show_raw_json {
+            egui::CollapsingHeader::new(egui::RichText::new("raw").weak())
+                .id_salt("inspector-raw")
+                .default_open(self.inspector.open_advanced)
+                .show(ui, |ui| self.section_advanced(ui));
+        }
+        ui.horizontal(|ui| {
+            ui.weak(format!("id {id}"));
+            if ui
+                .small_button("⧉")
+                .on_hover_text("Copy the full id")
+                .clicked()
+            {
+                ui.ctx().copy_text(id.clone());
+            }
+        });
     }
 
     /// Parent, dependencies, blockers, typed relations, and focus sequences.
@@ -3156,6 +3253,7 @@ impl TodoGui {
     }
 
     fn refresh(&mut self) {
+        self.history = None;
         match self.with_ledger(async |ledger| ledger.list_items(ItemScope::All, true).await) {
             Ok(items) => {
                 self.items = items;
@@ -3280,6 +3378,9 @@ impl TodoGui {
                 .item
                 .scheduled_on
                 .map_or(String::new(), |date| date.to_string());
+            if self.selected.as_deref() != Some(id.as_str()) {
+                self.editing = None;
+            }
             self.selected = Some(id);
             match self.with_ledger(async |ledger| ledger.notes(item.item.id).await) {
                 Ok(notes) => self.notes = notes,
