@@ -303,7 +303,15 @@ enum Edit {
     Scheduled,
     Estimate,
     Difficulty,
+    Parent,
+    Depends,
+    Blocker,
+    Relation,
+    Focus,
 }
+
+/// The color of an active blocker, in the inspector as on the canvas.
+const BLOCKED: Color32 = Color32::from_rgb(228, 126, 94);
 
 impl Edit {
     /// The time fields, in the order the Time band lists them.
@@ -324,6 +332,11 @@ impl Edit {
             Self::Scheduled => "scheduled",
             Self::Estimate => "estimate",
             Self::Difficulty => "difficulty",
+            Self::Parent => "parent",
+            Self::Depends => "depends on",
+            Self::Blocker => "blocked by",
+            Self::Relation => "related",
+            Self::Focus => "focus",
         }
     }
 
@@ -368,7 +381,6 @@ struct TodoGui {
     family_presentations: HashMap<String, FamilyPresentation>,
     show_relations: bool,
     relation_draft: RelationKind,
-    relation_search: String,
     show_focus_window: bool,
     show_completed: bool,
     tag_filter: String,
@@ -380,9 +392,8 @@ struct TodoGui {
     node_offsets: HashMap<String, Vec2>,
     layout_path: PathBuf,
     drag_anchor: Option<DragAnchor>,
-    parent_search: String,
-    dependency_search: String,
-    blocker_search: String,
+    /// The search behind whichever task picker is open in the Structure band.
+    pick_search: String,
     due_draft: String,
     defer_draft: String,
     scheduled_draft: String,
@@ -524,7 +535,6 @@ impl TodoGui {
             family_presentations: saved_layout.family_presentations,
             show_relations: true,
             relation_draft: RelationKind::ContributesTo,
-            relation_search: String::new(),
             show_focus_window: true,
             show_completed: false,
             tag_filter: String::new(),
@@ -536,9 +546,7 @@ impl TodoGui {
             node_offsets,
             layout_path,
             drag_anchor: None,
-            parent_search: String::new(),
-            dependency_search: String::new(),
-            blocker_search: String::new(),
+            pick_search: String::new(),
             due_draft: String::new(),
             defer_draft: String::new(),
             scheduled_draft: String::new(),
@@ -1483,13 +1491,11 @@ impl TodoGui {
                 self.inspector_header(ui, &item);
                 ui.separator();
                 self.band_people(ui, &item);
-                egui::CollapsingHeader::new("Family & dependencies")
-                    .default_open(self.inspector.open_relationships)
-                    .show(ui, |ui| self.section_relationships(ui, &item));
+                self.band_time(ui, &item);
+                self.band_structure(ui, &item);
                 egui::CollapsingHeader::new("Tags, notes & links")
                     .default_open(self.inspector.open_details)
                     .show(ui, |ui| self.section_details(ui, &item));
-                self.band_time(ui, &item);
                 ui.separator();
                 self.inspector_footer(ui, &item);
                 if let Some(message) = self.message.clone() {
@@ -1664,240 +1670,246 @@ impl TodoGui {
         });
     }
 
-    /// Parent, dependencies, blockers, typed relations, and focus sequences.
-    fn section_relationships(&mut self, ui: &mut egui::Ui, item: &StoredItem) {
-        // Shared by the dependency and blocker subsections, so either can be hidden
-        // without taking the candidate list away from the other.
-        let relation_candidates = self
+    /// Children, prerequisites, blockers, typed relations, and focus sequences.
+    /// The parent is in the header; moving or detaching it is in `+ ▾`.
+    fn band_structure(&mut self, ui: &mut egui::Ui, item: &StoredItem) {
+        let id = item.item.id.to_string();
+        let children = child_index(&self.items).remove(&id).unwrap_or_default();
+        let open_children = children
+            .iter()
+            .filter(|child| {
+                self.items.iter().any(|candidate| {
+                    candidate.item.id.to_string() == **child
+                        && matches!(candidate.item.state, ItemState::Inbox | ItemState::Active)
+                })
+            })
+            .count();
+        let sequences = self
+            .focus_sequences
+            .iter()
+            .filter(|sequence| sequence.items.contains(&item.item.id))
+            .map(|sequence| sequence.title.clone())
+            .collect::<Vec<_>>();
+        let mut parts = Vec::new();
+        if !children.is_empty() {
+            parts.push(format!("{} children", children.len()));
+        }
+        if !item.dependencies.is_empty() {
+            parts.push(format!("{} prerequisites", item.dependencies.len()));
+        }
+        if !item.blocked_by.is_empty() {
+            parts.push("blocked".to_owned());
+        }
+        if !item.relations.is_empty() {
+            parts.push(format!("{} related", item.relations.len()));
+        }
+        let empty = parts.is_empty() && sequences.is_empty();
+        let color = band_color(&self.theme.colors.inspector.structure);
+        self.band(
+            ui,
+            "STRUCTURE",
+            color,
+            self.inspector.open_relationships,
+            parts.join(" · "),
+            empty,
+            |app, ui| {
+                if ui.button("child task").clicked() {
+                    app.new_task_parent = Some(item.item.id.to_string());
+                    app.new_task_title.clear();
+                    app.new_task_open = true;
+                }
+                if app.inspector.show_parent {
+                    if ui.button("move to parent…").clicked() {
+                        app.begin_pick(Edit::Parent);
+                    }
+                    if item.item.parent_id.is_some() && ui.button("detach from parent").clicked() {
+                        app.parent_draft = None;
+                        app.save_parent();
+                    }
+                }
+                if app.inspector.show_dependencies && ui.button("depends on…").clicked() {
+                    app.begin_pick(Edit::Depends);
+                }
+                if app.inspector.show_blockers && ui.button("blocked by…").clicked() {
+                    app.begin_pick(Edit::Blocker);
+                }
+                if app.inspector.show_relations {
+                    ui.separator();
+                    for relation in RelationKind::all() {
+                        if ui.button(format!("{relation}…")).clicked() {
+                            app.relation_draft = relation;
+                            app.begin_pick(Edit::Relation);
+                        }
+                    }
+                }
+                if app.inspector.show_focus_sequence {
+                    ui.separator();
+                    if ui.button("focus sequence…").clicked() {
+                        app.begin(Edit::Focus);
+                    }
+                }
+            },
+            |app, ui| {
+                if !children.is_empty() {
+                    inspector_row(
+                        ui,
+                        "children",
+                        format!("{}, {open_children} open", children.len()),
+                        false,
+                    );
+                }
+                if app.inspector.show_dependencies {
+                    for dependency in &item.dependencies {
+                        let target = dependency.to_string();
+                        let (clicked, remove) =
+                            inspector_row(ui, "depends on", app.describe(&target), true);
+                        if clicked {
+                            app.select(target.clone());
+                        }
+                        if remove {
+                            app.toggle_dependency(target, false);
+                        }
+                    }
+                }
+                if app.inspector.show_blockers {
+                    for blocker in &item.blocked_by {
+                        let target = blocker.to_string();
+                        let value = egui::RichText::new(app.describe(&target)).color(BLOCKED);
+                        let (clicked, remove) = inspector_row(ui, "blocked by", value, true);
+                        if clicked {
+                            app.select(target.clone());
+                        }
+                        if remove {
+                            app.toggle_blocker(target, false);
+                        }
+                    }
+                }
+                if app.inspector.show_relations {
+                    for relation in &item.relations {
+                        let existing = *relation;
+                        let target = existing.target.to_string();
+                        let (clicked, remove) = inspector_row(
+                            ui,
+                            &existing.relation.to_string(),
+                            app.describe(&target),
+                            true,
+                        );
+                        if clicked {
+                            app.select(target.clone());
+                        }
+                        if remove {
+                            app.remove_relation(existing.relation, target);
+                        }
+                    }
+                }
+                if app.inspector.show_focus_sequence {
+                    for title in &sequences {
+                        inspector_row(ui, "focus", title.as_str(), false);
+                    }
+                }
+                match app.editing {
+                    Some(
+                        edit @ (Edit::Parent | Edit::Depends | Edit::Blocker | Edit::Relation),
+                    ) => {
+                        app.task_picker(ui, edit, item);
+                    }
+                    Some(Edit::Focus) => app.focus_editor(ui),
+                    _ => {}
+                }
+            },
+        );
+    }
+
+    fn begin_pick(&mut self, edit: Edit) {
+        self.pick_search.clear();
+        self.begin(edit);
+    }
+
+    /// Searches for another task to link as parent, prerequisite, blocker, or
+    /// relation. Enter takes the first match; Escape cancels.
+    ///
+    /// Relations may cross projects, which is their point; the other three stay
+    /// within the task's own project.
+    fn task_picker(&mut self, ui: &mut egui::Ui, edit: Edit, item: &StoredItem) {
+        let key = match edit {
+            Edit::Relation => self.relation_draft.to_string(),
+            _ => edit.label().to_owned(),
+        };
+        let mut focus = std::mem::take(&mut self.edit_focus);
+        let outcome = ui
+            .horizontal(|ui| {
+                inspector_key(ui, &key);
+                inline_text(ui, &mut self.pick_search, &mut focus, "search tasks")
+            })
+            .inner;
+        let query = self.pick_search.trim().to_lowercase();
+        let candidates = self
             .items
             .iter()
             .filter(|candidate| {
                 candidate.item.id != item.item.id
-                    && candidate.item.project_id == item.item.project_id
+                    && (edit == Edit::Relation || candidate.item.project_id == item.item.project_id)
+                    && (query.is_empty() || candidate.item.title.to_lowercase().contains(&query))
             })
+            .take(6)
             .map(|candidate| (candidate.item.id.to_string(), candidate.item.title.clone()))
             .collect::<Vec<_>>();
-        if ui.button("Create child task").clicked() {
-            self.new_task_parent = Some(item.item.id.to_string());
-            self.new_task_title.clear();
-            self.new_task_open = true;
-        }
-        ui.separator();
-        if self.inspector.show_parent {
-            ui.label("Parent task");
-            if let Some(parent) = self.parent_draft.clone() {
-                let described = self.describe(&parent);
-                ui.horizontal(|ui| {
-                    ui.label(described);
-                    if ui.small_button("Remove").clicked() {
-                        self.parent_draft = None;
-                        self.save_parent();
-                    }
-                });
-            }
-            let mut show_parent_suggestions = false;
-            ui.horizontal(|ui| {
-                let search = ui.add(
-                    egui::TextEdit::singleline(&mut self.parent_search)
-                        .hint_text("Search parent tasks"),
-                );
-                show_parent_suggestions =
-                    search.hovered() || search.has_focus() || !self.parent_search.trim().is_empty();
-                if ui.button("Clear parent").clicked() {
-                    self.parent_draft = None;
-                    self.save_parent();
-                }
-            });
-            if show_parent_suggestions {
-                let parent_query = self.parent_search.to_lowercase();
-                for (id, title) in relation_candidates
-                    .iter()
-                    .filter(|(_, title)| {
-                        parent_query.is_empty() || title.to_lowercase().contains(&parent_query)
-                    })
-                    .take(5)
-                {
-                    if ui.small_button(format!("Set parent: {title}")).clicked() {
-                        self.parent_draft = Some(id.clone());
-                        self.save_parent();
-                    }
-                }
+        let mut chosen = None;
+        for (id, title) in &candidates {
+            if ui.small_button(title).clicked() {
+                chosen = Some(id.clone());
             }
         }
-        if self.inspector.show_dependencies {
-            ui.separator();
-            ui.label("Depends on (planned prerequisite)");
-            for dependency in &item.dependencies {
-                let described = self.describe(&dependency.to_string());
-                ui.horizontal(|ui| {
-                    ui.label(described);
-                    if ui.small_button("Remove").clicked() {
-                        self.toggle_dependency(dependency.to_string(), false);
-                    }
-                });
+        if outcome == Some(true) {
+            chosen = chosen.or_else(|| candidates.first().map(|(id, _)| id.clone()));
+        }
+        if outcome.is_some() || chosen.is_some() {
+            self.editing = None;
+            self.pick_search.clear();
+        }
+        let Some(target) = chosen else {
+            return;
+        };
+        match edit {
+            Edit::Parent => {
+                self.parent_draft = Some(target);
+                self.save_parent();
             }
-            let dependency_search = ui.add(
-                egui::TextEdit::singleline(&mut self.dependency_search)
-                    .hint_text("Search prerequisite tasks"),
-            );
-            if dependency_search.hovered()
-                || dependency_search.has_focus()
-                || !self.dependency_search.trim().is_empty()
+            Edit::Depends => self.toggle_dependency(target, true),
+            Edit::Blocker => self.toggle_blocker(target, true),
+            Edit::Relation => self.add_relation(target),
+            _ => {}
+        }
+    }
+
+    /// Adds the task to an existing focus sequence, or names a new one.
+    fn focus_editor(&mut self, ui: &mut egui::Ui) {
+        let mut chosen = None;
+        for sequence in &self.focus_sequences {
+            if ui
+                .small_button(format!("{} ({})", sequence.title, sequence.items.len()))
+                .clicked()
             {
-                let dependency_query = self.dependency_search.to_lowercase();
-                for (id, title) in relation_candidates
-                    .iter()
-                    .filter(|(id, title)| {
-                        !item
-                            .dependencies
-                            .iter()
-                            .any(|dependency| dependency.to_string() == *id)
-                            && (dependency_query.is_empty()
-                                || title.to_lowercase().contains(&dependency_query))
-                    })
-                    .take(5)
-                {
-                    if ui
-                        .small_button(format!("Add dependency: {title}"))
-                        .clicked()
-                    {
-                        self.toggle_dependency(id.clone(), true);
-                    }
-                }
+                chosen = Some(sequence.id.clone());
             }
         }
-        if self.inspector.show_blockers {
-            ui.separator();
-            ui.label("Blocked by (active impediment)");
-            if !item.blocked_by.is_empty() {
-                ui.colored_label(
-                    Color32::from_rgb(228, 126, 94),
-                    "This task is currently blocked.",
-                );
-            }
-            for blocker in &item.blocked_by {
-                let described = self.describe(&blocker.to_string());
-                ui.horizontal(|ui| {
-                    ui.label(described);
-                    if ui.small_button("Remove").clicked() {
-                        self.toggle_blocker(blocker.to_string(), false);
-                    }
-                });
-            }
-            let blocker_search = ui.add(
-                egui::TextEdit::singleline(&mut self.blocker_search)
-                    .hint_text("Search blocking tasks"),
-            );
-            if blocker_search.hovered()
-                || blocker_search.has_focus()
-                || !self.blocker_search.trim().is_empty()
-            {
-                let blocker_query = self.blocker_search.to_lowercase();
-                for (id, title) in relation_candidates
-                    .iter()
-                    .filter(|(id, title)| {
-                        !item
-                            .blocked_by
-                            .iter()
-                            .any(|blocker| blocker.to_string() == *id)
-                            && (blocker_query.is_empty()
-                                || title.to_lowercase().contains(&blocker_query))
-                    })
-                    .take(5)
-                {
-                    if ui
-                        .small_button(format!("Add active blocker: {title}"))
-                        .clicked()
-                    {
-                        self.toggle_blocker(id.clone(), true);
-                    }
-                }
-            }
+        let mut focus = std::mem::take(&mut self.edit_focus);
+        let outcome = ui
+            .horizontal(|ui| {
+                inspector_key(ui, "new");
+                inline_text(ui, &mut self.focus_title_draft, &mut focus, "sequence name")
+            })
+            .inner;
+        if outcome == Some(true) && !self.focus_title_draft.trim().is_empty() {
+            self.create_focus_sequence();
         }
-        if self.inspector.show_relations {
-            ui.separator();
-            ui.label("Typed relations (cross-project, never blocking)");
-            for relation in &item.relations {
-                let existing = *relation;
-                let described = self.describe(&existing.target.to_string());
-                ui.horizontal(|ui| {
-                    ui.label(format!("{} {described}", existing.relation));
-                    if ui.small_button("Remove").clicked() {
-                        self.remove_relation(existing.relation, existing.target.to_string());
-                    }
-                });
-            }
-            ui.horizontal(|ui| {
-                for relation in RelationKind::all() {
-                    if ui
-                        .selectable_label(self.relation_draft == relation, relation.to_string())
-                        .clicked()
-                    {
-                        self.relation_draft = relation;
-                    }
-                }
-            });
-            let relation_search = ui.add(
-                egui::TextEdit::singleline(&mut self.relation_search)
-                    .hint_text("Search related tasks"),
-            );
-            if relation_search.hovered()
-                || relation_search.has_focus()
-                || !self.relation_search.trim().is_empty()
-            {
-                let relation_query = self.relation_search.to_lowercase();
-                // Candidates are deliberately not filtered by project: relating across
-                // projects is the point of this edge.
-                let relation_targets = self
-                    .items
-                    .iter()
-                    .filter(|candidate| candidate.item.id != item.item.id)
-                    .filter(|candidate| {
-                        relation_query.is_empty()
-                            || candidate
-                                .item
-                                .title
-                                .to_lowercase()
-                                .contains(&relation_query)
-                    })
-                    .map(|candidate| (candidate.item.id.to_string(), candidate.item.title.clone()))
-                    .take(5)
-                    .collect::<Vec<_>>();
-                for (id, title) in relation_targets {
-                    if ui
-                        .small_button(format!("{} {title}", self.relation_draft))
-                        .clicked()
-                    {
-                        self.add_relation(id);
-                    }
-                }
-            }
+        if outcome == Some(false) {
+            self.editing = None;
         }
-        if self.inspector.show_focus_sequence {
-            ui.separator();
-            ui.label("Focus sequence");
-            ui.horizontal(|ui| {
-                ui.text_edit_singleline(&mut self.focus_title_draft);
-                if ui.button("New sequence").clicked() {
-                    self.create_focus_sequence();
-                }
-            });
-            for sequence in &self.focus_sequences {
-                if ui
-                    .selectable_label(
-                        self.selected_focus_sequence.as_deref() == Some(sequence.id.as_str()),
-                        format!("{} ({})", sequence.title, sequence.items.len()),
-                    )
-                    .clicked()
-                {
-                    self.selected_focus_sequence = Some(sequence.id.clone());
-                }
-            }
-            if self.selected_focus_sequence.is_some()
-                && ui.button("Add this task to selected sequence").clicked()
-            {
-                self.add_selected_to_focus_sequence();
-            }
+        if let Some(sequence) = chosen {
+            self.selected_focus_sequence = Some(sequence);
+            self.add_selected_to_focus_sequence();
+            self.editing = None;
         }
     }
 
@@ -2254,6 +2266,8 @@ impl TodoGui {
         match edit {
             Edit::Title => &mut self.title_draft,
             Edit::Person => &mut self.actor_draft,
+            Edit::Parent | Edit::Depends | Edit::Blocker | Edit::Relation => &mut self.pick_search,
+            Edit::Focus => &mut self.focus_title_draft,
             Edit::Due => &mut self.due_draft,
             Edit::Defer => &mut self.defer_draft,
             Edit::Scheduled => &mut self.scheduled_draft,
@@ -2270,7 +2284,7 @@ impl TodoGui {
             Edit::Scheduled => self.save_scheduled(),
             Edit::Estimate => self.save_estimate(),
             Edit::Difficulty => self.save_difficulty(),
-            Edit::Title | Edit::Person => {}
+            _ => {}
         }
     }
 
@@ -7488,7 +7502,7 @@ fn time_value(item: &StoredItem, edit: Edit, today: NaiveDate) -> Option<String>
         Edit::Scheduled => item.item.scheduled_on.map(|date| day_label(date, today)),
         Edit::Estimate => item.item.estimate_minutes.map(minutes_label),
         Edit::Difficulty => item.item.difficulty.map(|value| format!("{value} / 5")),
-        Edit::Title | Edit::Person => None,
+        _ => None,
     }
 }
 
