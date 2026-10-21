@@ -242,6 +242,43 @@ impl AgentFilter {
     }
 }
 
+/// The tabs of the Settings window, which holds how the graph looks and moves.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum SettingsTab {
+    #[default]
+    Layout,
+    Cards,
+    Families,
+    Tags,
+    Motion,
+    Colors,
+    Inspector,
+}
+
+impl SettingsTab {
+    const ALL: [Self; 7] = [
+        Self::Layout,
+        Self::Cards,
+        Self::Families,
+        Self::Tags,
+        Self::Motion,
+        Self::Colors,
+        Self::Inspector,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Layout => "Layout",
+            Self::Cards => "Cards",
+            Self::Families => "Families",
+            Self::Tags => "Tags",
+            Self::Motion => "Motion",
+            Self::Colors => "Colors",
+            Self::Inspector => "Inspector",
+        }
+    }
+}
+
 /// Roles offered in the inspector; any other role name can still be typed.
 const ROLES: [&str; 4] = [AUTHOR, CONTRIBUTOR, ASSIGNEE, REQUESTER];
 
@@ -337,6 +374,8 @@ struct TodoGui {
     search_focus: bool,
     show_filters: bool,
     show_inspector: bool,
+    show_settings: bool,
+    settings_tab: SettingsTab,
 }
 
 /// A local presentation override for one parent family. It belongs to the GUI
@@ -480,6 +519,8 @@ impl TodoGui {
             search_focus: false,
             show_filters: true,
             show_inspector: true,
+            show_settings: false,
+            settings_tab: SettingsTab::default(),
         };
         app.refresh_if_ledger_changed();
         app.theme_seen = app.theme_stamps();
@@ -561,11 +602,10 @@ impl TodoGui {
         }
     }
 
-    /// Draws the side panel: how the graph is shown, then what is shown in it.
+    /// Draws the filter drawer: what is shown, and nothing about how it looks.
     ///
-    /// View and force settings sit above the filters because they are what gets
-    /// adjusted while looking at the graph; filters answer a different question and
-    /// are reached past them.
+    /// How the graph is arranged, drawn, and moved lives in the Settings window,
+    /// so this panel answers one question.
     fn draw_filters(&mut self, ui: &mut egui::Ui) {
         // Controls such as long tag paths and relationship labels should remain
         // reachable in a narrow sidebar. Vertical scrolling handles its length;
@@ -574,23 +614,12 @@ impl TodoGui {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
-                if ui.button("Reset filters").clicked() {
-                    self.reset_filters();
-                }
-                egui::CollapsingHeader::new("View")
-                    .default_open(true)
-                    .show(ui, |ui| self.view_settings(ui));
-                egui::CollapsingHeader::new("Appearance")
-                    .default_open(false)
-                    .show(ui, |ui| self.appearance_settings(ui));
-                egui::CollapsingHeader::new("Arrangements")
-                    .default_open(true)
-                    .show(ui, |ui| self.arrangement_buttons(ui));
-                egui::CollapsingHeader::new("Forces")
-                    .default_open(false)
-                    .show(ui, |ui| self.force_settings(ui));
-                ui.separator();
-                ui.heading("Filters");
+                ui.horizontal(|ui| {
+                    ui.heading("Filter");
+                    if ui.small_button("reset").clicked() {
+                        self.reset_filters();
+                    }
+                });
                 egui::CollapsingHeader::new("Tasks shown")
                     .default_open(true)
                     .show(ui, |ui| {
@@ -654,35 +683,121 @@ impl TodoGui {
         self.message = Some("Filters restored to their defaults.".to_owned());
     }
 
-    /// The commands that rearrange the graph, beside the settings they obey.
+    /// The commands that rearrange the graph, listed in the toolbar's Layout menu.
     fn arrangement_buttons(&mut self, ui: &mut egui::Ui) {
+        // The graph rect is only known while drawing, so each request is deferred
+        // one frame rather than guessed at here.
+        if ui.button("Normalize").clicked() {
+            self.normalize_requested = true;
+        }
+        if ui.button("Focus layout").clicked() {
+            self.focus_layout_requested = true;
+        }
+        if ui.button("Group").clicked() {
+            self.group_requested = true;
+        }
+        if ui.button("Timeline").clicked() {
+            self.timeline_requested = true;
+        }
+        ui.separator();
+        if ui.button("Unstack").clicked() {
+            self.relax_requested = true;
+        }
+        if ui.button("Separate tags").clicked() {
+            self.separate_requested = true;
+        }
+        ui.separator();
+        if ui.button("Undo layout").clicked() {
+            self.undo_layout();
+        }
+    }
+
+    /// Draws the Settings window: how the graph looks and moves, in tabs, with the
+    /// theme-file actions in its footer. Changes apply live, as before.
+    fn draw_settings(&mut self, ctx: &egui::Context) {
+        let mut open = self.show_settings;
+        egui::Window::new("Settings")
+            .open(&mut open)
+            .default_width(380.0)
+            .default_height(460.0)
+            .resizable(true)
+            .show(ctx, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    for tab in SettingsTab::ALL {
+                        ui.selectable_value(&mut self.settings_tab, tab, tab.label());
+                    }
+                });
+                ui.separator();
+                egui::Panel::bottom("settings-footer").show(ui, |ui| self.settings_footer(ui));
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| match self.settings_tab {
+                        SettingsTab::Layout => self.view_settings(ui),
+                        SettingsTab::Cards => self.card_settings(ui),
+                        SettingsTab::Families => self.family_settings(ui),
+                        SettingsTab::Tags => self.tag_settings(ui),
+                        SettingsTab::Motion => self.force_settings(ui),
+                        SettingsTab::Colors => self.color_settings(ui),
+                        SettingsTab::Inspector => self.section_display_settings(ui),
+                    });
+            });
+        self.show_settings = open;
+    }
+
+    /// Save, revert, and reload for `theme.toml`, with whether anything is unsaved.
+    fn settings_footer(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
-            if ui.button("Normalize").clicked() {
-                // The graph rect is only known while drawing, so the request is
-                // deferred one frame rather than guessed at here.
-                self.normalize_requested = true;
+            if self.theme == self.theme_loaded {
+                ui.weak("theme.toml · saved");
+            } else {
+                ui.label("theme.toml · unsaved changes");
+                if ui.button("Revert").clicked() {
+                    self.theme = self.theme_loaded.clone();
+                    self.colors_applied = false;
+                }
             }
-            if ui.button("Focus layout").clicked() {
-                self.focus_layout_requested = true;
+            if ui.button("Save to theme.toml").clicked() {
+                match self.write_theme() {
+                    Ok(()) => {
+                        self.message =
+                            Some(format!("Theme saved to {}", self.theme_path.display()));
+                    }
+                    Err(error) => self.message = Some(format!("Theme not saved: {error:#}")),
+                }
             }
-            if ui.button("Group").clicked() {
-                self.group_requested = true;
-            }
-            if ui.button("Timeline").clicked() {
-                self.timeline_requested = true;
+            if ui.button("Reload from disk").clicked() {
+                self.reload_theme();
             }
         });
-        ui.horizontal_wrapped(|ui| {
-            if ui.button("Unstack").clicked() {
-                self.relax_requested = true;
-            }
-            if ui.button("Separate tags").clicked() {
-                self.separate_requested = true;
-            }
-            if ui.button("Undo layout").clicked() {
-                self.undo_layout();
+    }
+
+    /// Color mode and the terminal palette the surfaces borrow from.
+    fn color_settings(&mut self, ui: &mut egui::Ui) {
+        ui.label("Mode");
+        ui.horizontal(|ui| {
+            for (mode, label) in [
+                (ColorMode::Dark, "Dark"),
+                (ColorMode::Light, "Light"),
+                (ColorMode::System, "System"),
+            ] {
+                if ui
+                    .selectable_value(&mut self.theme.colors.mode, mode, label)
+                    .changed()
+                {
+                    self.colors_applied = false;
+                }
             }
         });
+        ui.label("Palette file (Ghostty format)");
+        let palette = ui.add(
+            egui::TextEdit::singleline(&mut self.theme.colors.palette_file)
+                .hint_text("~/.config/ghostty/themes/…"),
+        );
+        if palette.lost_focus() {
+            self.colors_applied = false;
+            self.theme_seen = self.theme_stamps();
+        }
+        ui.weak("Restyles panels and canvas; card colors stay with tags and status.");
     }
 
     /// Modes and arrangement settings, the ones reached for while looking.
@@ -773,9 +888,9 @@ impl TodoGui {
         );
     }
 
-    /// Collects presentation controls in one place; layout behavior remains View.
-    fn appearance_settings(&mut self, ui: &mut egui::Ui) {
-        ui.label("Task cards");
+    /// How each task card is drawn.
+    fn card_settings(&mut self, ui: &mut egui::Ui) {
+        ui.label("Shape");
         ui.horizontal(|ui| {
             ui.selectable_value(
                 &mut self.theme.node.shape,
@@ -796,7 +911,14 @@ impl TodoGui {
                 "Hide them completely",
             );
         });
-        ui.separator();
+        ui.checkbox(
+            &mut self.theme.edge.scale_arrowheads_with_zoom,
+            "Scale arrowheads with zoom",
+        );
+    }
+
+    /// How tag regions are shaped, colored, and linked.
+    fn tag_settings(&mut self, ui: &mut egui::Ui) {
         ui.label("Tag clouds");
         ui.horizontal(|ui| {
             ui.selectable_value(
@@ -884,7 +1006,10 @@ impl TodoGui {
         ui.add_enabled_ui(self.theme.tag.cloud_cut_out_unrelated, |ui| {
             ui.checkbox(&mut self.theme.tag.cloud_cutout_outline, "Outline cutouts");
         });
-        ui.separator();
+    }
+
+    /// How parent tasks hold and connect their children.
+    fn family_settings(&mut self, ui: &mut egui::Ui) {
         ui.label("Task families");
         egui::ComboBox::from_id_salt("family-header-style")
             .selected_text(match self.theme.parent.header_style {
@@ -979,12 +1104,6 @@ impl TodoGui {
                 "Family casing",
             );
         });
-        ui.separator();
-        ui.checkbox(&mut self.theme.layout.animate, "Glide to new positions");
-        ui.checkbox(
-            &mut self.theme.edge.scale_arrowheads_with_zoom,
-            "Scale arrowheads with zoom",
-        );
     }
 
     /// The forces that arrange the graph, adjustable while watching them work.
@@ -1033,23 +1152,12 @@ impl TodoGui {
             egui::Slider::new(&mut self.theme.layout.separation_iterations, 1..=60).text("Passes"),
         );
         ui.separator();
-        ui.label("Motion");
+        ui.label("Glide");
+        ui.checkbox(&mut self.theme.layout.animate, "Glide to new positions");
         ui.add(
             egui::Slider::new(&mut self.theme.layout.transition_ms, 0.0..=1500.0)
                 .text("Glide milliseconds"),
         );
-        ui.separator();
-        if ui.button("Save to theme.toml").clicked() {
-            match self.write_theme() {
-                Ok(()) => {
-                    self.message = Some(format!("Theme saved to {}", self.theme_path.display()));
-                }
-                Err(error) => self.message = Some(format!("Theme not saved: {error:#}")),
-            }
-        }
-        if ui.button("Reload from theme.toml").clicked() {
-            self.reload_theme();
-        }
     }
 
     /// Draws the tag tree, where each tag cycles neutral, only, then hidden.
@@ -1222,9 +1330,6 @@ impl TodoGui {
                 egui::CollapsingHeader::new("Advanced / raw editing")
                     .default_open(self.inspector.open_advanced)
                     .show(ui, |ui| self.section_advanced(ui));
-                egui::CollapsingHeader::new("Visible fields")
-                    .default_open(false)
-                    .show(ui, |ui| self.section_display_settings(ui));
                 if let Some(message) = self.message.clone() {
                     ui.separator();
                     ui.label(message);
@@ -3803,6 +3908,7 @@ impl eframe::App for TodoGui {
                     // have claimed their space, so framing is deferred to canvas draw.
                     self.reset_view_requested = true;
                 }
+                ui.menu_button("Layout ▾", |ui| self.arrangement_buttons(ui));
                 ui.separator();
                 if ui.button("Reload theme").clicked() {
                     self.reload_theme();
@@ -3813,6 +3919,7 @@ impl eframe::App for TodoGui {
                 ui.separator();
                 ui.toggle_value(&mut self.show_filters, "Filters");
                 ui.toggle_value(&mut self.show_inspector, "Inspector");
+                ui.toggle_value(&mut self.show_settings, "⚙");
                 ui.separator();
                 ui.label("Search");
                 let search = ui.add(
@@ -3869,6 +3976,9 @@ impl eframe::App for TodoGui {
                         }
                     });
                 });
+        }
+        if self.show_settings {
+            self.draw_settings(ui.ctx());
         }
         if self.show_filters {
             egui::Panel::left("filters")
