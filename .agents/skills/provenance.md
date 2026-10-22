@@ -63,6 +63,9 @@ is not a skill and should not be loaded as a procedure.
 - Skill: `todo-ledger/SKILL.md`
 - Source: written 2026-10-14 by agent-assistant in `todo_app_project`
   (ledger item `zitun-funiv`), against `todo` CLI v0.3.0, protocol v13.
+- Revised 2026-10-21 by agent-assistant for protocol v15: agent signatures
+  (`todo whoami`, `TODO_AGENT`), `--agent` filtering, typed entry words, and
+  actor records.
 - Review boundary: command names and flags track the `todo` CLI; re-check them
   against `todo --help` when the CLI changes. `todo sync` is an external Git
   push and stays behind explicit approval.
