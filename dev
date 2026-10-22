@@ -44,13 +44,14 @@ case "$command" in
     nix develop --command cargo run -p todo-gui
     ;;
   install)
-    # A second `nix profile install` adds a duplicate entry, so upgrade in place.
+    # Replace rather than upgrade: an upgrade refetches from the path recorded at
+    # install time, which breaks once the checkout moves. A second install
+    # without the remove would add a duplicate entry.
     # grep -q would exit early and make nix report a broken pipe.
     if nix profile list | grep -E '^Name:[[:space:]]+todo$' >/dev/null; then
-      nix profile upgrade todo
-    else
-      nix profile install .#todo
+      nix profile remove todo
     fi
+    nix profile install .#todo
     # The Cargo bin directory precedes the Nix profile on PATH, so older
     # `cargo install` copies of todo or todo-gui would shadow the profile ones.
     if [ -x "${CARGO_HOME:-$HOME/.cargo}/bin/todo" ]; then
