@@ -208,6 +208,8 @@ transitive-proximity rule needs to change.
   first visible match; subsequent Enter or Next steps forward, while Shift+Enter
   or Prev steps backward. Navigation starts only after Enter. Info's Center
   button centers the selected card without changing zoom or its saved position.
+  A nonempty query temporarily reveals matching cards and their ancestor paths
+  even inside hidden families; clearing it restores the prior family visibility.
 - Both sidebars collapse from the toolbar.
 - The centered **New task** window accepts a name, an optional existing parent
   and one new child, person with role, due date, tag, and note. **Save** closes
@@ -271,11 +273,12 @@ Deletion is deliberately absent from the editor. `todo rm --force` and
   board; the family tree continues to its actual card instead. A forced Box
   draws the complete span. A short stalk attaches a detached parent card to
   a genuine nearby child outline.
-- Every parent has a small **Hide / Show** control at its child-side edge, and
-  the same action in its context menu. Hide removes inactive descendants even
-  when child depth is All; active-task paths remain visible. Hiding a branch
-  containing the selected card selects its parent. Show reveals the whole branch
-  past the global depth cap, including nested explicitly hidden families.
+- Every parent has a small **- / +** control at its child-side edge. **-**
+  hides inactive descendants even when child depth is All; active-task paths
+  remain visible. Its context menu also offers **- all**, which hides active
+  descendants too. Hiding a branch containing the selected card selects its
+  parent. **+** reveals the whole branch past the global depth cap, including
+  nested explicitly hidden families.
   Right-click also offers **Family display → Box / Tree**; that display
   choice is separate from visibility.
 - G over empty graph canvas normalizes the visible graph. G over a card, or its

@@ -392,6 +392,7 @@ enum AfterSave {
 enum FamilyVisibility {
     Show,
     Hide,
+    HideAll,
 }
 
 struct TodoGui {
@@ -425,6 +426,7 @@ struct TodoGui {
     show_parent_regions: bool,
     expanded_families: std::collections::HashSet<String>,
     collapsed_families: std::collections::HashSet<String>,
+    collapsed_all_families: std::collections::HashSet<String>,
     family_presentations: HashMap<String, FamilyPresentation>,
     show_relations: bool,
     relation_draft: RelationKind,
@@ -543,6 +545,7 @@ struct LayoutUndo {
     offsets: HashMap<String, Vec2>,
     expanded_families: std::collections::HashSet<String>,
     collapsed_families: std::collections::HashSet<String>,
+    collapsed_all_families: std::collections::HashSet<String>,
 }
 
 impl TodoGui {
@@ -595,6 +598,7 @@ impl TodoGui {
             show_parent_regions: true,
             expanded_families: std::collections::HashSet::new(),
             collapsed_families: std::collections::HashSet::new(),
+            collapsed_all_families: std::collections::HashSet::new(),
             family_presentations: saved_layout.family_presentations,
             show_relations: true,
             relation_draft: RelationKind::ContributesTo,
@@ -839,6 +843,7 @@ impl TodoGui {
         self.tag_states.clear();
         self.search.clear();
         self.search_navigation_active = false;
+        self.keep_selection_visible();
         self.message = Some("Filters restored to their defaults.".to_owned());
     }
 
@@ -908,6 +913,7 @@ impl TodoGui {
             FilterChip::Search => {
                 self.search.clear();
                 self.search_navigation_active = false;
+                self.keep_selection_visible();
             }
             FilterChip::Lines => {
                 self.show_parent_graph = true;
@@ -1116,7 +1122,7 @@ impl TodoGui {
                     );
                 }
             });
-        ui.weak("Collapsed branches show an expand control; active paths stay visible.");
+        ui.weak("- keeps active paths visible; - all hides every descendant.");
         ui.separator();
         ui.label("Group by, in order");
         for level in 0..3 {
@@ -3181,6 +3187,7 @@ impl TodoGui {
         self.remember_layout();
         self.expanded_families.insert(root.clone());
         self.collapsed_families.remove(&root);
+        self.collapsed_all_families.remove(&root);
         let items = self.visible_items();
         self.rebase_visible_offsets(&before, &items, rect);
         let children = items
@@ -3386,6 +3393,7 @@ impl TodoGui {
             offsets: self.node_offsets.clone(),
             expanded_families: self.expanded_families.clone(),
             collapsed_families: self.collapsed_families.clone(),
+            collapsed_all_families: self.collapsed_all_families.clone(),
         });
     }
 
@@ -3420,11 +3428,18 @@ impl TodoGui {
             FamilyVisibility::Show => {
                 self.collapsed_families
                     .retain(|hidden| !descendants.contains(hidden));
+                self.collapsed_all_families
+                    .retain(|hidden| !descendants.contains(hidden));
                 self.expanded_families.insert(id.to_owned());
             }
-            FamilyVisibility::Hide => {
+            FamilyVisibility::Hide | FamilyVisibility::HideAll => {
                 self.expanded_families.remove(id);
                 self.collapsed_families.insert(id.to_owned());
+                if visibility == FamilyVisibility::HideAll {
+                    self.collapsed_all_families.insert(id.to_owned());
+                } else {
+                    self.collapsed_all_families.remove(id);
+                }
                 if self
                     .selected
                     .as_ref()
@@ -3446,6 +3461,7 @@ impl TodoGui {
                 self.node_offsets = previous.offsets;
                 self.expanded_families = previous.expanded_families;
                 self.collapsed_families = previous.collapsed_families;
+                self.collapsed_all_families = previous.collapsed_all_families;
                 self.timeline_origin = None;
                 self.save_layout();
                 self.message = Some("Previous layout restored.".to_owned());
@@ -3490,6 +3506,40 @@ impl TodoGui {
         self.center_requested = Some(next);
     }
 
+    /// A temporary search reveal must not leave selection on an invisible card
+    /// after the query changes or clears. Prefer its nearest visible ancestor.
+    fn keep_selection_visible(&mut self) {
+        let Some(selected) = self.selected.clone() else {
+            return;
+        };
+        let visible = self
+            .visible_items()
+            .into_iter()
+            .map(|item| item.item.id.to_string())
+            .collect::<std::collections::HashSet<_>>();
+        if visible.contains(&selected) {
+            return;
+        }
+        let parents = self
+            .filtered_items()
+            .into_iter()
+            .filter_map(|item| Some((item.item.id.to_string(), item.item.parent_id?.to_string())))
+            .collect::<HashMap<_, _>>();
+        let mut cursor = selected;
+        let mut seen = std::collections::HashSet::new();
+        while let Some(parent) = parents.get(&cursor) {
+            if !seen.insert(parent.clone()) {
+                break;
+            }
+            if visible.contains(parent) {
+                self.select(parent.clone());
+                return;
+            }
+            cursor = parent.clone();
+        }
+        self.selected = None;
+    }
+
     /// Centers a visible card without changing zoom or its saved graph position.
     fn center_card(&mut self, rect: Rect, id: &str) {
         let items = self.visible_items();
@@ -3508,12 +3558,24 @@ impl TodoGui {
     /// Returns the items the graph is currently drawing: the explicit filters,
     /// then the child-depth collapse that hides distant descendants.
     fn visible_items(&self) -> Vec<StoredItem> {
+        let eligible = self.filtered_items();
+        let search_matches = if self.search.trim().is_empty() {
+            std::collections::HashSet::new()
+        } else {
+            eligible
+                .iter()
+                .filter(|item| self.search_matches(item))
+                .map(|item| item.item.id.to_string())
+                .collect()
+        };
         limit_child_depth(
-            self.filtered_items(),
+            eligible,
             self.theme.parent.child_depth,
             &self.expanded_families,
             &self.collapsed_families,
+            &self.collapsed_all_families,
             self.selected.as_deref(),
+            &search_matches,
         )
     }
 
@@ -4652,6 +4714,7 @@ impl eframe::App for TodoGui {
         if ui.input(|input| input.key_pressed(egui::Key::Escape)) && !self.search.is_empty() {
             self.search.clear();
             self.search_navigation_active = false;
+            self.keep_selection_visible();
         }
         // F, comma, and I open the filter drawer, Settings, and the inspector.
         if !ui.ctx().egui_wants_keyboard_input() {
@@ -4724,6 +4787,7 @@ impl eframe::App for TodoGui {
                 }
                 if search.changed() {
                     self.search_navigation_active = false;
+                    self.keep_selection_visible();
                 }
                 if enter_search_from_canvas
                     || ((search.has_focus() || search.lost_focus())
@@ -5349,22 +5413,16 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
         let family_hidden = hidden > 0 || app.collapsed_families.contains(&id);
         response.context_menu(|ui| {
             if descendants > 0 {
-                let label = if family_hidden {
-                    if hidden > 0 {
-                        format!("Show descendants ({hidden} hidden)")
-                    } else {
-                        "Show descendants".to_owned()
-                    }
-                } else {
-                    "Hide descendants".to_owned()
-                };
-                if ui.button(label).clicked() {
-                    let visibility = if family_hidden {
-                        FamilyVisibility::Show
-                    } else {
-                        FamilyVisibility::Hide
-                    };
-                    app.set_family_visibility(&id, visibility, rect);
+                if family_hidden && ui.button("+ Show descendants").clicked() {
+                    app.set_family_visibility(&id, FamilyVisibility::Show, rect);
+                    ui.close();
+                }
+                if ui.button("- Hide inactive descendants").clicked() {
+                    app.set_family_visibility(&id, FamilyVisibility::Hide, rect);
+                    ui.close();
+                }
+                if ui.button("- all Hide every descendant").clicked() {
+                    app.set_family_visibility(&id, FamilyVisibility::HideAll, rect);
                     ui.close();
                 }
                 ui.separator();
@@ -5581,7 +5639,7 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
                 node.center_bottom() + Vec2::new(0.0, 5.0),
                 Vec2::new(44.0, 16.0),
             );
-            let label = if family_hidden { "Show" } else { "Hide" };
+            let label = if family_hidden { "+" } else { "-" };
             let tooltip = if family_hidden {
                 if hidden > 0 {
                     format!("Show {hidden} hidden task(s) in this family")
@@ -6393,17 +6451,19 @@ fn family_visibility_counts(
     counts
 }
 
-/// Collapses only the view, preserving active and selected ancestor paths.
-/// Explicitly hidden parents outrank the global cap and expansion, while active
-/// paths remain visible so a collapsed family cannot silently bury live work.
+/// Collapses only the view. A normal hide keeps active paths, an all-hide does
+/// not, and matching search paths temporarily outrank either choice. Selection
+/// can override only the global depth cap; it cannot undo an explicit hide.
 fn limit_child_depth(
     eligible: Vec<StoredItem>,
     limit: usize,
     expanded: &std::collections::HashSet<String>,
     collapsed: &std::collections::HashSet<String>,
+    collapsed_all: &std::collections::HashSet<String>,
     selected: Option<&str>,
+    search_matches: &std::collections::HashSet<String>,
 ) -> Vec<StoredItem> {
-    if limit == 0 && collapsed.is_empty() {
+    if limit == 0 && collapsed.is_empty() && collapsed_all.is_empty() {
         return eligible;
     }
     let present = eligible
@@ -6419,31 +6479,48 @@ fn limit_child_depth(
                 .then(|| (item.item.id.to_string(), parent))
         })
         .collect::<HashMap<_, _>>();
-    let mut revealed = std::collections::HashSet::new();
+    let mut active_revealed = std::collections::HashSet::new();
+    let mut selected_revealed = std::collections::HashSet::new();
+    let mut search_revealed = std::collections::HashSet::new();
     for item in &eligible {
         let id = item.item.id.to_string();
-        if item.item.state != ItemState::Active && selected != Some(id.as_str()) {
-            continue;
+        if search_matches.contains(&id) {
+            let mut cursor = id.clone();
+            while search_revealed.insert(cursor.clone()) {
+                let Some(parent) = parent_of.get(&cursor) else {
+                    break;
+                };
+                cursor = parent.clone();
+            }
         }
-        let mut cursor = id;
-        while revealed.insert(cursor.clone()) {
-            let Some(parent) = parent_of.get(&cursor) else {
-                break;
-            };
-            cursor = parent.clone();
+        for revealed in [
+            (item.item.state == ItemState::Active).then_some(&mut active_revealed),
+            (selected == Some(id.as_str())).then_some(&mut selected_revealed),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let mut cursor = id.clone();
+            while revealed.insert(cursor.clone()) {
+                let Some(parent) = parent_of.get(&cursor) else {
+                    break;
+                };
+                cursor = parent.clone();
+            }
         }
     }
     eligible
         .into_iter()
         .filter(|item| {
             let id = item.item.id.to_string();
-            if revealed.contains(&id) {
+            if search_revealed.contains(&id) {
                 return true;
             }
             let mut cursor = id;
             let mut depth = 0;
             let mut within_expanded = false;
             let mut within_collapsed = false;
+            let mut within_collapsed_all = false;
             let mut seen = std::collections::HashSet::new();
             while let Some(parent) = parent_of.get(&cursor) {
                 if !seen.insert(cursor.clone()) {
@@ -6454,9 +6531,16 @@ fn limit_child_depth(
                     within_expanded = true;
                 }
                 within_collapsed |= collapsed.contains(parent);
+                within_collapsed_all |= collapsed_all.contains(parent);
                 cursor = parent.clone();
             }
-            !within_collapsed && (within_expanded || limit == 0 || depth <= limit)
+            !within_collapsed_all
+                && (active_revealed.contains(&item.item.id.to_string())
+                    || (!within_collapsed
+                        && (selected_revealed.contains(&item.item.id.to_string())
+                            || within_expanded
+                            || limit == 0
+                            || depth <= limit)))
         })
         .collect()
 }
@@ -8608,7 +8692,9 @@ mod tests {
             1,
             &HashSet::new(),
             &HashSet::new(),
+            &HashSet::new(),
             None,
+            &HashSet::new(),
         ));
         assert!(collapsed.contains(&"task 4".to_owned()));
         assert!(!collapsed.contains(&"task 3".to_owned()));
@@ -8618,7 +8704,9 @@ mod tests {
             1,
             &HashSet::from([root]),
             &HashSet::new(),
+            &HashSet::new(),
             None,
+            &HashSet::new(),
         ));
         assert_eq!(expanded.len(), items.len());
         assert_eq!(
@@ -8627,7 +8715,9 @@ mod tests {
                 0,
                 &HashSet::new(),
                 &HashSet::new(),
+                &HashSet::new(),
                 None,
+                &HashSet::new(),
             ))
             .len(),
             items.len()
@@ -8650,7 +8740,9 @@ mod tests {
             0,
             &HashSet::from([root]),
             &HashSet::from([parent.clone()]),
+            &HashSet::new(),
             None,
+            &HashSet::new(),
         );
         assert_eq!(shown.len(), 3);
         assert!(
@@ -8663,9 +8755,78 @@ mod tests {
             0,
             &HashSet::new(),
             &HashSet::from([parent]),
+            &HashSet::new(),
             Some(&inactive),
+            &HashSet::new(),
         );
-        assert_eq!(selected.len(), 4);
+        assert_eq!(selected.len(), 3);
+    }
+
+    #[test]
+    fn hide_all_removes_active_descendants_and_their_ancestor_path() {
+        let items = vec![
+            task("1", None, ItemState::Inbox),
+            task("2", Some("1"), ItemState::Inbox),
+            task("3", Some("2"), ItemState::Active),
+        ];
+        let root = items.first().map(|item| item.item.id.to_string()).unwrap();
+        let shown = limit_child_depth(
+            items,
+            0,
+            &HashSet::new(),
+            &HashSet::from([root.clone()]),
+            &HashSet::from([root.clone()]),
+            None,
+            &HashSet::new(),
+        );
+        assert_eq!(shown.len(), 1);
+        assert_eq!(
+            shown.first().map(|item| item.item.id.to_string()),
+            Some(root)
+        );
+    }
+
+    #[test]
+    fn search_reveals_hidden_matches_and_paths_only_while_query_is_present() {
+        let items = vec![
+            task("1", None, ItemState::Inbox),
+            task("2", Some("1"), ItemState::Inbox),
+            task("3", Some("2"), ItemState::Active),
+            task("4", Some("2"), ItemState::Inbox),
+        ];
+        let root = items.first().map(|item| item.item.id.to_string()).unwrap();
+        let target = items.get(3).map(|item| item.item.id.to_string()).unwrap();
+        let collapsed = HashSet::from([root.clone()]);
+        let hidden = limit_child_depth(
+            items.clone(),
+            0,
+            &HashSet::new(),
+            &collapsed,
+            &collapsed,
+            None,
+            &HashSet::new(),
+        );
+        assert_eq!(hidden.len(), 1);
+        let revealed = limit_child_depth(
+            items,
+            0,
+            &HashSet::new(),
+            &collapsed,
+            &collapsed,
+            None,
+            &HashSet::from([target.clone()]),
+        );
+        assert_eq!(revealed.len(), 3);
+        assert!(
+            revealed
+                .iter()
+                .any(|item| item.item.id.to_string() == target)
+        );
+        assert!(
+            !revealed
+                .iter()
+                .any(|item| item.item.state == ItemState::Active)
+        );
     }
 
     #[test]
