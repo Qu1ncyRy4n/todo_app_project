@@ -395,7 +395,7 @@ enum FamilyVisibility {
     HideAll,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum NormalizeScope {
     Graph,
     Family(String),
@@ -405,6 +405,11 @@ struct ExpansionRestore {
     expanded_families: std::collections::HashSet<String>,
     collapsed_families: std::collections::HashSet<String>,
     collapsed_all_families: std::collections::HashSet<String>,
+}
+
+struct CPress {
+    at: std::time::Instant,
+    scope: NormalizeScope,
 }
 
 impl ExpansionRestore {
@@ -503,6 +508,7 @@ struct TodoGui {
     layout_undo: Option<LayoutUndo>,
     normalize_requested: bool,
     expansion_restore: Option<ExpansionRestore>,
+    last_c_press: Option<CPress>,
     reset_view_requested: bool,
     focus_layout_requested: bool,
     separate_requested: bool,
@@ -669,6 +675,7 @@ impl TodoGui {
             layout_undo: None,
             normalize_requested: false,
             expansion_restore: None,
+            last_c_press: None,
             reset_view_requested: false,
             focus_layout_requested: false,
             separate_requested: false,
@@ -3536,34 +3543,61 @@ impl TodoGui {
     }
 
     fn set_family_visibility(&mut self, id: &str, visibility: FamilyVisibility, rect: Rect) {
+        self.set_families_visibility(&[id.to_owned()], visibility, rect);
+    }
+
+    fn contract_scope(&mut self, scope: &NormalizeScope, all: bool, rect: Rect) {
+        let targets = contraction_targets(&self.filtered_items(), scope);
+        let visibility = if all {
+            FamilyVisibility::HideAll
+        } else {
+            FamilyVisibility::Hide
+        };
+        self.set_families_visibility(&targets, visibility, rect);
+    }
+
+    /// A graph-wide contraction is one undoable view action, not one action per
+    /// family; rebasing once preserves positions of all retained cards.
+    fn set_families_visibility(
+        &mut self,
+        ids: &[String],
+        visibility: FamilyVisibility,
+        rect: Rect,
+    ) {
+        if ids.is_empty() {
+            return;
+        }
         let before = self.visible_items();
         self.expansion_restore = None;
         self.remember_layout();
-        let descendants = collect_subtree(id, &child_index(&self.filtered_items()))
-            .into_iter()
-            .collect::<std::collections::HashSet<_>>();
-        match visibility {
-            FamilyVisibility::Show => {
-                self.collapsed_families
-                    .retain(|hidden| !descendants.contains(hidden));
-                self.collapsed_all_families
-                    .retain(|hidden| !descendants.contains(hidden));
-                self.expanded_families.insert(id.to_owned());
-            }
-            FamilyVisibility::Hide | FamilyVisibility::HideAll => {
-                self.expanded_families.remove(id);
-                self.collapsed_families.insert(id.to_owned());
-                if visibility == FamilyVisibility::HideAll {
-                    self.collapsed_all_families.insert(id.to_owned());
-                } else {
-                    self.collapsed_all_families.remove(id);
+        let children = child_index(&self.filtered_items());
+        for id in ids {
+            let descendants = collect_subtree(id, &children)
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>();
+            match visibility {
+                FamilyVisibility::Show => {
+                    self.collapsed_families
+                        .retain(|hidden| !descendants.contains(hidden));
+                    self.collapsed_all_families
+                        .retain(|hidden| !descendants.contains(hidden));
+                    self.expanded_families.insert(id.clone());
                 }
-                if self
-                    .selected
-                    .as_ref()
-                    .is_some_and(|selected| selected != id && descendants.contains(selected))
-                {
-                    self.select(id.to_owned());
+                FamilyVisibility::Hide | FamilyVisibility::HideAll => {
+                    self.expanded_families.remove(id);
+                    self.collapsed_families.insert(id.clone());
+                    if visibility == FamilyVisibility::HideAll {
+                        self.collapsed_all_families.insert(id.clone());
+                    } else {
+                        self.collapsed_all_families.remove(id);
+                    }
+                    if self
+                        .selected
+                        .as_ref()
+                        .is_some_and(|selected| selected != id && descendants.contains(selected))
+                    {
+                        self.select(id.clone());
+                    }
                 }
             }
         }
@@ -5846,8 +5880,8 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
     if let Some(id) = clicked {
         app.select(id);
     }
-    let (normalize_pressed, expand_pressed) = if ui.ctx().egui_wants_keyboard_input() {
-        (false, false)
+    let (normalize_pressed, expand_pressed, c_presses) = if ui.ctx().egui_wants_keyboard_input() {
+        (false, false, 0)
     } else {
         ui.input(|input| {
             let plain_key =
@@ -5855,10 +5889,23 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
             (
                 plain_key && input.key_pressed(egui::Key::G),
                 plain_key && input.key_pressed(egui::Key::E),
+                input
+                    .events
+                    .iter()
+                    .filter(|event| {
+                        matches!(event, egui::Event::Key {
+                            key: egui::Key::C,
+                            pressed: true,
+                            repeat: false,
+                            modifiers,
+                            ..
+                        } if !modifiers.command && !modifiers.alt && !modifiers.ctrl)
+                    })
+                    .count(),
             )
         })
     };
-    if (normalize_pressed || expand_pressed)
+    if (normalize_pressed || expand_pressed || c_presses > 0)
         && let Some(pointer) = ui.input(|input| input.pointer.hover_pos())
         && rect.contains(pointer)
     {
@@ -5869,11 +5916,32 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
                 NormalizeScope::Family(id.clone())
             });
         if normalize_pressed {
+            app.last_c_press = None;
             app.normalize_scope(rect, &scope);
         }
         if expand_pressed {
+            app.last_c_press = None;
             app.toggle_scope_expansion(rect, &scope);
         }
+        for _ in 0..c_presses {
+            let now = std::time::Instant::now();
+            let prior = app.last_c_press.take();
+            if c_chord_is_double(prior.as_ref(), now) {
+                // The first collapse can change the card under the pointer.
+                // Complete the chord against its original scope.
+                if let Some(prior) = prior {
+                    app.contract_scope(&prior.scope, true, rect);
+                }
+            } else {
+                app.contract_scope(&scope, false, rect);
+                app.last_c_press = Some(CPress {
+                    at: now,
+                    scope: scope.clone(),
+                });
+            }
+        }
+    } else if c_presses > 0 || normalize_pressed || expand_pressed {
+        app.last_c_press = None;
     }
     if response.clicked() {
         app.drag_anchor = None;
@@ -6599,6 +6667,47 @@ fn expand_family_sets(
         }
     }
     true
+}
+
+/// A card contracts its own descendants; empty canvas contracts the roots of
+/// every eligible tree so unrelated families are changed together.
+fn contraction_targets(eligible: &[StoredItem], scope: &NormalizeScope) -> Vec<String> {
+    let children = child_index(eligible);
+    match scope {
+        NormalizeScope::Family(id) => {
+            if children.contains_key(id) {
+                vec![id.clone()]
+            } else {
+                Vec::new()
+            }
+        }
+        NormalizeScope::Graph => {
+            let present = eligible
+                .iter()
+                .map(|item| item.item.id.to_string())
+                .collect::<std::collections::HashSet<_>>();
+            let mut roots = eligible
+                .iter()
+                .filter(|item| {
+                    let id = item.item.id.to_string();
+                    children.contains_key(&id)
+                        && item
+                            .item
+                            .parent_id
+                            .is_none_or(|parent| !present.contains(&parent.to_string()))
+                })
+                .map(|item| item.item.id.to_string())
+                .collect::<Vec<_>>();
+            roots.sort();
+            roots
+        }
+    }
+}
+
+fn c_chord_is_double(prior: Option<&CPress>, now: std::time::Instant) -> bool {
+    prior.is_some_and(|press| {
+        now.saturating_duration_since(press.at) <= std::time::Duration::from_millis(500)
+    })
 }
 
 /// Counts all eligible descendants and the subset hidden by the graph view.
@@ -8647,17 +8756,19 @@ fn short_title(title: &str) -> String {
 )]
 mod tests {
     use super::{
-        AgentFilter, Channel, ExpansionRestore, FamilyPresentation, FilterChip, GroupBy,
+        AgentFilter, CPress, Channel, ExpansionRestore, FamilyPresentation, FilterChip, GroupBy,
         LedgerAccess, LocalGraphLayout, NormalizeScope, Runtime, TagCloudLinkMode, TodoGui,
-        ancestor_depth, ancestor_depth_index, collect_subtree, compare_group_labels,
-        connected_family_root, expand_family_sets, fallback_tag_colors, family_box,
-        family_control_rect, family_cycle_step, family_dependency_bands, family_ring_mesh,
-        family_tree_geometry, family_visibility_counts, file_stamp, focus_is_active,
-        graph_needs_weights, graph_positions, hierarchy_levels, limit_child_depth, matches_query,
-        node_meta, rebase_offsets_for_rect, search_step, segment_outside_rect, tag_cloud_links,
+        ancestor_depth, ancestor_depth_index, c_chord_is_double, collect_subtree,
+        compare_group_labels, connected_family_root, contraction_targets, expand_family_sets,
+        fallback_tag_colors, family_box, family_control_rect, family_cycle_step,
+        family_dependency_bands, family_ring_mesh, family_tree_geometry, family_visibility_counts,
+        file_stamp, focus_is_active, graph_needs_weights, graph_positions, hierarchy_levels,
+        limit_child_depth, matches_query, node_meta, rebase_offsets_for_rect, search_step,
+        segment_outside_rect, tag_cloud_links,
     };
     use eframe::egui::{Color32, Pos2, Rect, pos2, vec2};
     use std::collections::{HashMap, HashSet};
+    use std::time::{Duration, Instant};
     use todo_core::{ItemState, Priority};
     use todo_store::StoredItem;
 
@@ -9121,6 +9232,50 @@ mod tests {
             family_cycle_step(false, false),
             ("+", super::FamilyVisibility::Hide)
         );
+    }
+
+    #[test]
+    fn c_chord_keeps_its_initial_scope_and_contracts_only_eligible_roots() {
+        let items = vec![
+            task("1", None, ItemState::Inbox),
+            task("2", Some("1"), ItemState::Inbox),
+            task("3", Some("2"), ItemState::Inbox),
+            task("4", None, ItemState::Inbox),
+            task("5", Some("4"), ItemState::Inbox),
+        ];
+        let id = |index: usize| {
+            items
+                .get(index)
+                .map(|item| item.item.id.to_string())
+                .unwrap()
+        };
+        let root = id(0);
+        let child = id(1);
+        let leaf = id(2);
+        let other = id(3);
+        assert_eq!(
+            contraction_targets(&items, &NormalizeScope::Graph),
+            vec![root, other]
+        );
+        assert_eq!(
+            contraction_targets(&items, &NormalizeScope::Family(child.clone())),
+            vec![child.clone()]
+        );
+        assert!(contraction_targets(&items, &NormalizeScope::Family(leaf)).is_empty());
+        let now = Instant::now();
+        let first = CPress {
+            at: now,
+            scope: NormalizeScope::Family(child.clone()),
+        };
+        assert!(c_chord_is_double(
+            Some(&first),
+            now + Duration::from_millis(450)
+        ));
+        assert!(!c_chord_is_double(
+            Some(&first),
+            now + Duration::from_millis(501)
+        ));
+        assert_eq!(first.scope, NormalizeScope::Family(child));
     }
 
     #[test]

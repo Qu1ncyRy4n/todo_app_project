@@ -286,7 +286,9 @@ Deletion is deliberately absent from the editor. `todo rm --force` and
   leaves unrelated families in place. There is no `gg` chord. E over a card
   expands its connected family; E over empty canvas expands all eligible
   families. The next E restores the exact preceding family visibility, and
-  Undo layout also reverses either E action. Focus
+  Undo layout also reverses either E action. C collapses inactive descendants
+  under the pointer, or all eligible trees from empty canvas; a second C within
+  half a second fully collapses the same scope, including active paths. Focus
   separates wrapped active rows, places active-holding parents with them, and
   omits spanning family fills.
 - Cloud fills are pre-blended once against the active canvas and drawn opaque, so
@@ -542,6 +544,8 @@ what to check there first:
 - `G` over a card versus empty canvas; verify a second `G` has no special
   chord behavior. `E` expands the hovered family or all from empty canvas;
   another `E` restores the prior visibility, and Undo reverses either action;
+  `C` then a quick second `C` collapses inactive then all descendants in the
+  original scope, even if the first press changes the card under the pointer;
 - whether a family band now reads as a border at every parent-to-child distance,
   which is the TE-0015 image 9 case;
 - the dashed boundary on an open family, which appears only mid-drag;
