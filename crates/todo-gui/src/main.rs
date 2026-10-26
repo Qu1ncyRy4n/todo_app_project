@@ -395,6 +395,18 @@ enum FamilyVisibility {
     HideAll,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum NormalizeScope {
+    Graph,
+    Family(String),
+}
+
+struct GPress {
+    at: std::time::Instant,
+    scope: NormalizeScope,
+    undo: Option<LayoutUndo>,
+}
+
 struct TodoGui {
     runtime: Runtime,
     ledger: LedgerAccess,
@@ -465,6 +477,7 @@ struct TodoGui {
     inspector: InspectorTheme,
     layout_undo: Option<LayoutUndo>,
     normalize_requested: bool,
+    last_g_press: Option<GPress>,
     reset_view_requested: bool,
     focus_layout_requested: bool,
     separate_requested: bool,
@@ -541,6 +554,7 @@ struct LocalGraphLayout {
     family_presentations: HashMap<String, FamilyPresentation>,
 }
 
+#[derive(Clone)]
 struct LayoutUndo {
     offsets: HashMap<String, Vec2>,
     expanded_families: std::collections::HashSet<String>,
@@ -630,6 +644,7 @@ impl TodoGui {
             colors_applied: false,
             layout_undo: None,
             normalize_requested: false,
+            last_g_press: None,
             reset_view_requested: false,
             focus_layout_requested: false,
             separate_requested: false,
@@ -3181,6 +3196,42 @@ impl TodoGui {
         self.save_layout();
     }
 
+    fn normalize_scope(&mut self, rect: Rect, scope: &NormalizeScope) {
+        match scope {
+            NormalizeScope::Graph => self.normalize_layout(rect),
+            NormalizeScope::Family(id) => self.normalize_family(rect, id),
+        }
+    }
+
+    /// A double G is one undoable operation: expand before arranging, but keep
+    /// the first G's snapshot from before both steps rather than the second
+    /// normalizer's later one.
+    fn normalize_scope_expanded(
+        &mut self,
+        rect: Rect,
+        scope: &NormalizeScope,
+        undo: Option<LayoutUndo>,
+    ) {
+        let before = self.visible_items();
+        let eligible = self.filtered_items();
+        if !expand_family_sets(
+            &eligible,
+            scope,
+            &mut self.expanded_families,
+            &mut self.collapsed_families,
+            &mut self.collapsed_all_families,
+        ) {
+            self.layout_undo = undo;
+            return;
+        }
+        let after = self.visible_items();
+        self.rebase_visible_offsets(&before, &after, rect);
+        self.normalize_scope(rect, scope);
+        self.layout_undo = undo;
+        self.message =
+            Some("Expanded all descendants and normalized. Undo layout restores both.".to_owned());
+    }
+
     /// Rearranges only the connected parent/child tree under the pointer.
     ///
     /// The root stays anchored and collapsed descendants are revealed before
@@ -3198,23 +3249,9 @@ impl TodoGui {
             .iter()
             .map(|item| item.item.id.to_string())
             .collect::<std::collections::HashSet<_>>();
-        let parents = eligible
-            .iter()
-            .filter_map(|item| {
-                let parent = item.item.parent_id?.to_string();
-                present
-                    .contains(&parent)
-                    .then(|| (item.item.id.to_string(), parent))
-            })
-            .collect::<HashMap<_, _>>();
-        let mut root = clicked.to_owned();
-        let mut seen = std::collections::HashSet::new();
-        while seen.insert(root.clone()) {
-            let Some(parent) = parents.get(&root) else {
-                break;
-            };
-            root = parent.clone();
-        }
+        let Some(root) = connected_family_root(&eligible, clicked) else {
+            return;
+        };
         let Some(root_index) = before
             .iter()
             .position(|item| item.item.id.to_string() == root)
@@ -3250,7 +3287,7 @@ impl TodoGui {
             axis: self.theme.layout.tree_axis,
         };
         let arranged = geometry::tree_positions_at_levels(
-            &[root.clone()],
+            std::slice::from_ref(&root),
             &children,
             &HashMap::new(),
             spacing,
@@ -5767,19 +5804,55 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
     if let Some(id) = clicked {
         app.select(id);
     }
-    if !ui.ctx().egui_wants_keyboard_input()
-        && ui.input(|input| input.key_pressed(egui::Key::G))
+    let g_presses = if ui.ctx().egui_wants_keyboard_input() {
+        0
+    } else {
+        ui.input(|input| {
+            input
+                .events
+                .iter()
+                .filter(|event| {
+                    matches!(event, egui::Event::Key {
+                        key: egui::Key::G,
+                        pressed: true,
+                        repeat: false,
+                        modifiers,
+                        ..
+                    } if !modifiers.command && !modifiers.alt && !modifiers.ctrl)
+                })
+                .count()
+        })
+    };
+    if g_presses > 0
         && let Some(pointer) = ui.input(|input| input.pointer.hover_pos())
         && rect.contains(pointer)
     {
-        if let Some((id, _)) = layouts
+        let scope = layouts
             .iter()
             .find(|(_, layout)| layout.rect.contains(pointer))
-        {
-            app.normalize_family(rect, id);
-        } else {
-            app.normalize_layout(rect);
+            .map_or(NormalizeScope::Graph, |(id, _)| {
+                NormalizeScope::Family(id.clone())
+            });
+        for _ in 0..g_presses {
+            let now = std::time::Instant::now();
+            let prior = app.last_g_press.take();
+            if g_chord_is_double(prior.as_ref(), now) {
+                // The first G can move a card away from the pointer, so the second
+                // press uses the original scope rather than hit-testing again.
+                if let Some(prior) = prior {
+                    app.normalize_scope_expanded(rect, &prior.scope, prior.undo);
+                }
+            } else {
+                app.normalize_scope(rect, &scope);
+                app.last_g_press = Some(GPress {
+                    at: now,
+                    scope: scope.clone(),
+                    undo: app.layout_undo.clone(),
+                });
+            }
         }
+    } else if ui.ctx().egui_wants_keyboard_input() || g_presses > 0 {
+        app.last_g_press = None;
     }
     if response.clicked() {
         app.drag_anchor = None;
@@ -6446,6 +6519,67 @@ fn child_index(items: &[StoredItem]) -> HashMap<String, Vec<String>> {
     children
 }
 
+/// Finds the connected family's highest eligible ancestor. Filtered-out
+/// ancestors are not part of the visible normalization scope.
+fn connected_family_root(eligible: &[StoredItem], clicked: &str) -> Option<String> {
+    let present = eligible
+        .iter()
+        .map(|item| item.item.id.to_string())
+        .collect::<std::collections::HashSet<_>>();
+    if !present.contains(clicked) {
+        return None;
+    }
+    let parents = eligible
+        .iter()
+        .filter_map(|item| {
+            let parent = item.item.parent_id?.to_string();
+            present
+                .contains(&parent)
+                .then(|| (item.item.id.to_string(), parent))
+        })
+        .collect::<HashMap<_, _>>();
+    let mut root = clicked.to_owned();
+    let mut seen = std::collections::HashSet::new();
+    while seen.insert(root.clone()) {
+        let Some(parent) = parents.get(&root) else {
+            break;
+        };
+        root = parent.clone();
+    }
+    Some(root)
+}
+
+/// Changes only transient visibility. The caller rebases retained positions
+/// and then normalizes, so the expanded set is what the layout command sees.
+fn expand_family_sets(
+    eligible: &[StoredItem],
+    scope: &NormalizeScope,
+    expanded: &mut std::collections::HashSet<String>,
+    collapsed: &mut std::collections::HashSet<String>,
+    collapsed_all: &mut std::collections::HashSet<String>,
+) -> bool {
+    let children = child_index(eligible);
+    match scope {
+        NormalizeScope::Graph => {
+            collapsed.clear();
+            collapsed_all.clear();
+            expanded.extend(children.keys().cloned());
+        }
+        NormalizeScope::Family(clicked) => {
+            let Some(root) = connected_family_root(eligible, clicked) else {
+                return false;
+            };
+            let members = collect_subtree(&root, &children)
+                .into_iter()
+                .collect::<std::collections::HashSet<_>>();
+            collapsed.retain(|id| !members.contains(id));
+            collapsed_all.retain(|id| !members.contains(id));
+            expanded.insert(root);
+        }
+    }
+    true
+}
+
 /// Counts all eligible descendants and the subset hidden by the graph view.
 /// Walking each card's ancestor chain avoids recomputing a whole subtree for
 /// every parent on every frame; ordinary shallow trees stay near linear work.
@@ -6530,6 +6664,12 @@ fn family_cycle_step(
     } else {
         ("-", FamilyVisibility::Hide)
     }
+}
+
+fn g_chord_is_double(prior: Option<&GPress>, now: std::time::Instant) -> bool {
+    prior.is_some_and(|press| {
+        now.saturating_duration_since(press.at) <= std::time::Duration::from_millis(500)
+    })
 }
 
 /// Collapses only the view. A normal hide keeps active paths, an all-hide does
@@ -8496,16 +8636,18 @@ fn short_title(title: &str) -> String {
 )]
 mod tests {
     use super::{
-        AgentFilter, Channel, FamilyPresentation, FilterChip, GroupBy, LedgerAccess,
-        LocalGraphLayout, Runtime, TagCloudLinkMode, TodoGui, ancestor_depth, ancestor_depth_index,
-        collect_subtree, compare_group_labels, fallback_tag_colors, family_box,
-        family_control_rect, family_cycle_step, family_dependency_bands, family_ring_mesh,
-        family_tree_geometry, family_visibility_counts, file_stamp, focus_is_active,
+        AgentFilter, Channel, FamilyPresentation, FilterChip, GPress, GroupBy, LedgerAccess,
+        LocalGraphLayout, NormalizeScope, Runtime, TagCloudLinkMode, TodoGui, ancestor_depth,
+        ancestor_depth_index, collect_subtree, compare_group_labels, connected_family_root,
+        expand_family_sets, fallback_tag_colors, family_box, family_control_rect,
+        family_cycle_step, family_dependency_bands, family_ring_mesh, family_tree_geometry,
+        family_visibility_counts, file_stamp, focus_is_active, g_chord_is_double,
         graph_needs_weights, graph_positions, hierarchy_levels, limit_child_depth, matches_query,
         node_meta, rebase_offsets_for_rect, search_step, segment_outside_rect, tag_cloud_links,
     };
     use eframe::egui::{Color32, Pos2, Rect, pos2, vec2};
     use std::collections::{HashMap, HashSet};
+    use std::time::{Duration, Instant};
     use todo_core::{ItemState, Priority};
     use todo_store::StoredItem;
 
@@ -8973,6 +9115,73 @@ mod tests {
             family_cycle_step(2, false, false),
             ("+", super::FamilyVisibility::Show)
         );
+    }
+
+    #[test]
+    fn double_g_uses_a_short_window() {
+        let now = Instant::now();
+        let prior = GPress {
+            at: now,
+            scope: NormalizeScope::Graph,
+            undo: None,
+        };
+        assert!(g_chord_is_double(
+            Some(&prior),
+            now + Duration::from_millis(450)
+        ));
+        assert!(!g_chord_is_double(
+            Some(&prior),
+            now + Duration::from_millis(501)
+        ));
+        assert!(!g_chord_is_double(None, now));
+    }
+
+    #[test]
+    fn expanded_normalize_scope_clears_only_its_family_or_the_whole_graph() {
+        let items = vec![
+            task("1", None, ItemState::Inbox),
+            task("2", Some("1"), ItemState::Inbox),
+            task("3", Some("2"), ItemState::Inbox),
+            task("4", None, ItemState::Inbox),
+            task("5", Some("4"), ItemState::Inbox),
+        ];
+        let root = items.first().map(|item| item.item.id.to_string()).unwrap();
+        let child = items.get(1).map(|item| item.item.id.to_string()).unwrap();
+        let other = items.get(3).map(|item| item.item.id.to_string()).unwrap();
+        assert_eq!(connected_family_root(&items, &child), Some(root.clone()));
+        let mut expanded = HashSet::new();
+        let mut collapsed = HashSet::from([child.clone(), other.clone()]);
+        let mut collapsed_all = collapsed.clone();
+        assert!(expand_family_sets(
+            &items,
+            &NormalizeScope::Family(child),
+            &mut expanded,
+            &mut collapsed,
+            &mut collapsed_all,
+        ));
+        assert!(expanded.contains(&root));
+        assert_eq!(collapsed, HashSet::from([other.clone()]));
+        assert_eq!(collapsed_all, HashSet::from([other.clone()]));
+        assert!(expand_family_sets(
+            &items,
+            &NormalizeScope::Graph,
+            &mut expanded,
+            &mut collapsed,
+            &mut collapsed_all,
+        ));
+        assert!(collapsed.is_empty());
+        assert!(collapsed_all.is_empty());
+        assert!(expanded.contains(&other));
+        let shown = limit_child_depth(
+            items,
+            1,
+            &expanded,
+            &collapsed,
+            &collapsed_all,
+            None,
+            &HashSet::new(),
+        );
+        assert_eq!(shown.len(), 5);
     }
 
     #[test]

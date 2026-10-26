@@ -282,8 +282,11 @@ Deletion is deliberately absent from the editor. `todo rm --force` and
   choice is separate from visibility.
 - G over empty graph canvas normalizes the visible graph. G over a card, or its
   context-menu command, normalizes only that connected parent/child tree and
-  leaves unrelated families in place. Focus now separates wrapped active rows,
-  places active-holding parents with them, and omits spanning family fills.
+  leaves unrelated families in place. A second G within half a second expands
+  all descendants in that same scope, including explicitly hidden ones, then
+  normalizes them; Undo layout restores both visibility and positions. Focus
+  separates wrapped active rows, places active-holding parents with them, and
+  omits spanning family fills.
 - Cloud fills are pre-blended once against the active canvas and drawn opaque, so
   a same-tag circle and its connecting tube remain one color at every overlap.
 - Appearance lives in the Settings window's Cards, Tags, Families, and Motion
@@ -534,7 +537,8 @@ what to check there first:
   collapsed summaries; in-place edits for title, dates, people, links, tags,
   and notes, including Escape restoring a date and the calendar beside it;
 - the `/` hotkey and its focus handoff;
-- the `G` hotkey over a card versus over empty canvas;
+- `G` over a card versus empty canvas, then `G` twice quickly in each scope;
+  confirm hidden descendants join the normalization and Undo restores both;
 - whether a family band now reads as a border at every parent-to-child distance,
   which is the TE-0015 image 9 case;
 - the dashed boundary on an open family, which appears only mid-drag;
