@@ -2854,107 +2854,7 @@ impl TodoGui {
     /// context rather than as work still waiting.
     fn hierarchy_layout(&mut self, rect: Rect) {
         let items = self.visible_items();
-        let visible = items
-            .iter()
-            .map(|item| item.item.id.to_string())
-            .collect::<std::collections::HashSet<_>>();
-        let holding = ids_holding_active_work(&items);
-        let mut children: std::collections::BTreeMap<String, Vec<String>> =
-            std::collections::BTreeMap::new();
-        let mut roots = Vec::new();
-        for item in &items {
-            let id = item.item.id.to_string();
-            match item.item.parent_id.map(|parent| parent.to_string()) {
-                Some(parent) if visible.contains(&parent) => {
-                    children.entry(parent).or_default().push(id);
-                }
-                // A task whose parent is filtered out leads its own tree rather
-                // than disappearing into one that is not on screen.
-                _ => roots.push(id),
-            }
-        }
-        let weights = self.weight_index(&items);
-        let sequence_rank = self.sequence_ranks();
-        let sort = self.sort_by;
-        let compare_ids = |left: &String, right: &String| {
-            let find = |id: &String| {
-                items
-                    .iter()
-                    .find(|candidate| candidate.item.id.to_string() == *id)
-            };
-            match (find(left), find(right)) {
-                (Some(first), Some(second)) => {
-                    sort_items(sort, first, second, &weights, &sequence_rank)
-                }
-                _ => left.cmp(right),
-            }
-        };
-        // A tree is only scannable when its sibling order is meaningful. Keeping
-        // this separate from placement lets every arrangement share Sort by.
-        for siblings in children.values_mut() {
-            siblings.sort_by(&compare_ids);
-        }
-        let lifted = if self.theme.layout.done_above {
-            self.finished_prerequisites(&items)
-        } else {
-            std::collections::HashSet::new()
-        };
-        let leading = |id: &String| {
-            let item = items
-                .iter()
-                .find(|candidate| candidate.item.id.to_string() == *id);
-            !item.is_some_and(|item| item.item.state == ItemState::Active || holding.contains(id))
-        };
-        roots.retain(|id| !lifted.contains(id));
-        roots.sort_by(|left, right| {
-            leading(left)
-                .cmp(&leading(right))
-                .then_with(|| compare_ids(left, right))
-        });
-        let spacing = TreeSpacing {
-            leaf_gap: self.theme.layout.leaf_gap,
-            row_gap: self.theme.layout.row_gap,
-            axis: self.theme.layout.tree_axis,
-        };
-        let levels = hierarchy_levels(&items, &visible);
-        let mut arranged = geometry::tree_positions_at_levels(&roots, &children, &levels, spacing);
-        if self.theme.layout.compact_active {
-            let bands = family_dependency_bands(&items, &roots, &children);
-            arranged = geometry::pack_tree_families(
-                &roots,
-                &children,
-                &arranged,
-                &bands,
-                Vec2::new(
-                    self.theme.node.size().0 + self.theme.parent.padding * 4.0,
-                    self.theme.node.max_height.min(110.0) + self.theme.parent.padding * 4.0,
-                ),
-                Vec2::splat(self.theme.layout.active_head_gap * 0.25),
-            );
-        }
-        // Finished prerequisites sit above the work that needed them, so a glance
-        // down the column reads as what was done, then what is being done.
-        let mut lifted_column = 0.0_f32;
-        for id in lifted {
-            let above = items
-                .iter()
-                .filter(|candidate| {
-                    candidate
-                        .dependencies
-                        .iter()
-                        .any(|dependency| dependency.to_string() == id)
-                })
-                .find_map(|dependent| {
-                    arranged
-                        .get(&dependent.item.id.to_string())
-                        .map(|placed| placed.x)
-                });
-            let x = above.unwrap_or_else(|| {
-                lifted_column += spacing.leaf_gap;
-                lifted_column
-            });
-            arranged.insert(id, Vec2::new(x, -self.theme.layout.done_band_gap));
-        }
+        let arranged = self.hierarchy_positions(&items);
         let center = if arranged.is_empty() {
             Vec2::ZERO
         } else {
@@ -2990,6 +2890,113 @@ impl TodoGui {
         self.group_labels.clear();
         self.message =
             Some("Hierarchy arranged. Undo layout restores the previous one.".to_owned());
+    }
+
+    /// Computes configured hierarchy positions without choosing a viewport or
+    /// changing saved offsets, so graph and local scopes share this ordering.
+    fn hierarchy_positions(&self, items: &[StoredItem]) -> HashMap<String, Vec2> {
+        let visible = items
+            .iter()
+            .map(|item| item.item.id.to_string())
+            .collect::<std::collections::HashSet<_>>();
+        let holding = ids_holding_active_work(items);
+        let mut children: std::collections::BTreeMap<String, Vec<String>> =
+            std::collections::BTreeMap::new();
+        let mut roots = Vec::new();
+        for item in items {
+            let id = item.item.id.to_string();
+            match item.item.parent_id.map(|parent| parent.to_string()) {
+                Some(parent) if visible.contains(&parent) => {
+                    children.entry(parent).or_default().push(id);
+                }
+                // A task whose parent is filtered out leads its own tree rather
+                // than disappearing into one that is not on screen.
+                _ => roots.push(id),
+            }
+        }
+        let weights = self.weight_index(items);
+        let sequence_rank = self.sequence_ranks();
+        let sort = self.sort_by;
+        let compare_ids = |left: &String, right: &String| {
+            let find = |id: &String| {
+                items
+                    .iter()
+                    .find(|candidate| candidate.item.id.to_string() == *id)
+            };
+            match (find(left), find(right)) {
+                (Some(first), Some(second)) => {
+                    sort_items(sort, first, second, &weights, &sequence_rank)
+                }
+                _ => left.cmp(right),
+            }
+        };
+        // A tree is only scannable when its sibling order is meaningful. Keeping
+        // this separate from placement lets every arrangement share Sort by.
+        for siblings in children.values_mut() {
+            siblings.sort_by(&compare_ids);
+        }
+        let lifted = if self.theme.layout.done_above {
+            self.finished_prerequisites(items)
+        } else {
+            std::collections::HashSet::new()
+        };
+        let leading = |id: &String| {
+            let item = items
+                .iter()
+                .find(|candidate| candidate.item.id.to_string() == *id);
+            !item.is_some_and(|item| item.item.state == ItemState::Active || holding.contains(id))
+        };
+        roots.retain(|id| !lifted.contains(id));
+        roots.sort_by(|left, right| {
+            leading(left)
+                .cmp(&leading(right))
+                .then_with(|| compare_ids(left, right))
+        });
+        let spacing = TreeSpacing {
+            leaf_gap: self.theme.layout.leaf_gap,
+            row_gap: self.theme.layout.row_gap,
+            axis: self.theme.layout.tree_axis,
+        };
+        let levels = hierarchy_levels(items, &visible);
+        let mut arranged = geometry::tree_positions_at_levels(&roots, &children, &levels, spacing);
+        if self.theme.layout.compact_active {
+            let bands = family_dependency_bands(items, &roots, &children);
+            arranged = geometry::pack_tree_families(
+                &roots,
+                &children,
+                &arranged,
+                &bands,
+                Vec2::new(
+                    self.theme.node.size().0 + self.theme.parent.padding * 4.0,
+                    self.theme.node.max_height.min(110.0) + self.theme.parent.padding * 4.0,
+                ),
+                Vec2::splat(self.theme.layout.active_head_gap * 0.25),
+            );
+        }
+        // Finished prerequisites sit above the work that needed them, so a glance
+        // down the column reads as what was done, then what is being done.
+        let mut lifted_column = 0.0_f32;
+        for id in lifted {
+            let above = items
+                .iter()
+                .filter(|candidate| {
+                    candidate
+                        .dependencies
+                        .iter()
+                        .any(|dependency| dependency.to_string() == id)
+                })
+                .find_map(|dependent| {
+                    arranged
+                        .get(&dependent.item.id.to_string())
+                        .map(|placed| placed.x)
+                });
+            let x = above.unwrap_or_else(|| {
+                lifted_column += spacing.leaf_gap;
+                lifted_column
+            });
+            arranged.insert(id, Vec2::new(x, -self.theme.layout.done_band_gap));
+        }
+        arranged
     }
 
     /// Arranges the graph into labeled columns by the chosen groupings.
@@ -3430,22 +3437,22 @@ impl TodoGui {
             Some("Connected task family arranged; other families stayed put.".to_owned());
     }
 
-    /// Rearranges visible nodes so relationships flow one way, down or right.
-    ///
-    /// The previous arrangement is kept in `layout_undo`, so a normalize that
-    /// scatters a hand-built layout can be taken back.
-    fn normalize_layout(&mut self, rect: Rect) {
-        if self.theme.layout.style == NormalizeStyle::Hierarchy {
-            self.hierarchy_layout(rect);
-            return;
+    /// Computes the same configured placement for every normalize scope;
+    /// callers choose only which visible items participate and where to anchor.
+    fn normalized_positions(&self, items: &[StoredItem]) -> HashMap<String, Vec2> {
+        match self.theme.layout.style {
+            NormalizeStyle::Hierarchy => self.hierarchy_positions(items),
+            NormalizeStyle::Layered => self.layered_positions_for(items),
         }
-        let items = self.visible_items();
+    }
+
+    fn layered_positions_for(&self, items: &[StoredItem]) -> HashMap<String, Vec2> {
         let ids = items
             .iter()
             .map(|item| item.item.id.to_string())
             .collect::<Vec<_>>();
         let mut edges = Vec::new();
-        for item in &items {
+        for item in items {
             let id = item.item.id.to_string();
             if self.theme.layout.follow_parents
                 && let Some(parent) = item.item.parent_id
@@ -3463,12 +3470,32 @@ impl TodoGui {
                 }
             }
         }
-        let spacing = FlowSpacing {
-            direction: self.theme.layout.direction,
-            layer_gap: self.theme.layout.layer_gap,
-            node_gap: self.theme.layout.node_gap,
-        };
-        let arranged = geometry::layered_positions(&ids, &edges, spacing);
+        geometry::layered_positions(
+            &ids,
+            &edges,
+            FlowSpacing {
+                direction: self.theme.layout.direction,
+                layer_gap: self.theme.layout.layer_gap,
+                node_gap: self.theme.layout.node_gap,
+            },
+        )
+    }
+
+    /// Rearranges visible nodes so relationships flow one way, down or right.
+    ///
+    /// The previous arrangement is kept in `layout_undo`, so a normalize that
+    /// scatters a hand-built layout can be taken back.
+    fn normalize_layout(&mut self, rect: Rect) {
+        if self.theme.layout.style == NormalizeStyle::Hierarchy {
+            self.hierarchy_layout(rect);
+            return;
+        }
+        let items = self.visible_items();
+        let ids = items
+            .iter()
+            .map(|item| item.item.id.to_string())
+            .collect::<Vec<_>>();
+        let arranged = self.normalized_positions(&items);
         let origin = grid_slot(0, rect);
         self.remember_layout();
         for (index, id) in ids.iter().enumerate() {
