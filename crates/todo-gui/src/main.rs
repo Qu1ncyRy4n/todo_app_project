@@ -5756,7 +5756,6 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
             // continue. It remains available even when the global depth is All.
             let badge = family_control_rect(node, app.theme.node.size().0, &app.theme.parent);
             let (label, action) = family_cycle_step(
-                hidden,
                 app.collapsed_families.contains(&id),
                 app.collapsed_all_families.contains(&id),
             );
@@ -6672,19 +6671,15 @@ fn family_control_rect(card: Rect, base_card_width: f32, parent: &theme::ParentT
     )
 }
 
-/// Show is next when a family is already hard-hidden or only depth-limited;
-/// an explicit normal hide always gets a chance to advance to hide-all.
-fn family_cycle_step(
-    hidden: usize,
-    collapsed: bool,
-    collapsed_all: bool,
-) -> (&'static str, FamilyVisibility) {
-    if collapsed_all || (hidden > 0 && !collapsed) {
-        ("+", FamilyVisibility::Show)
+/// The badge describes current family visibility, while its click advances to
+/// the next state. A global depth limit alone does not change this local state.
+fn family_cycle_step(collapsed: bool, collapsed_all: bool) -> (&'static str, FamilyVisibility) {
+    if collapsed_all {
+        ("-*", FamilyVisibility::Show)
     } else if collapsed {
-        ("-*", FamilyVisibility::HideAll)
+        ("-", FamilyVisibility::HideAll)
     } else {
-        ("-", FamilyVisibility::Hide)
+        ("+", FamilyVisibility::Hide)
     }
 }
 
@@ -9109,26 +9104,22 @@ mod tests {
     }
 
     #[test]
-    fn family_control_cycles_from_partial_hide_to_full_hide_to_show() {
+    fn family_control_labels_current_visibility_and_advances() {
         assert_eq!(
-            family_cycle_step(0, false, false),
-            ("-", super::FamilyVisibility::Hide)
+            family_cycle_step(false, false),
+            ("+", super::FamilyVisibility::Hide)
         );
         assert_eq!(
-            family_cycle_step(1, true, false),
-            ("-*", super::FamilyVisibility::HideAll)
+            family_cycle_step(true, false),
+            ("-", super::FamilyVisibility::HideAll)
         );
         assert_eq!(
-            family_cycle_step(0, true, false),
-            ("-*", super::FamilyVisibility::HideAll)
+            family_cycle_step(true, true),
+            ("-*", super::FamilyVisibility::Show)
         );
         assert_eq!(
-            family_cycle_step(2, true, true),
-            ("+", super::FamilyVisibility::Show)
-        );
-        assert_eq!(
-            family_cycle_step(2, false, false),
-            ("+", super::FamilyVisibility::Show)
+            family_cycle_step(false, false),
+            ("+", super::FamilyVisibility::Hide)
         );
     }
 

@@ -273,11 +273,12 @@ Deletion is deliberately absent from the editor. `todo rm --force` and
   board; the family tree continues to its actual card instead. A forced Box
   draws the complete span. A short stalk attaches a detached parent card to
   a genuine nearby child outline.
-- Every parent has one child-side control that cycles `-` → `-*` → `+` → `-`.
+- Every parent has one child-side control that displays its current local state
+  and cycles `+` → `-` → `-*` → `+` when clicked.
   `-` hides inactive descendants even when child depth is All, preserving
   active-task paths; `-*` hides every descendant; `+` restores the whole
   branch, including nested hidden families. A branch hidden only by the global
-  depth cap starts at `+`. Hiding a selected descendant selects its parent.
+  depth cap still displays `+`. Hiding a selected descendant selects its parent.
   Right-click also offers **Family display → Box / Tree**; that display
   choice is separate from visibility.
 - G over empty graph canvas normalizes the visible graph. G over a card, or its
