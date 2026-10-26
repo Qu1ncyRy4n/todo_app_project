@@ -44,8 +44,8 @@ Two clients read the same ledger, and neither owns data the other cannot see:
 - `todo`, the CLI, which is the complete surface for capture, focus, import,
   export, backup, and synchronization;
 - `todo-gui`, a native graph editor for arranging, grouping, searching, and
-  inspecting the same items. Run it with `./dev gui`, or as `todo-gui` after
-  `./dev install`.
+  inspecting the same items. Run the optimized build with `./dev gui`
+  (`./dev gui --debug` for diagnostics), or as `todo-gui` after `./dev install`.
 
 The editor is presentation over the same events. Its appearance is configured in
 `theme.toml` and its node placement in `gui-layout.json`, both beside

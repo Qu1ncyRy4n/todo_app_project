@@ -12,6 +12,12 @@ installed Rust toolchain:
 ./dev test
 ```
 
+`./dev gui` runs a release-optimized editor by default; use
+`./dev gui --debug` when debugging, or `./dev gui --release` explicitly.
+`./dev build` retains its debug default, and accepts `--debug` or `--release`
+for a whole-workspace build. The first release build compiles a separate Cargo
+profile and can take longer than later launches.
+
 `./dev check` runs `cargo fmt --check` and strict Clippy across the workspace,
 all targets, and all features. `./dev test` runs the full workspace test suite.
 Use focused crate tests while iterating, then run both commands before completing
