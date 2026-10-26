@@ -399,6 +399,7 @@ enum FamilyVisibility {
 enum NormalizeScope {
     Graph,
     Family(String),
+    Selected(Vec<String>),
 }
 
 struct ExpansionRestore {
@@ -458,6 +459,9 @@ struct TodoGui {
     selected_focus_sequence: Option<String>,
     focus_title_draft: String,
     selected: Option<String>,
+    /// Explicit Shift-selection is transient and separate from the Info card.
+    selected_cards: std::collections::HashSet<String>,
+    selection_anchor: Option<Pos2>,
     title_draft: String,
     priority_draft: Priority,
     state_draft: ItemState,
@@ -632,6 +636,8 @@ impl TodoGui {
             selected_focus_sequence: None,
             focus_title_draft: String::new(),
             selected: None,
+            selected_cards: std::collections::HashSet::new(),
+            selection_anchor: None,
             title_draft: String::new(),
             priority_draft: Priority::Normal,
             state_draft: ItemState::Inbox,
@@ -3231,7 +3237,75 @@ impl TodoGui {
         match scope {
             NormalizeScope::Graph => self.normalize_layout(rect),
             NormalizeScope::Family(id) => self.normalize_family(rect, id),
+            NormalizeScope::Selected(ids) => self.normalize_selected(rect, ids),
         }
+    }
+
+    /// Selection is an exact layout scope: cards outside it retain their saved
+    /// offsets, even when they belong to one of the selected cards' families.
+    fn normalize_selected(&mut self, rect: Rect, ids: &[String]) {
+        let items = self.visible_items();
+        let selected = ids
+            .iter()
+            .cloned()
+            .collect::<std::collections::HashSet<_>>();
+        let selected_items = items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| selected.contains(&item.item.id.to_string()))
+            .collect::<Vec<_>>();
+        if selected_items.is_empty() {
+            return;
+        }
+        let mut roots = Vec::new();
+        let mut children = std::collections::BTreeMap::<String, Vec<String>>::new();
+        let mut current = Vec::new();
+        for (index, item) in &selected_items {
+            let id = item.item.id.to_string();
+            let parent = item.item.parent_id.map(|parent| parent.to_string());
+            if let Some(parent) = parent.filter(|parent| selected.contains(parent)) {
+                children.entry(parent).or_default().push(id.clone());
+            } else {
+                roots.push(id.clone());
+            }
+            current.push(
+                grid_slot(*index, rect) + self.node_offsets.get(&id).copied().unwrap_or(Vec2::ZERO),
+            );
+        }
+        let arranged = geometry::tree_positions_at_levels(
+            &roots,
+            &children,
+            &HashMap::new(),
+            TreeSpacing {
+                leaf_gap: self.theme.layout.leaf_gap,
+                row_gap: self.theme.layout.row_gap,
+                axis: self.theme.layout.tree_axis,
+            },
+        );
+        let count = u16::try_from(current.len())
+            .map_or(f32::MAX, f32::from)
+            .max(1.0);
+        let anchor = current
+            .iter()
+            .fold(Vec2::ZERO, |sum, at| sum + at.to_vec2())
+            / count;
+        let arranged_center = arranged
+            .values()
+            .copied()
+            .fold(Vec2::ZERO, |sum, at| sum + at)
+            / count;
+        self.remember_layout();
+        for (index, item) in selected_items {
+            let id = item.item.id.to_string();
+            if let Some(at) = arranged.get(&id) {
+                self.node_offsets.insert(
+                    id,
+                    anchor + *at - arranged_center - grid_slot(index, rect).to_vec2(),
+                );
+            }
+        }
+        self.save_layout();
+        self.message = Some("Selected cards arranged; other cards stayed put.".to_owned());
     }
 
     /// E changes only the view. Its next press restores the exact visibility
@@ -3993,6 +4067,56 @@ impl TodoGui {
                 .iter()
                 .find(|stored| stored.item.id.to_string() == *id)
         })
+    }
+
+    fn toggle_card_selection(&mut self, id: String) {
+        if self.selected_cards.is_empty()
+            && let Some(current) = &self.selected
+        {
+            self.selected_cards.insert(current.clone());
+        }
+        if !self.selected_cards.insert(id.clone()) {
+            self.selected_cards.remove(&id);
+            if self.selected.as_deref() == Some(id.as_str()) {
+                if let Some(next) = self.selected_cards.iter().min().cloned() {
+                    self.select(next);
+                } else {
+                    self.selected = None;
+                }
+            }
+        } else {
+            self.select(id);
+        }
+    }
+
+    fn add_marquee_selection(&mut self, hits: impl IntoIterator<Item = String>) {
+        let hits = hits.into_iter().collect::<Vec<_>>();
+        if hits.is_empty() {
+            return;
+        }
+        if self.selected_cards.is_empty()
+            && let Some(current) = &self.selected
+        {
+            self.selected_cards.insert(current.clone());
+        }
+        self.selected_cards.extend(hits.iter().cloned());
+        if let Some(last) = hits.last() {
+            self.select(last.clone());
+        }
+    }
+
+    fn selected_scope(&self) -> Option<NormalizeScope> {
+        if self.selected_cards.is_empty() {
+            return None;
+        }
+        let mut ids = self
+            .visible_items()
+            .into_iter()
+            .map(|item| item.item.id.to_string())
+            .filter(|id| self.selected_cards.contains(id))
+            .collect::<Vec<_>>();
+        ids.sort();
+        Some(NormalizeScope::Selected(ids))
     }
 
     fn select(&mut self, id: String) {
@@ -5189,6 +5313,13 @@ impl eframe::App for TodoGui {
 
 fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
     let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::drag());
+    if ui.input(|input| input.pointer.primary_pressed() && input.modifiers.shift)
+        && let Some(pointer) = ui.input(|input| input.pointer.hover_pos())
+        && rect.contains(pointer)
+    {
+        app.selection_anchor = Some(pointer);
+        app.drag_anchor = None;
+    }
     if let Some(previous) = app.last_canvas_rect
         && previous != rect
     {
@@ -5212,7 +5343,7 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
     let painter = ui.painter_at(rect);
     // Dragging empty canvas moves the view. Cards are interacted with after this,
     // so a drag that starts on a card moves the card rather than the canvas.
-    if response.dragged() {
+    if response.dragged() && app.selection_anchor.is_none() {
         app.graph_pan += response.drag_delta();
     }
     if ui.input(|input| input.pointer.middle_down()) {
@@ -5610,7 +5741,11 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
                 }
             });
         });
-        let selected = app.selected.as_deref() == Some(id.as_str());
+        let selected = if app.selected_cards.is_empty() {
+            app.selected.as_deref() == Some(id.as_str())
+        } else {
+            app.selected_cards.contains(&id)
+        };
         let holds_active = holding_active.contains(&id);
         let accent = node_tag_color(item, &app.theme, &palette, &effective);
         let status = status_color(item, holds_active);
@@ -5829,7 +5964,8 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
                 ui.ctx().request_repaint();
             }
         }
-        if response.drag_started()
+        if app.selection_anchor.is_none()
+            && response.drag_started()
             && let Some(pointer) = response.interact_pointer_pos()
         {
             // A container carries its subtree, so every member's starting offset is
@@ -5852,7 +5988,8 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
                 offsets_start,
             });
         }
-        if let Some(anchor) = &app.drag_anchor
+        if app.selection_anchor.is_none()
+            && let Some(anchor) = &app.drag_anchor
             && anchor.id == id
             && let Some(pointer) = response.interact_pointer_pos()
         {
@@ -5869,7 +6006,7 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
                 app.drawn_offsets.insert(member, at);
             }
         }
-        if response.drag_stopped() {
+        if app.selection_anchor.is_none() && response.drag_stopped() {
             app.drag_anchor = None;
             app.save_layout();
         }
@@ -5877,8 +6014,42 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
             clicked = Some(id.clone());
         }
     }
-    if let Some(id) = clicked {
-        app.select(id);
+    if let Some(id) = clicked.clone() {
+        if ui.input(|input| input.modifiers.shift) {
+            app.toggle_card_selection(id);
+        } else {
+            app.selected_cards.clear();
+            app.select(id);
+        }
+    }
+    if let Some(start) = app.selection_anchor {
+        let pointer = ui.input(|input| input.pointer.hover_pos()).unwrap_or(start);
+        let marquee = Rect::from_two_pos(start, pointer);
+        if marquee.width() > 4.0 || marquee.height() > 4.0 {
+            painter.rect_filled(
+                marquee,
+                0.0,
+                Color32::from_rgba_unmultiplied(239, 185, 55, 28),
+            );
+            painter.rect_stroke(
+                marquee,
+                0.0,
+                Stroke::new(1.0, Color32::GOLD),
+                egui::StrokeKind::Outside,
+            );
+        }
+        if !ui.input(|input| input.pointer.primary_down()) {
+            if marquee.width() > 4.0 || marquee.height() > 4.0 {
+                let mut hits = layouts
+                    .iter()
+                    .filter(|(_, layout)| marquee.intersects(layout.rect))
+                    .map(|(id, _)| id.clone())
+                    .collect::<Vec<_>>();
+                hits.sort();
+                app.add_marquee_selection(hits);
+            }
+            app.selection_anchor = None;
+        }
     }
     let (normalize_pressed, expand_pressed, c_presses) = if ui.ctx().egui_wants_keyboard_input() {
         (false, false, 0)
@@ -5909,12 +6080,14 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
         && let Some(pointer) = ui.input(|input| input.pointer.hover_pos())
         && rect.contains(pointer)
     {
-        let scope = layouts
-            .iter()
-            .find(|(_, layout)| layout.rect.contains(pointer))
-            .map_or(NormalizeScope::Graph, |(id, _)| {
-                NormalizeScope::Family(id.clone())
-            });
+        let scope = app.selected_scope().unwrap_or_else(|| {
+            layouts
+                .iter()
+                .find(|(_, layout)| layout.rect.contains(pointer))
+                .map_or(NormalizeScope::Graph, |(id, _)| {
+                    NormalizeScope::Family(id.clone())
+                })
+        });
         if normalize_pressed {
             app.last_c_press = None;
             app.normalize_scope(rect, &scope);
@@ -5945,6 +6118,9 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
     }
     if response.clicked() {
         app.drag_anchor = None;
+        if clicked.is_none() && !ui.input(|input| input.modifiers.shift) {
+            app.selected_cards.clear();
+        }
     }
 }
 
@@ -6665,6 +6841,22 @@ fn expand_family_sets(
             collapsed_all.retain(|id| !members.contains(id));
             expanded.insert(root);
         }
+        NormalizeScope::Selected(ids) => {
+            if !ids.iter().any(|id| children.contains_key(id)) {
+                return false;
+            }
+            for id in ids {
+                if !children.contains_key(id) {
+                    continue;
+                }
+                let members = collect_subtree(id, &children)
+                    .into_iter()
+                    .collect::<std::collections::HashSet<_>>();
+                collapsed.retain(|hidden| !members.contains(hidden));
+                collapsed_all.retain(|hidden| !members.contains(hidden));
+                expanded.insert(id.clone());
+            }
+        }
     }
     true
 }
@@ -6681,6 +6873,11 @@ fn contraction_targets(eligible: &[StoredItem], scope: &NormalizeScope) -> Vec<S
                 Vec::new()
             }
         }
+        NormalizeScope::Selected(ids) => ids
+            .iter()
+            .filter(|id| children.contains_key(*id))
+            .cloned()
+            .collect(),
         NormalizeScope::Graph => {
             let present = eligible
                 .iter()
@@ -9276,6 +9473,41 @@ mod tests {
             now + Duration::from_millis(501)
         ));
         assert_eq!(first.scope, NormalizeScope::Family(child));
+    }
+
+    #[test]
+    fn selected_visibility_scope_ignores_unselected_families() {
+        let items = vec![
+            task("1", None, ItemState::Inbox),
+            task("2", Some("1"), ItemState::Inbox),
+            task("3", Some("2"), ItemState::Inbox),
+            task("4", None, ItemState::Inbox),
+            task("5", Some("4"), ItemState::Inbox),
+        ];
+        let id = |index: usize| {
+            items
+                .get(index)
+                .map(|item| item.item.id.to_string())
+                .unwrap()
+        };
+        let child = id(1);
+        let grandchild = id(2);
+        let other = id(3);
+        let scope = NormalizeScope::Selected(vec![child.clone()]);
+        assert_eq!(contraction_targets(&items, &scope), vec![child.clone()]);
+        let mut expanded = HashSet::new();
+        let mut collapsed = HashSet::from([grandchild, other.clone()]);
+        let mut collapsed_all = HashSet::from([other.clone()]);
+        assert!(expand_family_sets(
+            &items,
+            &scope,
+            &mut expanded,
+            &mut collapsed,
+            &mut collapsed_all,
+        ));
+        assert!(expanded.contains(&child));
+        assert_eq!(collapsed, HashSet::from([other.clone()]));
+        assert_eq!(collapsed_all, HashSet::from([other]));
     }
 
     #[test]
