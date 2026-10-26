@@ -19,17 +19,18 @@ Shipped and confirmed in a running window by the developer:
   describe the sketch are history; the code is recoverable from commit
   `1f3d7b8` and earlier.
 
-Decided, not yet done (ledger items under the GUI sprint `kufod-mogar`, tagged
-`tag/work/apps/todo-app/gui`):
-
-- One normalize algorithm (`hurik-duliv`). Today they
-  differ: G over a card runs `tree_positions_at_levels` with parents only, empty
-  levels, no `done_above`, no `compact_active` packing, and no framing, using
-  `leaf_gap`/`row_gap`/`tree_axis`, anchored at the root. G over the canvas runs
-  `hierarchy_layout` or `layered_positions` per `layout.style`, follows
-  dependencies and blockers per config, then separates, relaxes, and frames.
-  Unify on the whole-graph pipeline restricted to the family, keeping only the
-  anchoring; also let relation edges (leads-to, relates-to) inform ordering.
+Normalization (`hurik-duliv`, pending running-window review): G now uses the
+configured hierarchy or layered placement for the whole graph, one connected
+family, or an explicit Shift-selection. Hierarchy scopes share active-first
+ordering, dependency levels, finished prerequisites, and family packing;
+layered scopes share the configured parent/dependency/blocker edges and spacing.
+Family G reveals nested hidden descendants, keeps the family root anchored,
+and leaves other families at their drawn positions. Selected G keeps the
+selection's center and changes only selected card positions. Whole-graph G
+still owns viewport framing and optional tag separation/overlap relaxation;
+those whole-canvas post-passes are not run on local scopes because they would
+move unrelated cards. Relation-based proximity/order remains unresolved:
+`relates-to` is symmetric, so it cannot simply become a directed layer edge.
 
 Unverified: `mode = "system"` applies the palette only to the appearance that
 was current at load (marked `ponytail:` in `apply_colors`).
@@ -283,7 +284,9 @@ Deletion is deliberately absent from the editor. `todo rm --force` and
   choice is separate from visibility.
 - G over empty graph canvas normalizes the visible graph. G over a card, or its
   context-menu command, normalizes only that connected parent/child tree and
-  leaves unrelated families in place. There is no `gg` chord. E over a card
+  leaves unrelated families in place. Both use the configured normalization
+  style; local G preserves the root's position and reveals nested descendants.
+  There is no `gg` chord. E over a card
   expands its connected family; E over empty canvas expands all eligible
   families. The next E restores the exact preceding family visibility, and
   Undo layout also reverses either E action. C collapses inactive descendants
@@ -548,7 +551,10 @@ what to check there first:
   and notes, including Escape restoring a date and the calendar beside it;
 - the `/` hotkey and its focus handoff;
 - `G` over a card versus empty canvas; verify a second `G` has no special
-  chord behavior. `E` expands the hovered family or all from empty canvas;
+  chord behavior. Try Hierarchy and Layered settings with a dependency inside a
+  hidden family: local `G` should reveal and arrange it while unrelated cards
+  stay put; canvas `G` should use the same ordering but frame the whole result.
+  `E` expands the hovered family or all from empty canvas;
   another `E` restores the prior visibility, and Undo reverses either action;
   `C` then a quick second `C` collapses inactive then all descendants in the
   original scope, even if the first press changes the card under the pointer;

@@ -3264,31 +3264,18 @@ impl TodoGui {
         if selected_items.is_empty() {
             return;
         }
-        let mut roots = Vec::new();
-        let mut children = std::collections::BTreeMap::<String, Vec<String>>::new();
-        let mut current = Vec::new();
-        for (index, item) in &selected_items {
-            let id = item.item.id.to_string();
-            let parent = item.item.parent_id.map(|parent| parent.to_string());
-            if let Some(parent) = parent.filter(|parent| selected.contains(parent)) {
-                children.entry(parent).or_default().push(id.clone());
-            } else {
-                roots.push(id.clone());
-            }
-            current.push(
-                grid_slot(*index, rect) + self.node_offsets.get(&id).copied().unwrap_or(Vec2::ZERO),
-            );
-        }
-        let arranged = geometry::tree_positions_at_levels(
-            &roots,
-            &children,
-            &HashMap::new(),
-            TreeSpacing {
-                leaf_gap: self.theme.layout.leaf_gap,
-                row_gap: self.theme.layout.row_gap,
-                axis: self.theme.layout.tree_axis,
-            },
-        );
+        let subset = selected_items
+            .iter()
+            .map(|(_, item)| (*item).clone())
+            .collect::<Vec<_>>();
+        let arranged = self.normalized_positions(&subset);
+        let current = selected_items
+            .iter()
+            .map(|(index, item)| {
+                let id = item.item.id.to_string();
+                grid_slot(*index, rect) + self.node_offsets.get(&id).copied().unwrap_or(Vec2::ZERO)
+            })
+            .collect::<Vec<_>>();
         let count = u16::try_from(current.len())
             .map_or(f32::MAX, f32::from)
             .max(1.0);
@@ -3374,13 +3361,12 @@ impl TodoGui {
             return;
         }
         let eligible = self.filtered_items();
-        let present = eligible
-            .iter()
-            .map(|item| item.item.id.to_string())
-            .collect::<std::collections::HashSet<_>>();
         let Some(root) = connected_family_root(&eligible, clicked) else {
             return;
         };
+        let family_ids = collect_subtree(&root, &child_index(&eligible))
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>();
         let Some(root_index) = before
             .iter()
             .position(|item| item.item.id.to_string() == root)
@@ -3390,37 +3376,23 @@ impl TodoGui {
         let root_at = grid_slot(root_index, rect)
             + self.node_offsets.get(&root).copied().unwrap_or(Vec2::ZERO);
         self.remember_layout();
-        self.expanded_families.insert(root.clone());
-        self.collapsed_families.remove(&root);
-        self.collapsed_all_families.remove(&root);
+        // G arranges the same complete family E can reveal; otherwise hidden
+        // nested branches would make a local normalize use a different graph.
+        expand_family_sets(
+            &eligible,
+            &NormalizeScope::Family(clicked.to_owned()),
+            &mut self.expanded_families,
+            &mut self.collapsed_families,
+            &mut self.collapsed_all_families,
+        );
         let items = self.visible_items();
         self.rebase_visible_offsets(&before, &items, rect);
-        let children = items
+        let family = items
             .iter()
-            .filter_map(|item| {
-                let parent = item.item.parent_id?.to_string();
-                present
-                    .contains(&parent)
-                    .then(|| (parent, item.item.id.to_string()))
-            })
-            .fold(
-                std::collections::BTreeMap::<String, Vec<String>>::new(),
-                |mut children, (parent, child)| {
-                    children.entry(parent).or_default().push(child);
-                    children
-                },
-            );
-        let spacing = TreeSpacing {
-            leaf_gap: self.theme.layout.leaf_gap,
-            row_gap: self.theme.layout.row_gap,
-            axis: self.theme.layout.tree_axis,
-        };
-        let arranged = geometry::tree_positions_at_levels(
-            std::slice::from_ref(&root),
-            &children,
-            &HashMap::new(),
-            spacing,
-        );
+            .filter(|item| family_ids.contains(&item.item.id.to_string()))
+            .cloned()
+            .collect::<Vec<_>>();
+        let arranged = self.normalized_positions(&family);
         let Some(root_target) = arranged.get(&root).copied() else {
             return;
         };
@@ -8986,9 +8958,9 @@ mod tests {
         compare_group_labels, connected_family_root, contraction_targets, expand_family_sets,
         fallback_tag_colors, family_box, family_control_rect, family_cycle_step,
         family_dependency_bands, family_ring_mesh, family_tree_geometry, family_visibility_counts,
-        file_stamp, focus_is_active, graph_needs_weights, graph_positions, hierarchy_levels,
-        limit_child_depth, matches_query, node_meta, rebase_offsets_for_rect, search_step,
-        segment_outside_rect, tag_cloud_links,
+        file_stamp, focus_is_active, graph_needs_weights, graph_positions, grid_slot,
+        hierarchy_levels, limit_child_depth, matches_query, node_meta, rebase_offsets_for_rect,
+        search_step, segment_outside_rect, tag_cloud_links,
     };
     use eframe::egui::{Color32, Pos2, Rect, pos2, vec2};
     use std::collections::{HashMap, HashSet};
@@ -9538,6 +9510,147 @@ mod tests {
     }
 
     #[test]
+    fn family_normalize_uses_the_configured_pipeline_without_moving_other_families() {
+        let items = vec![
+            task("1", None, ItemState::Inbox),
+            task("2", Some("1"), ItemState::Active),
+            task("3", Some("1"), ItemState::Inbox),
+            task("6", Some("2"), ItemState::Inbox),
+            task("4", None, ItemState::Inbox),
+            task("5", Some("4"), ItemState::Inbox),
+        ];
+        let root = items.first().map(|item| item.item.id.to_string()).unwrap();
+        let clicked = items.get(1).map(|item| item.item.id.to_string()).unwrap();
+        let grandchild = items.get(3).map(|item| item.item.id.to_string()).unwrap();
+        let other = items.get(4).map(|item| item.item.id.to_string()).unwrap();
+        let family = items.iter().take(4).cloned().collect::<Vec<_>>();
+        let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(900.0, 700.0));
+        for style in [
+            super::NormalizeStyle::Hierarchy,
+            super::NormalizeStyle::Layered,
+        ] {
+            let mut app = app(AgentFilter::Show);
+            app.theme.layout.style = style;
+            app.items = items.clone();
+            app.collapsed_families.insert(clicked.clone());
+            assert!(
+                !app.visible_items()
+                    .iter()
+                    .any(|item| item.item.id.to_string() == grandchild)
+            );
+            app.node_offsets.insert(other.clone(), vec2(31.0, 47.0));
+            let expected = app.normalized_positions(&family);
+            let root_index = app
+                .visible_items()
+                .iter()
+                .position(|item| item.item.id.to_string() == root)
+                .unwrap();
+            let root_at = grid_slot(root_index, rect);
+            let other_index = app
+                .visible_items()
+                .iter()
+                .position(|item| item.item.id.to_string() == other)
+                .unwrap();
+            let other_before =
+                grid_slot(other_index, rect) + app.node_offsets.get(&other).copied().unwrap();
+            app.normalize_family(rect, &clicked);
+            assert!(
+                app.visible_items()
+                    .iter()
+                    .any(|item| item.item.id.to_string() == grandchild)
+            );
+            let after = app.visible_items();
+            let other_index = after
+                .iter()
+                .position(|item| item.item.id.to_string() == other)
+                .unwrap();
+            let other_after =
+                grid_slot(other_index, rect) + app.node_offsets.get(&other).copied().unwrap();
+            assert!((other_after - other_before).length() < 0.01);
+            let root_target = expected.get(&root).copied().unwrap();
+            for (index, item) in after.iter().enumerate() {
+                let id = item.item.id.to_string();
+                let Some(target) = expected.get(&id) else {
+                    continue;
+                };
+                let actual =
+                    grid_slot(index, rect) + app.node_offsets.get(&id).copied().unwrap_or_default();
+                let wanted = root_at + *target - root_target;
+                assert!(
+                    (actual - wanted).length() < 0.01,
+                    "{style:?}: {id} actual={actual:?} wanted={wanted:?} arranged={expected:?}"
+                );
+            }
+            app.undo_layout();
+            assert!(app.collapsed_families.contains(&clicked));
+            assert!(
+                !app.visible_items()
+                    .iter()
+                    .any(|item| item.item.id.to_string() == grandchild)
+            );
+        }
+    }
+
+    #[test]
+    fn selected_normalize_uses_the_configured_pipeline_without_moving_other_cards() {
+        let items = vec![
+            task("1", None, ItemState::Inbox),
+            task("2", Some("1"), ItemState::Active),
+            task("3", None, ItemState::Inbox),
+        ];
+        let first = items.first().map(|item| item.item.id.to_string()).unwrap();
+        let untouched = items.get(1).map(|item| item.item.id.to_string()).unwrap();
+        let last = items.get(2).map(|item| item.item.id.to_string()).unwrap();
+        let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(900.0, 700.0));
+        for style in [
+            super::NormalizeStyle::Hierarchy,
+            super::NormalizeStyle::Layered,
+        ] {
+            let mut app = app(AgentFilter::Show);
+            app.theme.layout.style = style;
+            app.items = items.clone();
+            app.node_offsets.insert(untouched.clone(), vec2(19.0, 23.0));
+            let visible = app.visible_items();
+            let subset = visible
+                .iter()
+                .filter(|item| {
+                    let id = item.item.id.to_string();
+                    id == first || id == last
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            let expected = app.normalized_positions(&subset);
+            let index_of = |id: &str| {
+                visible
+                    .iter()
+                    .position(|item| item.item.id.to_string() == id)
+                    .unwrap()
+            };
+            let first_index = index_of(&first);
+            let last_index = index_of(&last);
+            let before_center = (grid_slot(first_index, rect).to_vec2()
+                + grid_slot(last_index, rect).to_vec2())
+                / 2.0;
+            let arranged_center = (expected.get(&first).copied().unwrap()
+                + expected.get(&last).copied().unwrap())
+                / 2.0;
+            let untouched_before = app.node_offsets.get(&untouched).copied();
+            app.normalize_selected(rect, &[first.clone(), last.clone()]);
+            assert_eq!(app.node_offsets.get(&untouched).copied(), untouched_before);
+            for (index, id) in [(first_index, &first), (last_index, &last)] {
+                let actual =
+                    grid_slot(index, rect) + app.node_offsets.get(id).copied().unwrap_or_default();
+                let wanted = (before_center + expected.get(id).copied().unwrap() - arranged_center)
+                    .to_pos2();
+                assert!(
+                    (actual - wanted).length() < 0.01,
+                    "{style:?}: {id} actual={actual:?} wanted={wanted:?} arranged={expected:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn expansion_clears_only_its_scope_and_restores_prior_visibility() {
         let items = vec![
             task("1", None, ItemState::Inbox),
@@ -9950,7 +10063,8 @@ mod tests {
 
     /// An editor over paths that do not exist, so nothing is read or written.
     fn app(agent_filter: AgentFilter) -> TodoGui {
-        let missing = std::env::temp_dir().join("todo-gui-test-missing");
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("no-ledger");
         TodoGui::new(
             Runtime::new().unwrap(),
             LedgerAccess {
