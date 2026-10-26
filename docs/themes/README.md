@@ -52,6 +52,18 @@ Settings window holds unsaved edits, it says the file changed instead of
 discarding them; Reload from disk then applies the file, and Revert drops the
 edits.
 
+The family `+`/`-` and `-all` controls have three size modes under Settings →
+Families. `as_is` keeps a fixed screen size, `with_card` follows the rendered
+card width, and `clamped` keeps the fixed size within a configurable fraction
+of card width. The default clamp is from `1/12` to `2/3` of the card width:
+
+```toml
+[parent]
+control_scale = "clamped"
+control_min_width_ratio = 0.08333333
+control_max_width_ratio = 0.6666667
+```
+
 ## Inspector band colors
 
 ```toml

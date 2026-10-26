@@ -16,10 +16,10 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fs, path::PathBuf};
 use tags::{TagFilter, TagFilterState};
 use theme::{
-    Channel, CloudMemberShape, ColorMode, ConnectorStyle, FamilyChildStyle, FamilyHeaderStyle,
-    FamilyView, FamilyWellFill, InspectorTheme, NodeShape, NormalizeStyle, ParentRegionStyle,
-    RegionShape, TagCloudLinkMode, TagColoring, TagInheritance, TagPalette, TagTheme,
-    TerminalPalette, Theme, band_color,
+    Channel, CloudMemberShape, ColorMode, ConnectorStyle, FamilyChildStyle, FamilyControlScale,
+    FamilyHeaderStyle, FamilyView, FamilyWellFill, InspectorTheme, NodeShape, NormalizeStyle,
+    ParentRegionStyle, RegionShape, TagCloudLinkMode, TagColoring, TagInheritance, TagPalette,
+    TagTheme, TerminalPalette, Theme, band_color,
 };
 use todo_core::entry::{ASSIGNEE, AUTHOR, CONTRIBUTOR, REQUESTER};
 use todo_core::{
@@ -1277,6 +1277,45 @@ impl TodoGui {
     /// How parent tasks hold and connect their children.
     fn family_settings(&mut self, ui: &mut egui::Ui) {
         ui.label("Task families");
+        ui.label("Visibility control size");
+        egui::ComboBox::from_id_salt("family-control-scale")
+            .selected_text(match self.theme.parent.control_scale {
+                FamilyControlScale::AsIs => "As is",
+                FamilyControlScale::WithCard => "Scale with card",
+                FamilyControlScale::Clamped => "Clamp to card width",
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut self.theme.parent.control_scale,
+                    FamilyControlScale::AsIs,
+                    "As is",
+                );
+                ui.selectable_value(
+                    &mut self.theme.parent.control_scale,
+                    FamilyControlScale::WithCard,
+                    "Scale with card",
+                );
+                ui.selectable_value(
+                    &mut self.theme.parent.control_scale,
+                    FamilyControlScale::Clamped,
+                    "Clamp to card width",
+                );
+            });
+        if self.theme.parent.control_scale == FamilyControlScale::Clamped {
+            ui.add(
+                egui::Slider::new(&mut self.theme.parent.control_min_width_ratio, 0.01..=1.0)
+                    .text("Minimum / card width"),
+            );
+            ui.add(
+                egui::Slider::new(&mut self.theme.parent.control_max_width_ratio, 0.01..=1.0)
+                    .text("Maximum / card width"),
+            );
+            if self.theme.parent.control_min_width_ratio > self.theme.parent.control_max_width_ratio
+            {
+                self.theme.parent.control_max_width_ratio =
+                    self.theme.parent.control_min_width_ratio;
+            }
+        }
         egui::ComboBox::from_id_salt("family-header-style")
             .selected_text(match self.theme.parent.header_style {
                 FamilyHeaderStyle::Header => "Header",
@@ -5635,10 +5674,8 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
         if descendants > 0 {
             // This lives at the card's child-side edge, where its tree would
             // continue. It remains available even when the global depth is All.
-            let badge = Rect::from_center_size(
-                node.center_bottom() + Vec2::new(0.0, 5.0),
-                Vec2::new(44.0, 16.0),
-            );
+            let (toggle_rect, all_rect) =
+                family_control_rects(node, app.theme.node.size().0, &app.theme.parent);
             let label = if family_hidden { "+" } else { "-" };
             let tooltip = if family_hidden {
                 if hidden > 0 {
@@ -5649,35 +5686,49 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
             } else {
                 format!("Hide up to {descendants} descendant task(s)")
             };
-            let toggle = ui
-                .interact(
+            let toggle_action = if family_hidden {
+                FamilyVisibility::Show
+            } else {
+                FamilyVisibility::Hide
+            };
+            let font_scale = toggle_rect.height() / 16.0;
+            for (index, (badge, label, tooltip, action)) in [
+                (toggle_rect, label, tooltip, toggle_action),
+                (
+                    all_rect,
+                    "-all",
+                    "Hide every descendant, including active paths".to_owned(),
+                    FamilyVisibility::HideAll,
+                ),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let button = ui
+                    .interact(
+                        badge,
+                        ui.make_persistent_id(("family-visibility", &id, index)),
+                        Sense::click(),
+                    )
+                    .on_hover_text(tooltip);
+                painter.rect_filled(badge, 6.0 * font_scale, Color32::from_rgb(61, 68, 89));
+                painter.rect_stroke(
                     badge,
-                    ui.make_persistent_id(("family-expand", &id)),
-                    Sense::click(),
-                )
-                .on_hover_text(tooltip);
-            painter.rect_filled(badge, 6.0, Color32::from_rgb(61, 68, 89));
-            painter.rect_stroke(
-                badge,
-                6.0,
-                Stroke::new(1.0, Color32::LIGHT_GRAY),
-                egui::StrokeKind::Outside,
-            );
-            painter.text(
-                badge.center(),
-                Align2::CENTER_CENTER,
-                label,
-                FontId::proportional(11.0),
-                Color32::WHITE,
-            );
-            if toggle.clicked() {
-                let visibility = if family_hidden {
-                    FamilyVisibility::Show
-                } else {
-                    FamilyVisibility::Hide
-                };
-                app.set_family_visibility(&id, visibility, rect);
-                ui.ctx().request_repaint();
+                    6.0 * font_scale,
+                    Stroke::new(font_scale.max(0.5), Color32::LIGHT_GRAY),
+                    egui::StrokeKind::Outside,
+                );
+                painter.text(
+                    badge.center(),
+                    Align2::CENTER_CENTER,
+                    label,
+                    FontId::proportional(if index == 0 { 11.0 } else { 9.0 } * font_scale),
+                    Color32::WHITE,
+                );
+                if button.clicked() {
+                    app.set_family_visibility(&id, action, rect);
+                    ui.ctx().request_repaint();
+                }
             }
         }
         if response.drag_started()
@@ -6449,6 +6500,45 @@ fn family_visibility_counts(
         }
     }
     counts
+}
+
+/// The pair stays at the child's edge. Clamped mode keeps the unscaled control
+/// until it would exceed the configured fraction of a small card or fall below
+/// the configured fraction of a very large one.
+fn family_control_rects(
+    card: Rect,
+    base_card_width: f32,
+    parent: &theme::ParentTheme,
+) -> (Rect, Rect) {
+    const WIDTH: f32 = 64.0;
+    const HEIGHT: f32 = 16.0;
+    let card_width = card.width().max(1.0);
+    let min_ratio = if parent.control_min_width_ratio.is_finite() {
+        parent.control_min_width_ratio.clamp(0.01, 1.0)
+    } else {
+        1.0 / 12.0
+    };
+    let max_ratio = if parent.control_max_width_ratio.is_finite() {
+        parent.control_max_width_ratio.clamp(min_ratio, 1.0)
+    } else {
+        2.0 / 3.0
+    };
+    let width = match parent.control_scale {
+        FamilyControlScale::AsIs => WIDTH,
+        FamilyControlScale::WithCard => WIDTH * card_width / base_card_width.max(1.0),
+        FamilyControlScale::Clamped => WIDTH.clamp(card_width * min_ratio, card_width * max_ratio),
+    };
+    let scale = width / WIDTH;
+    let group = Rect::from_center_size(
+        card.center_bottom() + Vec2::new(0.0, 5.0 * scale),
+        Vec2::new(width, HEIGHT * scale),
+    );
+    let toggle = Rect::from_min_size(group.left_top(), Vec2::new(22.0, HEIGHT) * scale);
+    let all = Rect::from_min_size(
+        group.left_top() + Vec2::new(26.0, 0.0) * scale,
+        Vec2::new(38.0, HEIGHT) * scale,
+    );
+    (toggle, all)
 }
 
 /// Collapses only the view. A normal hide keeps active paths, an all-hide does
@@ -8418,10 +8508,10 @@ mod tests {
         AgentFilter, Channel, FamilyPresentation, FilterChip, GroupBy, LedgerAccess,
         LocalGraphLayout, Runtime, TagCloudLinkMode, TodoGui, ancestor_depth, ancestor_depth_index,
         collect_subtree, compare_group_labels, fallback_tag_colors, family_box,
-        family_dependency_bands, family_ring_mesh, family_tree_geometry, family_visibility_counts,
-        file_stamp, focus_is_active, graph_needs_weights, graph_positions, hierarchy_levels,
-        limit_child_depth, matches_query, node_meta, rebase_offsets_for_rect, search_step,
-        segment_outside_rect, tag_cloud_links,
+        family_control_rects, family_dependency_bands, family_ring_mesh, family_tree_geometry,
+        family_visibility_counts, file_stamp, focus_is_active, graph_needs_weights,
+        graph_positions, hierarchy_levels, limit_child_depth, matches_query, node_meta,
+        rebase_offsets_for_rect, search_step, segment_outside_rect, tag_cloud_links,
     };
     use eframe::egui::{Color32, Pos2, Rect, pos2, vec2};
     use std::collections::{HashMap, HashSet};
@@ -8848,6 +8938,27 @@ mod tests {
         let counts = family_visibility_counts(&items, &visible);
         assert_eq!(counts.get(&root), Some(&(3, 1)));
         assert_eq!(counts.get(&parent), Some(&(2, 1)));
+    }
+
+    #[test]
+    fn family_control_scaling_uses_fixed_card_and_clamped_widths() {
+        let mut parent = super::theme::ParentTheme::default();
+        let card = Rect::from_min_size(pos2(0.0, 0.0), vec2(150.0, 58.0));
+        let width = |parent: &super::theme::ParentTheme, card: Rect| {
+            let (toggle, all) = family_control_rects(card, 150.0, parent);
+            all.right() - toggle.left()
+        };
+        assert!((width(&parent, card) - 64.0).abs() < 0.01);
+        parent.control_scale = super::theme::FamilyControlScale::WithCard;
+        let double = Rect::from_min_size(pos2(0.0, 0.0), vec2(300.0, 116.0));
+        assert!((width(&parent, double) - 128.0).abs() < 0.01);
+        parent.control_scale = super::theme::FamilyControlScale::Clamped;
+        let small = Rect::from_min_size(pos2(0.0, 0.0), vec2(60.0, 24.0));
+        let large = Rect::from_min_size(pos2(0.0, 0.0), vec2(900.0, 360.0));
+        assert!((width(&parent, small) - 40.0).abs() < 0.01);
+        assert!((width(&parent, large) - 75.0).abs() < 0.01);
+        parent.control_max_width_ratio = 0.5;
+        assert!((width(&parent, small) - 30.0).abs() < 0.01);
     }
 
     #[test]

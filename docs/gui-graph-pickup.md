@@ -273,9 +273,9 @@ Deletion is deliberately absent from the editor. `todo rm --force` and
   board; the family tree continues to its actual card instead. A forced Box
   draws the complete span. A short stalk attaches a detached parent card to
   a genuine nearby child outline.
-- Every parent has a small **- / +** control at its child-side edge. **-**
+- Every parent has small **- / +** and **-all** controls at its child-side edge. **-**
   hides inactive descendants even when child depth is All; active-task paths
-  remain visible. Its context menu also offers **- all**, which hides active
+  remain visible. **-all** also hides active
   descendants too. Hiding a branch containing the selected card selects its
   parent. **+** reveals the whole branch past the global depth cap, including
   nested explicitly hidden families.

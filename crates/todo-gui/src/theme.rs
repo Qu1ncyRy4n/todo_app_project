@@ -962,6 +962,16 @@ pub enum ConnectorStyle {
     BlueCore,
 }
 
+/// How the controls on a parent card respond to changes in card size.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FamilyControlScale {
+    #[default]
+    AsIs,
+    WithCard,
+    Clamped,
+}
+
 /// Controls the region drawn around a parent task and its descendants.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -980,6 +990,12 @@ pub struct ParentTheme {
     pub child_style: FamilyChildStyle,
     /// Visible generations below a root; zero means all generations.
     pub child_depth: usize,
+    /// How the family visibility controls respond to card zoom and weight.
+    pub control_scale: FamilyControlScale,
+    /// Minimum control width as a fraction of the rendered parent-card width.
+    pub control_min_width_ratio: f32,
+    /// Maximum control width as a fraction of the rendered parent-card width.
+    pub control_max_width_ratio: f32,
     /// Direct children required before Dynamic draws a family box.
     pub dynamic_min_children: usize,
     /// Center-to-center distance that joins direct children into one Dynamic box.
@@ -1029,6 +1045,9 @@ impl Default for ParentTheme {
             header_style: FamilyHeaderStyle::AttachedTab,
             child_style: FamilyChildStyle::NestedFamily,
             child_depth: 0,
+            control_scale: FamilyControlScale::AsIs,
+            control_min_width_ratio: 1.0 / 12.0,
+            control_max_width_ratio: 2.0 / 3.0,
             dynamic_min_children: 3,
             dynamic_cluster_distance: 300.0,
             parent_join_max_gap: 30.0,
@@ -1242,8 +1261,9 @@ impl TagTheme {
 #[cfg(test)]
 mod tests {
     use super::{
-        CloudMemberShape, ColorMode, EdgeTheme, FamilyWellFill, NodeShape, NodeTheme,
-        TagCloudLinkMode, TagColoring, TagPalette, TagTheme, TerminalPalette, Theme, branch_weight,
+        CloudMemberShape, ColorMode, EdgeTheme, FamilyControlScale, FamilyWellFill, NodeShape,
+        NodeTheme, TagCloudLinkMode, TagColoring, TagPalette, TagTheme, TerminalPalette, Theme,
+        branch_weight,
     };
     use eframe::egui::Color32;
     use std::{
@@ -1314,6 +1334,22 @@ mod tests {
         assert_eq!(Theme::default().parent.child_depth, 0);
         let parsed: Result<Theme, _> = toml::from_str("[parent]\nshow_regions = true\n");
         assert!(matches!(parsed, Ok(theme) if theme.parent.child_depth == 0));
+    }
+
+    #[test]
+    fn family_control_scaling_round_trips_and_defaults_to_fixed_size() {
+        let defaults = Theme::default().parent;
+        assert_eq!(defaults.control_scale, FamilyControlScale::AsIs);
+        assert_eq!(defaults.control_min_width_ratio, 1.0 / 12.0);
+        assert_eq!(defaults.control_max_width_ratio, 2.0 / 3.0);
+        let parsed: Result<Theme, _> = toml::from_str(
+            "[parent]\ncontrol_scale = \"clamped\"\ncontrol_min_width_ratio = 0.1\ncontrol_max_width_ratio = 0.5\n",
+        );
+        assert!(
+            matches!(parsed, Ok(theme) if theme.parent.control_scale == FamilyControlScale::Clamped
+            && theme.parent.control_min_width_ratio == 0.1
+            && theme.parent.control_max_width_ratio == 0.5)
+        );
     }
 
     #[test]
