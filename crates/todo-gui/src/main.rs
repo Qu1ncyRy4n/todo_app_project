@@ -388,7 +388,7 @@ enum AfterSave {
     EditMore,
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FamilyVisibility {
     Show,
     Hide,
@@ -1122,7 +1122,7 @@ impl TodoGui {
                     );
                 }
             });
-        ui.weak("- keeps active paths visible; - all hides every descendant.");
+        ui.weak("Family control: - keeps active paths, -* hides all, + shows all.");
         ui.separator();
         ui.label("Group by, in order");
         for level in 0..3 {
@@ -5460,7 +5460,7 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
                     app.set_family_visibility(&id, FamilyVisibility::Hide, rect);
                     ui.close();
                 }
-                if ui.button("- all Hide every descendant").clicked() {
+                if ui.button("-* Hide every descendant").clicked() {
                     app.set_family_visibility(&id, FamilyVisibility::HideAll, rect);
                     ui.close();
                 }
@@ -5674,61 +5674,46 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
         if descendants > 0 {
             // This lives at the card's child-side edge, where its tree would
             // continue. It remains available even when the global depth is All.
-            let (toggle_rect, all_rect) =
-                family_control_rects(node, app.theme.node.size().0, &app.theme.parent);
-            let label = if family_hidden { "+" } else { "-" };
-            let tooltip = if family_hidden {
-                if hidden > 0 {
-                    format!("Show {hidden} hidden task(s) in this family")
-                } else {
-                    "Show this family".to_owned()
+            let badge = family_control_rect(node, app.theme.node.size().0, &app.theme.parent);
+            let (label, action) = family_cycle_step(
+                hidden,
+                app.collapsed_families.contains(&id),
+                app.collapsed_all_families.contains(&id),
+            );
+            let tooltip = match action {
+                FamilyVisibility::Show => format!("Show this family ({hidden} hidden)"),
+                FamilyVisibility::Hide => {
+                    format!("Hide up to {descendants} inactive descendant(s)")
                 }
-            } else {
-                format!("Hide up to {descendants} descendant task(s)")
+                FamilyVisibility::HideAll => {
+                    "Hide every descendant, including active paths".to_owned()
+                }
             };
-            let toggle_action = if family_hidden {
-                FamilyVisibility::Show
-            } else {
-                FamilyVisibility::Hide
-            };
-            let font_scale = toggle_rect.height() / 16.0;
-            for (index, (badge, label, tooltip, action)) in [
-                (toggle_rect, label, tooltip, toggle_action),
-                (
-                    all_rect,
-                    "-all",
-                    "Hide every descendant, including active paths".to_owned(),
-                    FamilyVisibility::HideAll,
-                ),
-            ]
-            .into_iter()
-            .enumerate()
-            {
-                let button = ui
-                    .interact(
-                        badge,
-                        ui.make_persistent_id(("family-visibility", &id, index)),
-                        Sense::click(),
-                    )
-                    .on_hover_text(tooltip);
-                painter.rect_filled(badge, 6.0 * font_scale, Color32::from_rgb(61, 68, 89));
-                painter.rect_stroke(
+            let button = ui
+                .interact(
                     badge,
-                    6.0 * font_scale,
-                    Stroke::new(font_scale.max(0.5), Color32::LIGHT_GRAY),
-                    egui::StrokeKind::Outside,
-                );
-                painter.text(
-                    badge.center(),
-                    Align2::CENTER_CENTER,
-                    label,
-                    FontId::proportional(if index == 0 { 11.0 } else { 9.0 } * font_scale),
-                    Color32::WHITE,
-                );
-                if button.clicked() {
-                    app.set_family_visibility(&id, action, rect);
-                    ui.ctx().request_repaint();
-                }
+                    ui.make_persistent_id(("family-visibility", &id)),
+                    Sense::click(),
+                )
+                .on_hover_text(tooltip);
+            let font_scale = badge.height() / 16.0;
+            painter.rect_filled(badge, 6.0 * font_scale, Color32::from_rgb(61, 68, 89));
+            painter.rect_stroke(
+                badge,
+                6.0 * font_scale,
+                Stroke::new(font_scale.max(0.5), Color32::LIGHT_GRAY),
+                egui::StrokeKind::Outside,
+            );
+            painter.text(
+                badge.center(),
+                Align2::CENTER_CENTER,
+                label,
+                FontId::proportional(11.0 * font_scale),
+                Color32::WHITE,
+            );
+            if button.clicked() {
+                app.set_family_visibility(&id, action, rect);
+                ui.ctx().request_repaint();
             }
         }
         if response.drag_started()
@@ -6502,15 +6487,11 @@ fn family_visibility_counts(
     counts
 }
 
-/// The pair stays at the child's edge. Clamped mode keeps the unscaled control
+/// The control stays at the child's edge. Clamped mode keeps its unscaled size
 /// until it would exceed the configured fraction of a small card or fall below
 /// the configured fraction of a very large one.
-fn family_control_rects(
-    card: Rect,
-    base_card_width: f32,
-    parent: &theme::ParentTheme,
-) -> (Rect, Rect) {
-    const WIDTH: f32 = 64.0;
+fn family_control_rect(card: Rect, base_card_width: f32, parent: &theme::ParentTheme) -> Rect {
+    const WIDTH: f32 = 44.0;
     const HEIGHT: f32 = 16.0;
     let card_width = card.width().max(1.0);
     let min_ratio = if parent.control_min_width_ratio.is_finite() {
@@ -6529,16 +6510,26 @@ fn family_control_rects(
         FamilyControlScale::Clamped => WIDTH.clamp(card_width * min_ratio, card_width * max_ratio),
     };
     let scale = width / WIDTH;
-    let group = Rect::from_center_size(
+    Rect::from_center_size(
         card.center_bottom() + Vec2::new(0.0, 5.0 * scale),
         Vec2::new(width, HEIGHT * scale),
-    );
-    let toggle = Rect::from_min_size(group.left_top(), Vec2::new(22.0, HEIGHT) * scale);
-    let all = Rect::from_min_size(
-        group.left_top() + Vec2::new(26.0, 0.0) * scale,
-        Vec2::new(38.0, HEIGHT) * scale,
-    );
-    (toggle, all)
+    )
+}
+
+/// Show is next when a family is already hard-hidden or only depth-limited;
+/// an explicit normal hide always gets a chance to advance to hide-all.
+fn family_cycle_step(
+    hidden: usize,
+    collapsed: bool,
+    collapsed_all: bool,
+) -> (&'static str, FamilyVisibility) {
+    if collapsed_all || (hidden > 0 && !collapsed) {
+        ("+", FamilyVisibility::Show)
+    } else if collapsed {
+        ("-*", FamilyVisibility::HideAll)
+    } else {
+        ("-", FamilyVisibility::Hide)
+    }
 }
 
 /// Collapses only the view. A normal hide keeps active paths, an all-hide does
@@ -8508,10 +8499,10 @@ mod tests {
         AgentFilter, Channel, FamilyPresentation, FilterChip, GroupBy, LedgerAccess,
         LocalGraphLayout, Runtime, TagCloudLinkMode, TodoGui, ancestor_depth, ancestor_depth_index,
         collect_subtree, compare_group_labels, fallback_tag_colors, family_box,
-        family_control_rects, family_dependency_bands, family_ring_mesh, family_tree_geometry,
-        family_visibility_counts, file_stamp, focus_is_active, graph_needs_weights,
-        graph_positions, hierarchy_levels, limit_child_depth, matches_query, node_meta,
-        rebase_offsets_for_rect, search_step, segment_outside_rect, tag_cloud_links,
+        family_control_rect, family_cycle_step, family_dependency_bands, family_ring_mesh,
+        family_tree_geometry, family_visibility_counts, file_stamp, focus_is_active,
+        graph_needs_weights, graph_positions, hierarchy_levels, limit_child_depth, matches_query,
+        node_meta, rebase_offsets_for_rect, search_step, segment_outside_rect, tag_cloud_links,
     };
     use eframe::egui::{Color32, Pos2, Rect, pos2, vec2};
     use std::collections::{HashMap, HashSet};
@@ -8945,13 +8936,12 @@ mod tests {
         let mut parent = super::theme::ParentTheme::default();
         let card = Rect::from_min_size(pos2(0.0, 0.0), vec2(150.0, 58.0));
         let width = |parent: &super::theme::ParentTheme, card: Rect| {
-            let (toggle, all) = family_control_rects(card, 150.0, parent);
-            all.right() - toggle.left()
+            family_control_rect(card, 150.0, parent).width()
         };
-        assert!((width(&parent, card) - 64.0).abs() < 0.01);
+        assert!((width(&parent, card) - 44.0).abs() < 0.01);
         parent.control_scale = super::theme::FamilyControlScale::WithCard;
         let double = Rect::from_min_size(pos2(0.0, 0.0), vec2(300.0, 116.0));
-        assert!((width(&parent, double) - 128.0).abs() < 0.01);
+        assert!((width(&parent, double) - 88.0).abs() < 0.01);
         parent.control_scale = super::theme::FamilyControlScale::Clamped;
         let small = Rect::from_min_size(pos2(0.0, 0.0), vec2(60.0, 24.0));
         let large = Rect::from_min_size(pos2(0.0, 0.0), vec2(900.0, 360.0));
@@ -8959,6 +8949,30 @@ mod tests {
         assert!((width(&parent, large) - 75.0).abs() < 0.01);
         parent.control_max_width_ratio = 0.5;
         assert!((width(&parent, small) - 30.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn family_control_cycles_from_partial_hide_to_full_hide_to_show() {
+        assert_eq!(
+            family_cycle_step(0, false, false),
+            ("-", super::FamilyVisibility::Hide)
+        );
+        assert_eq!(
+            family_cycle_step(1, true, false),
+            ("-*", super::FamilyVisibility::HideAll)
+        );
+        assert_eq!(
+            family_cycle_step(0, true, false),
+            ("-*", super::FamilyVisibility::HideAll)
+        );
+        assert_eq!(
+            family_cycle_step(2, true, true),
+            ("+", super::FamilyVisibility::Show)
+        );
+        assert_eq!(
+            family_cycle_step(2, false, false),
+            ("+", super::FamilyVisibility::Show)
+        );
     }
 
     #[test]
