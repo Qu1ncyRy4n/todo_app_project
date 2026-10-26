@@ -395,16 +395,41 @@ enum FamilyVisibility {
     HideAll,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 enum NormalizeScope {
     Graph,
     Family(String),
 }
 
-struct GPress {
-    at: std::time::Instant,
-    scope: NormalizeScope,
-    undo: Option<LayoutUndo>,
+struct ExpansionRestore {
+    expanded_families: std::collections::HashSet<String>,
+    collapsed_families: std::collections::HashSet<String>,
+    collapsed_all_families: std::collections::HashSet<String>,
+}
+
+impl ExpansionRestore {
+    fn capture(
+        expanded: &std::collections::HashSet<String>,
+        collapsed: &std::collections::HashSet<String>,
+        collapsed_all: &std::collections::HashSet<String>,
+    ) -> Self {
+        Self {
+            expanded_families: expanded.clone(),
+            collapsed_families: collapsed.clone(),
+            collapsed_all_families: collapsed_all.clone(),
+        }
+    }
+
+    fn restore(
+        self,
+        expanded: &mut std::collections::HashSet<String>,
+        collapsed: &mut std::collections::HashSet<String>,
+        collapsed_all: &mut std::collections::HashSet<String>,
+    ) {
+        *expanded = self.expanded_families;
+        *collapsed = self.collapsed_families;
+        *collapsed_all = self.collapsed_all_families;
+    }
 }
 
 struct TodoGui {
@@ -477,7 +502,7 @@ struct TodoGui {
     inspector: InspectorTheme,
     layout_undo: Option<LayoutUndo>,
     normalize_requested: bool,
-    last_g_press: Option<GPress>,
+    expansion_restore: Option<ExpansionRestore>,
     reset_view_requested: bool,
     focus_layout_requested: bool,
     separate_requested: bool,
@@ -554,7 +579,6 @@ struct LocalGraphLayout {
     family_presentations: HashMap<String, FamilyPresentation>,
 }
 
-#[derive(Clone)]
 struct LayoutUndo {
     offsets: HashMap<String, Vec2>,
     expanded_families: std::collections::HashSet<String>,
@@ -644,7 +668,7 @@ impl TodoGui {
             colors_applied: false,
             layout_undo: None,
             normalize_requested: false,
-            last_g_press: None,
+            expansion_restore: None,
             reset_view_requested: false,
             focus_layout_requested: false,
             separate_requested: false,
@@ -3203,17 +3227,29 @@ impl TodoGui {
         }
     }
 
-    /// A double G is one undoable operation: expand before arranging, but keep
-    /// the first G's snapshot from before both steps rather than the second
-    /// normalizer's later one.
-    fn normalize_scope_expanded(
-        &mut self,
-        rect: Rect,
-        scope: &NormalizeScope,
-        undo: Option<LayoutUndo>,
-    ) {
+    /// E changes only the view. Its next press restores the exact visibility
+    /// sets from before expansion while keeping any intervening card positions.
+    fn toggle_scope_expansion(&mut self, rect: Rect, scope: &NormalizeScope) {
         let before = self.visible_items();
+        if let Some(previous) = self.expansion_restore.take() {
+            self.remember_layout();
+            previous.restore(
+                &mut self.expanded_families,
+                &mut self.collapsed_families,
+                &mut self.collapsed_all_families,
+            );
+            let after = self.visible_items();
+            self.rebase_visible_offsets(&before, &after, rect);
+            self.save_layout();
+            self.message = Some("Previous family visibility restored.".to_owned());
+            return;
+        }
         let eligible = self.filtered_items();
+        let previous = ExpansionRestore::capture(
+            &self.expanded_families,
+            &self.collapsed_families,
+            &self.collapsed_all_families,
+        );
         if !expand_family_sets(
             &eligible,
             scope,
@@ -3221,15 +3257,20 @@ impl TodoGui {
             &mut self.collapsed_families,
             &mut self.collapsed_all_families,
         ) {
-            self.layout_undo = undo;
             return;
         }
+        self.layout_undo = Some(LayoutUndo {
+            offsets: self.node_offsets.clone(),
+            expanded_families: previous.expanded_families.clone(),
+            collapsed_families: previous.collapsed_families.clone(),
+            collapsed_all_families: previous.collapsed_all_families.clone(),
+        });
         let after = self.visible_items();
         self.rebase_visible_offsets(&before, &after, rect);
-        self.normalize_scope(rect, scope);
-        self.layout_undo = undo;
+        self.save_layout();
+        self.expansion_restore = Some(previous);
         self.message =
-            Some("Expanded all descendants and normalized. Undo layout restores both.".to_owned());
+            Some("Descendants expanded. Press E again to restore the prior view.".to_owned());
     }
 
     /// Rearranges only the connected parent/child tree under the pointer.
@@ -3496,6 +3537,7 @@ impl TodoGui {
 
     fn set_family_visibility(&mut self, id: &str, visibility: FamilyVisibility, rect: Rect) {
         let before = self.visible_items();
+        self.expansion_restore = None;
         self.remember_layout();
         let descendants = collect_subtree(id, &child_index(&self.filtered_items()))
             .into_iter()
@@ -3532,6 +3574,7 @@ impl TodoGui {
 
     /// Restores positions and expansion together so a local layout is undoable.
     fn undo_layout(&mut self) {
+        self.expansion_restore = None;
         match self.layout_undo.take() {
             Some(previous) => {
                 self.node_offsets = previous.offsets;
@@ -5804,26 +5847,19 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
     if let Some(id) = clicked {
         app.select(id);
     }
-    let g_presses = if ui.ctx().egui_wants_keyboard_input() {
-        0
+    let (normalize_pressed, expand_pressed) = if ui.ctx().egui_wants_keyboard_input() {
+        (false, false)
     } else {
         ui.input(|input| {
-            input
-                .events
-                .iter()
-                .filter(|event| {
-                    matches!(event, egui::Event::Key {
-                        key: egui::Key::G,
-                        pressed: true,
-                        repeat: false,
-                        modifiers,
-                        ..
-                    } if !modifiers.command && !modifiers.alt && !modifiers.ctrl)
-                })
-                .count()
+            let plain_key =
+                !input.modifiers.command && !input.modifiers.alt && !input.modifiers.ctrl;
+            (
+                plain_key && input.key_pressed(egui::Key::G),
+                plain_key && input.key_pressed(egui::Key::E),
+            )
         })
     };
-    if g_presses > 0
+    if (normalize_pressed || expand_pressed)
         && let Some(pointer) = ui.input(|input| input.pointer.hover_pos())
         && rect.contains(pointer)
     {
@@ -5833,26 +5869,12 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
             .map_or(NormalizeScope::Graph, |(id, _)| {
                 NormalizeScope::Family(id.clone())
             });
-        for _ in 0..g_presses {
-            let now = std::time::Instant::now();
-            let prior = app.last_g_press.take();
-            if g_chord_is_double(prior.as_ref(), now) {
-                // The first G can move a card away from the pointer, so the second
-                // press uses the original scope rather than hit-testing again.
-                if let Some(prior) = prior {
-                    app.normalize_scope_expanded(rect, &prior.scope, prior.undo);
-                }
-            } else {
-                app.normalize_scope(rect, &scope);
-                app.last_g_press = Some(GPress {
-                    at: now,
-                    scope: scope.clone(),
-                    undo: app.layout_undo.clone(),
-                });
-            }
+        if normalize_pressed {
+            app.normalize_scope(rect, &scope);
         }
-    } else if ui.ctx().egui_wants_keyboard_input() || g_presses > 0 {
-        app.last_g_press = None;
+        if expand_pressed {
+            app.toggle_scope_expansion(rect, &scope);
+        }
     }
     if response.clicked() {
         app.drag_anchor = None;
@@ -6664,12 +6686,6 @@ fn family_cycle_step(
     } else {
         ("-", FamilyVisibility::Hide)
     }
-}
-
-fn g_chord_is_double(prior: Option<&GPress>, now: std::time::Instant) -> bool {
-    prior.is_some_and(|press| {
-        now.saturating_duration_since(press.at) <= std::time::Duration::from_millis(500)
-    })
 }
 
 /// Collapses only the view. A normal hide keeps active paths, an all-hide does
@@ -8636,18 +8652,17 @@ fn short_title(title: &str) -> String {
 )]
 mod tests {
     use super::{
-        AgentFilter, Channel, FamilyPresentation, FilterChip, GPress, GroupBy, LedgerAccess,
-        LocalGraphLayout, NormalizeScope, Runtime, TagCloudLinkMode, TodoGui, ancestor_depth,
-        ancestor_depth_index, collect_subtree, compare_group_labels, connected_family_root,
-        expand_family_sets, fallback_tag_colors, family_box, family_control_rect,
-        family_cycle_step, family_dependency_bands, family_ring_mesh, family_tree_geometry,
-        family_visibility_counts, file_stamp, focus_is_active, g_chord_is_double,
+        AgentFilter, Channel, ExpansionRestore, FamilyPresentation, FilterChip, GroupBy,
+        LedgerAccess, LocalGraphLayout, NormalizeScope, Runtime, TagCloudLinkMode, TodoGui,
+        ancestor_depth, ancestor_depth_index, collect_subtree, compare_group_labels,
+        connected_family_root, expand_family_sets, fallback_tag_colors, family_box,
+        family_control_rect, family_cycle_step, family_dependency_bands, family_ring_mesh,
+        family_tree_geometry, family_visibility_counts, file_stamp, focus_is_active,
         graph_needs_weights, graph_positions, hierarchy_levels, limit_child_depth, matches_query,
         node_meta, rebase_offsets_for_rect, search_step, segment_outside_rect, tag_cloud_links,
     };
     use eframe::egui::{Color32, Pos2, Rect, pos2, vec2};
     use std::collections::{HashMap, HashSet};
-    use std::time::{Duration, Instant};
     use todo_core::{ItemState, Priority};
     use todo_store::StoredItem;
 
@@ -9118,26 +9133,7 @@ mod tests {
     }
 
     #[test]
-    fn double_g_uses_a_short_window() {
-        let now = Instant::now();
-        let prior = GPress {
-            at: now,
-            scope: NormalizeScope::Graph,
-            undo: None,
-        };
-        assert!(g_chord_is_double(
-            Some(&prior),
-            now + Duration::from_millis(450)
-        ));
-        assert!(!g_chord_is_double(
-            Some(&prior),
-            now + Duration::from_millis(501)
-        ));
-        assert!(!g_chord_is_double(None, now));
-    }
-
-    #[test]
-    fn expanded_normalize_scope_clears_only_its_family_or_the_whole_graph() {
+    fn expansion_clears_only_its_scope_and_restores_prior_visibility() {
         let items = vec![
             task("1", None, ItemState::Inbox),
             task("2", Some("1"), ItemState::Inbox),
@@ -9162,6 +9158,7 @@ mod tests {
         assert!(expanded.contains(&root));
         assert_eq!(collapsed, HashSet::from([other.clone()]));
         assert_eq!(collapsed_all, HashSet::from([other.clone()]));
+        let previous = ExpansionRestore::capture(&expanded, &collapsed, &collapsed_all);
         assert!(expand_family_sets(
             &items,
             &NormalizeScope::Graph,
@@ -9182,6 +9179,10 @@ mod tests {
             &HashSet::new(),
         );
         assert_eq!(shown.len(), 5);
+        previous.restore(&mut expanded, &mut collapsed, &mut collapsed_all);
+        assert_eq!(collapsed, HashSet::from([other.clone()]));
+        assert_eq!(collapsed_all, HashSet::from([other]));
+        assert_eq!(expanded, HashSet::from([root]));
     }
 
     #[test]
