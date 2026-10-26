@@ -58,7 +58,8 @@ fn main() -> Result<()> {
     eframe::run_native(
         "Todo Ledger",
         eframe::NativeOptions::default(),
-        Box::new(move |_| {
+        Box::new(move |creation| {
+            install_symbol_fallback(&creation.egui_ctx);
             Ok(Box::new(TodoGui::new(
                 runtime,
                 access,
@@ -69,6 +70,32 @@ fn main() -> Result<()> {
         }),
     )
     .context("run native Todo Ledger window")
+}
+
+/// egui does not consult the operating system's font fallback when a glyph is
+/// missing. macOS's outline symbol font fills gaps left by its bundled fonts;
+/// the color-only Apple emoji font cannot be rasterized as an outline fallback.
+fn install_symbol_fallback(ctx: &egui::Context) {
+    #[cfg(target_os = "macos")]
+    {
+        let Ok(bytes) = fs::read("/System/Library/Fonts/Apple Symbols.ttf") else {
+            return;
+        };
+        let mut fonts = egui::FontDefinitions::default();
+        let name = "Apple Symbols".to_owned();
+        fonts.font_data.insert(
+            name.clone(),
+            std::sync::Arc::new(egui::FontData::from_owned(bytes)),
+        );
+        for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+            if let Some(chain) = fonts.families.get_mut(&family) {
+                chain.push(name.clone());
+            }
+        }
+        ctx.set_fonts(fonts);
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = ctx;
 }
 
 /// Where the ledger lives and who the editor writes as.
@@ -274,7 +301,7 @@ impl SettingsTab {
             Self::Tags => "Tags",
             Self::Motion => "Motion",
             Self::Colors => "Colors",
-            Self::Inspector => "Inspector",
+            Self::Inspector => "Info",
         }
     }
 }
@@ -354,6 +381,19 @@ impl Edit {
 /// Roles offered in the inspector; any other role name can still be typed.
 const ROLES: [&str; 4] = [AUTHOR, CONTRIBUTOR, ASSIGNEE, REQUESTER];
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum AfterSave {
+    Close,
+    New,
+    EditMore,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum FamilyVisibility {
+    Show,
+    Hide,
+}
+
 struct TodoGui {
     runtime: Runtime,
     ledger: LedgerAccess,
@@ -384,6 +424,7 @@ struct TodoGui {
     show_tag_constellation: bool,
     show_parent_regions: bool,
     expanded_families: std::collections::HashSet<String>,
+    collapsed_families: std::collections::HashSet<String>,
     family_presentations: HashMap<String, FamilyPresentation>,
     show_relations: bool,
     relation_draft: RelationKind,
@@ -407,6 +448,7 @@ struct TodoGui {
     estimate_draft: String,
     graph_pan: Vec2,
     graph_zoom: f32,
+    last_canvas_rect: Option<Rect>,
     theme: Theme,
     theme_path: PathBuf,
     /// The theme as last read from or written to disk, so unsaved panel edits
@@ -439,11 +481,22 @@ struct TodoGui {
     new_task_open: bool,
     new_task_title: String,
     new_task_parent: Option<String>,
+    new_task_parent_query: String,
+    new_task_child: String,
+    new_task_person: String,
+    new_task_role: String,
+    new_task_note: String,
+    new_task_due: String,
+    new_task_tag: String,
+    new_task_error: Option<String>,
     note_draft: String,
     link_target_draft: String,
     link_label_draft: String,
     search: String,
     search_focus: bool,
+    search_navigation_active: bool,
+    center_requested: Option<String>,
+    info_attention_start: Option<std::time::Instant>,
     show_filters: bool,
     show_inspector: bool,
     show_settings: bool,
@@ -489,6 +542,7 @@ struct LocalGraphLayout {
 struct LayoutUndo {
     offsets: HashMap<String, Vec2>,
     expanded_families: std::collections::HashSet<String>,
+    collapsed_families: std::collections::HashSet<String>,
 }
 
 impl TodoGui {
@@ -540,6 +594,7 @@ impl TodoGui {
             show_tag_constellation: true,
             show_parent_regions: true,
             expanded_families: std::collections::HashSet::new(),
+            collapsed_families: std::collections::HashSet::new(),
             family_presentations: saved_layout.family_presentations,
             show_relations: true,
             relation_draft: RelationKind::ContributesTo,
@@ -562,6 +617,7 @@ impl TodoGui {
             estimate_draft: String::new(),
             graph_pan: Vec2::ZERO,
             graph_zoom: 1.0,
+            last_canvas_rect: None,
             inspector: theme.inspector,
             theme_loaded: theme.clone(),
             theme,
@@ -590,11 +646,22 @@ impl TodoGui {
             new_task_open: false,
             new_task_title: String::new(),
             new_task_parent: None,
+            new_task_parent_query: String::new(),
+            new_task_child: String::new(),
+            new_task_person: String::new(),
+            new_task_role: ASSIGNEE.to_owned(),
+            new_task_note: String::new(),
+            new_task_due: String::new(),
+            new_task_tag: String::new(),
+            new_task_error: None,
             note_draft: String::new(),
             link_target_draft: String::new(),
             link_label_draft: String::new(),
             search: String::new(),
             search_focus: false,
+            search_navigation_active: false,
+            center_requested: None,
+            info_attention_start: None,
             show_filters: true,
             show_inspector: true,
             show_settings: false,
@@ -771,6 +838,7 @@ impl TodoGui {
         self.tag_filter.clear();
         self.tag_states.clear();
         self.search.clear();
+        self.search_navigation_active = false;
         self.message = Some("Filters restored to their defaults.".to_owned());
     }
 
@@ -837,7 +905,10 @@ impl TodoGui {
             FilterChip::ActiveOnly => self.focus_only = false,
             FilterChip::Agent => self.agent_filter = AgentFilter::Show,
             FilterChip::Tag(path, _) => self.tag_states.reset(path),
-            FilterChip::Search => self.search.clear(),
+            FilterChip::Search => {
+                self.search.clear();
+                self.search_navigation_active = false;
+            }
             FilterChip::Lines => {
                 self.show_parent_graph = true;
                 self.show_dependency_graph = true;
@@ -859,7 +930,7 @@ impl TodoGui {
             ui.weak("filtered:");
             for chip in chips {
                 if ui
-                    .small_button(format!("{} ✕", self.chip_label(chip)))
+                    .small_button(format!("{} (clear)", self.chip_label(chip)))
                     .on_hover_text("Clear this filter")
                     .clicked()
                 {
@@ -1490,7 +1561,7 @@ impl TodoGui {
             .show(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 let Some(item) = self.selected_item().cloned() else {
-                    ui.weak("Select a task node to inspect it.");
+                    ui.weak("Select a task node to view its info.");
                     if let Some(message) = self.message.clone() {
                         ui.separator();
                         ui.label(message);
@@ -1515,7 +1586,7 @@ impl TodoGui {
 
     /// The title, state and priority chips, spoken id, and parent link.
     ///
-    /// The title reads as a heading and edits in place: click it or `✎`, then
+    /// The title reads as a heading and edits in place: click it or Edit, then
     /// Enter saves and Escape restores it. A chip's menu saves on choice, so no
     /// edit here needs a Save button.
     fn inspector_header(&mut self, ui: &mut egui::Ui, item: &StoredItem) {
@@ -1542,7 +1613,7 @@ impl TodoGui {
                     egui::Label::new(egui::RichText::new(&item.item.title).heading())
                         .sense(Sense::click()),
                 );
-                let pencil = ui.small_button("✎");
+                let pencil = ui.small_button("Edit");
                 if title.on_hover_text("Click to edit").clicked() || pencil.clicked() {
                     self.title_draft = item.item.title.clone();
                     self.editing = Some(Edit::Title);
@@ -1551,8 +1622,8 @@ impl TodoGui {
         }
         ui.horizontal_wrapped(|ui| {
             let holds = ids_holding_active_work(&self.items).contains(&item.item.id.to_string());
-            let state = egui::RichText::new(format!("{} ▾", item.item.state))
-                .color(status_color(item, holds));
+            let state =
+                egui::RichText::new(item.item.state.to_string()).color(status_color(item, holds));
             ui.menu_button(state, |ui| {
                 for state in [
                     ItemState::Inbox,
@@ -1570,7 +1641,7 @@ impl TodoGui {
                     }
                 }
             });
-            ui.menu_button(format!("{} ▾", item.item.priority), |ui| {
+            ui.menu_button(item.item.priority.to_string(), |ui| {
                 for priority in [
                     Priority::Low,
                     Priority::Normal,
@@ -1585,7 +1656,7 @@ impl TodoGui {
             });
             let done = item.item.state == ItemState::Done;
             if ui
-                .small_button(if done { "↺" } else { "✓" })
+                .small_button(if done { "Reopen" } else { "Done" })
                 .on_hover_text(if done { "Reopen" } else { "Complete" })
                 .clicked()
             {
@@ -1593,11 +1664,14 @@ impl TodoGui {
             }
             let short = item.item.id.short();
             if ui
-                .small_button(format!("{short} ⧉"))
+                .small_button(format!("{short} Copy"))
                 .on_hover_text("Copy the spoken id")
                 .clicked()
             {
                 ui.ctx().copy_text(short.to_string());
+            }
+            if ui.small_button("Center").clicked() {
+                self.center_requested = Some(item.item.id.to_string());
             }
         });
         if let Some(parent) = item.item.parent_id
@@ -1669,7 +1743,7 @@ impl TodoGui {
         ui.horizontal(|ui| {
             ui.weak(format!("id {id}"));
             if ui
-                .small_button("⧉")
+                .small_button("Copy")
                 .on_hover_text("Copy the full id")
                 .clicked()
             {
@@ -1679,7 +1753,7 @@ impl TodoGui {
     }
 
     /// Children, prerequisites, blockers, typed relations, and focus sequences.
-    /// The parent is in the header; moving or detaching it is in `+ ▾`.
+    /// The parent is in the header; moving or detaching it is in Add.
     fn band_structure(&mut self, ui: &mut egui::Ui, item: &StoredItem) {
         let id = item.item.id.to_string();
         let children = child_index(&self.items).remove(&id).unwrap_or_default();
@@ -1722,9 +1796,7 @@ impl TodoGui {
             empty,
             |app, ui| {
                 if ui.button("child task").clicked() {
-                    app.new_task_parent = Some(item.item.id.to_string());
-                    app.new_task_title.clear();
-                    app.new_task_open = true;
+                    app.open_new_task(Some(item.item.id.to_string()));
                 }
                 if app.inspector.show_parent {
                     if ui.button("move to parent…").clicked() {
@@ -1928,7 +2000,7 @@ impl TodoGui {
     }
 
     /// Draws one inspector band: a colored stripe down its left edge, a colored
-    /// label, a one-line summary while collapsed, and a `+ ▾` add menu.
+    /// label, a one-line summary while collapsed, and an Add menu.
     ///
     /// The color is only ever a stripe and a label, never a fill behind text. An
     /// empty band dims both, so it reads as "nothing here yet" at a glance.
@@ -1966,7 +2038,7 @@ impl TodoGui {
                     .show_header(ui, |ui| {
                         ui.label(egui::RichText::new(label).color(color).strong());
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.menu_button("+ ▾", |ui| add(self, ui));
+                            ui.menu_button("Add", |ui| add(self, ui));
                             if collapsed && !summary.is_empty() {
                                 ui.add(
                                     egui::Label::new(egui::RichText::new(summary).weak())
@@ -2264,7 +2336,7 @@ impl TodoGui {
     }
 
     /// Dates, effort, and work sessions. Only fields with a value get a row;
-    /// `+ ▾` offers the rest.
+    /// Add offers the rest.
     fn band_time(&mut self, ui: &mut egui::Ui, item: &StoredItem) {
         let today = Local::now().date_naive();
         let values = Edit::TIME.map(|edit| (edit, time_value(item, edit, today)));
@@ -3108,6 +3180,7 @@ impl TodoGui {
             + self.node_offsets.get(&root).copied().unwrap_or(Vec2::ZERO);
         self.remember_layout();
         self.expanded_families.insert(root.clone());
+        self.collapsed_families.remove(&root);
         let items = self.visible_items();
         self.rebase_visible_offsets(&before, &items, rect);
         let children = items
@@ -3312,6 +3385,7 @@ impl TodoGui {
         self.layout_undo = Some(LayoutUndo {
             offsets: self.node_offsets.clone(),
             expanded_families: self.expanded_families.clone(),
+            collapsed_families: self.collapsed_families.clone(),
         });
     }
 
@@ -3336,11 +3410,29 @@ impl TodoGui {
         }
     }
 
-    fn toggle_family_expanded(&mut self, id: &str, rect: Rect) {
+    fn set_family_visibility(&mut self, id: &str, visibility: FamilyVisibility, rect: Rect) {
         let before = self.visible_items();
         self.remember_layout();
-        if !self.expanded_families.remove(id) {
-            self.expanded_families.insert(id.to_owned());
+        let descendants = collect_subtree(id, &child_index(&self.filtered_items()))
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>();
+        match visibility {
+            FamilyVisibility::Show => {
+                self.collapsed_families
+                    .retain(|hidden| !descendants.contains(hidden));
+                self.expanded_families.insert(id.to_owned());
+            }
+            FamilyVisibility::Hide => {
+                self.expanded_families.remove(id);
+                self.collapsed_families.insert(id.to_owned());
+                if self
+                    .selected
+                    .as_ref()
+                    .is_some_and(|selected| selected != id && descendants.contains(selected))
+                {
+                    self.select(id.to_owned());
+                }
+            }
         }
         let after = self.visible_items();
         self.rebase_visible_offsets(&before, &after, rect);
@@ -3353,6 +3445,7 @@ impl TodoGui {
             Some(previous) => {
                 self.node_offsets = previous.offsets;
                 self.expanded_families = previous.expanded_families;
+                self.collapsed_families = previous.collapsed_families;
                 self.timeline_origin = None;
                 self.save_layout();
                 self.message = Some("Previous layout restored.".to_owned());
@@ -3373,16 +3466,42 @@ impl TodoGui {
         )
     }
 
-    /// Selects the first match so Enter jumps rather than only highlighting.
-    fn jump_to_first_match(&mut self) {
-        if let Some(found) = self
+    /// Search navigation begins on Enter. Later steps wrap through visible hits.
+    fn step_search(&mut self, backwards: bool) {
+        if self.search.trim().is_empty() {
+            return;
+        }
+        let matches = self
             .visible_items()
             .into_iter()
-            .find(|item| self.search_matches(item))
-        {
-            let id = found.item.id.to_string();
-            self.selected = Some(id.clone());
-            self.select(id);
+            .filter(|item| self.search_matches(item))
+            .map(|item| item.item.id.to_string())
+            .collect::<Vec<_>>();
+        let current = if self.search_navigation_active {
+            self.selected.as_deref()
+        } else {
+            None
+        };
+        let Some(next) = search_step(&matches, current, backwards) else {
+            return;
+        };
+        self.search_navigation_active = true;
+        self.select(next.clone());
+        self.center_requested = Some(next);
+    }
+
+    /// Centers a visible card without changing zoom or its saved graph position.
+    fn center_card(&mut self, rect: Rect, id: &str) {
+        let items = self.visible_items();
+        let positions = graph_positions(
+            &items,
+            rect,
+            &self.drawn_offsets,
+            self.graph_pan,
+            self.graph_zoom,
+        );
+        if let Some(center) = positions.get(id) {
+            self.graph_pan += rect.center() - *center;
         }
     }
 
@@ -3393,6 +3512,7 @@ impl TodoGui {
             self.filtered_items(),
             self.theme.parent.child_depth,
             &self.expanded_families,
+            &self.collapsed_families,
             self.selected.as_deref(),
         )
     }
@@ -3483,19 +3603,19 @@ impl TodoGui {
 
     /// Applies the color mode and any borrowed terminal palette to egui.
     ///
-    /// The palette restyles the surfaces only: panels, canvas, text, selection,
-    /// and links. Card colors stay with the tag and status channels.
+    /// A generated palette may lag behind the OS appearance. Keep both egui
+    /// variants current so System switches the whole window with the OS, using
+    /// the palette only for the appearance its background actually supports.
     fn apply_colors(&mut self, ctx: &egui::Context) {
         let colors = &self.theme.colors;
-        // ponytail: in system mode the palette lands on whichever appearance is
-        // current at load; an OS switch afterwards shows egui's stock visuals until
-        // Reload theme. Apply to both themes if that ever matters.
-        let (preference, theme) = match colors.mode {
-            ColorMode::Dark => (egui::ThemePreference::Dark, egui::Theme::Dark),
-            ColorMode::Light => (egui::ThemePreference::Light, egui::Theme::Light),
-            ColorMode::System => (egui::ThemePreference::System, ctx.theme()),
+        let preference = match colors.mode {
+            ColorMode::Dark => egui::ThemePreference::Dark,
+            ColorMode::Light => egui::ThemePreference::Light,
+            ColorMode::System => egui::ThemePreference::System,
         };
         ctx.set_theme(preference);
+        ctx.set_visuals_of(egui::Theme::Dark, egui::Visuals::dark());
+        ctx.set_visuals_of(egui::Theme::Light, egui::Visuals::light());
         let Some(path) = colors.palette_path() else {
             return;
         };
@@ -3506,12 +3626,10 @@ impl TodoGui {
                 return;
             }
         };
-        // The palette's background decides the widget fills, not the mode: a
-        // light palette over dark visuals left dark text on dark dropdowns.
-        let mut visuals = match palette.is_dark() {
-            Some(true) => egui::Visuals::dark(),
-            Some(false) => egui::Visuals::light(),
-            None => theme.default_visuals(),
+        let (theme, mut visuals) = match palette.is_dark() {
+            Some(true) => (egui::Theme::Dark, egui::Visuals::dark()),
+            Some(false) => (egui::Theme::Light, egui::Visuals::light()),
+            None => return,
         };
         if let Some(background) = palette.background {
             visuals.panel_fill = background;
@@ -3798,42 +3916,153 @@ impl TodoGui {
         }
     }
 
-    fn add_task(&mut self) {
+    fn open_new_task(&mut self, parent: Option<String>) {
+        self.new_task_title.clear();
+        self.new_task_parent = parent;
+        self.new_task_parent_query.clear();
+        self.new_task_child.clear();
+        self.new_task_person.clear();
+        self.new_task_role = ASSIGNEE.to_owned();
+        self.new_task_note.clear();
+        self.new_task_due.clear();
+        self.new_task_tag.clear();
+        self.new_task_error = None;
+        self.new_task_open = true;
+    }
+
+    fn add_task(&mut self, after_save: AfterSave) {
         let title = self.new_task_title.trim();
         if title.is_empty() {
-            self.message = Some("New task title cannot be empty.".to_owned());
+            self.new_task_error = Some("New task title cannot be empty.".to_owned());
             return;
         }
-        let parent = self.new_task_parent.clone();
-        match self.with_ledger(async |ledger| ledger.add_item(title, None).await) {
+        let due = match parse_date(&self.new_task_due) {
+            Ok(due) => due,
+            Err(error) => {
+                self.new_task_error = Some(error);
+                return;
+            }
+        };
+        let tag = if self.new_task_tag.trim().is_empty() {
+            None
+        } else {
+            let value = self.new_task_tag.trim();
+            let path = if value.starts_with("tag/") {
+                value.to_owned()
+            } else {
+                format!("tag/{value}")
+            };
+            match path.parse::<NamespacePath>() {
+                Ok(path) => Some(path),
+                Err(error) => {
+                    self.new_task_error = Some(format!("Invalid tag: {error}"));
+                    return;
+                }
+            }
+        };
+        let person = if self.new_task_person.trim().is_empty() {
+            None
+        } else {
+            match format!("actor/{}", self.new_task_person.trim()).parse::<NamespacePath>() {
+                Ok(path) => Some(path),
+                Err(error) => {
+                    self.new_task_error = Some(format!("Invalid person: {error}"));
+                    return;
+                }
+            }
+        };
+        let parent = self.new_task_parent.as_deref();
+        let project = match parent {
+            Some(parent) => {
+                let Some(item) = self
+                    .items
+                    .iter()
+                    .find(|item| item.item.id.to_string() == parent)
+                else {
+                    self.new_task_error =
+                        Some("Selected parent is no longer available.".to_owned());
+                    return;
+                };
+                match item.item.project_id {
+                    Some(project_id) => match self.namespaces.iter().find(|ns| ns.id == project_id)
+                    {
+                        Some(namespace) => Some(namespace.path.clone()),
+                        None => {
+                            self.new_task_error =
+                                Some("Selected parent's project is unavailable.".to_owned());
+                            return;
+                        }
+                    },
+                    None => None,
+                }
+            }
+            None => None,
+        };
+        let tags = tag.into_iter().collect::<Vec<_>>();
+        match self.with_ledger(async |ledger| {
+            ledger
+                .add_item_with(title, project.as_ref(), &tags, parent)
+                .await
+        }) {
             Ok(item) => {
                 let id = item.item.id.to_string();
-                self.new_task_title.clear();
-                self.new_task_open = false;
-                // The parent is set as a second step because creation is unscoped;
-                // a failure to attach leaves the task itself intact and says so.
-                let attached = match parent {
-                    Some(parent) => {
-                        match self.with_ledger(async |ledger| ledger.set_parent(&id, &parent).await)
-                        {
-                            Ok(()) => Some(Ok(())),
-                            Err(error) => Some(Err(error)),
-                        }
+                let role = self.new_task_role.clone();
+                let note = self.new_task_note.trim().to_owned();
+                let child = self.new_task_child.trim().to_owned();
+                // The ledger creates title, tag, and parent atomically. The
+                // remaining event-backed fields are applied after creation;
+                // their failure must never invite a duplicate Save.
+                let details = self.with_ledger(async |ledger| {
+                    if let Some(due) = due {
+                        ledger.set_due_on(&id, Some(due)).await?;
                     }
-                    None => None,
-                };
-                self.new_task_parent = None;
-                self.message = Some(match attached {
-                    None => "New inbox task created.".to_owned(),
-                    Some(Ok(())) => "New child task created.".to_owned(),
-                    Some(Err(error)) => {
-                        format!("Task created, but not attached to its parent: {error:#}")
+                    if let Some(person) = &person {
+                        ledger.assign_role(&id, &role, person).await?;
+                    }
+                    if !note.is_empty() {
+                        ledger.add_note(&id, &note).await?;
+                    }
+                    if !child.is_empty() {
+                        ledger
+                            .add_item_with(&child, project.as_ref(), &[], Some(&id))
+                            .await?;
+                    }
+                    Ok(())
+                });
+                if after_save == AfterSave::New {
+                    self.open_new_task(None);
+                } else {
+                    self.new_task_open = false;
+                }
+                self.message = Some(match details {
+                    Ok(()) => "Task saved.".to_owned(),
+                    Err(error) => {
+                        format!("Task created, but some details were not saved: {error:#}")
                     }
                 });
                 self.refresh();
-                self.select(id);
+                self.select(id.clone());
+                if after_save == AfterSave::EditMore {
+                    self.show_inspector = true;
+                    self.search.clear();
+                    self.search_navigation_active = false;
+                    // A newly saved inbox task can be excluded by a focused,
+                    // agent-only, or tag-only view. Relax only those filters
+                    // when needed so the selected card can actually be seen.
+                    if !self
+                        .visible_items()
+                        .iter()
+                        .any(|item| item.item.id.to_string() == id)
+                    {
+                        self.focus_only = false;
+                        self.agent_filter = AgentFilter::Show;
+                        self.tag_states.clear();
+                    }
+                    self.center_requested = Some(id);
+                    self.info_attention_start = Some(std::time::Instant::now());
+                }
             }
-            Err(error) => self.message = Some(format!("Task not created: {error:#}")),
+            Err(error) => self.new_task_error = Some(format!("Task not created: {error:#}")),
         }
     }
 
@@ -4386,6 +4615,21 @@ fn matches_query(query: &str, title: &str, ids: &[String], tags: &[String]) -> b
         || tags.iter().any(|tag| tag.to_lowercase().contains(&needle))
 }
 
+/// Chooses a search hit in display order, wrapping at either end.
+fn search_step(matches: &[String], current: Option<&str>, backwards: bool) -> Option<String> {
+    if matches.is_empty() {
+        return None;
+    }
+    let current_index = current.and_then(|id| matches.iter().position(|match_id| match_id == id));
+    let index = match (current_index, backwards) {
+        (Some(0), true) | (None, true) => matches.len() - 1,
+        (Some(index), true) => index - 1,
+        (Some(index), false) => (index + 1) % matches.len(),
+        (None, false) => 0,
+    };
+    matches.get(index).cloned()
+}
+
 impl eframe::App for TodoGui {
     fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
         if !self.colors_applied {
@@ -4407,6 +4651,7 @@ impl eframe::App for TodoGui {
         }
         if ui.input(|input| input.key_pressed(egui::Key::Escape)) && !self.search.is_empty() {
             self.search.clear();
+            self.search_navigation_active = false;
         }
         // F, comma, and I open the filter drawer, Settings, and the inspector.
         if !ui.ctx().egui_wants_keyboard_input() {
@@ -4416,6 +4661,9 @@ impl eframe::App for TodoGui {
                 self.show_inspector ^= input.key_pressed(egui::Key::I);
             });
         }
+        let enter_search_from_canvas = !ui.ctx().egui_wants_keyboard_input()
+            && self.search_navigation_active
+            && ui.input(|input| input.key_pressed(egui::Key::Enter));
         if !ui.ctx().egui_wants_keyboard_input() {
             let step = if ui.input(|input| input.modifiers.shift) {
                 80.0
@@ -4441,27 +4689,25 @@ impl eframe::App for TodoGui {
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 if ui.button("+ New").clicked() {
-                    self.new_task_parent = None;
-                    self.new_task_title.clear();
-                    self.new_task_open = true;
+                    self.open_new_task(None);
                 }
                 let filter_label = if chips.is_empty() {
                     "Filter".to_owned()
                 } else {
-                    format!("Filter · {}", chips.len())
+                    format!("Filter ({})", chips.len())
                 };
                 ui.toggle_value(&mut self.show_filters, filter_label)
                     .on_hover_text("Filter drawer (F)");
-                ui.menu_button("Layout ▾", |ui| self.arrangement_buttons(ui));
+                ui.menu_button("Layout", |ui| self.arrangement_buttons(ui));
                 ui.separator();
-                if ui.button("−").clicked() {
+                if ui.button("-").clicked() {
                     self.graph_zoom = (self.graph_zoom / 1.2).max(0.2);
                 }
                 ui.weak(format!("{:.0}%", self.graph_zoom * 100.0));
                 if ui.button("+").clicked() {
                     self.graph_zoom = (self.graph_zoom * 1.2).min(4.0);
                 }
-                if ui.button("⌖").on_hover_text("Reset view").clicked() {
+                if ui.button("Fit").on_hover_text("Reset view").clicked() {
                     // The graph viewport is only known after both side panels
                     // have claimed their space, so framing is deferred to canvas draw.
                     self.reset_view_requested = true;
@@ -4476,51 +4722,203 @@ impl eframe::App for TodoGui {
                     search.request_focus();
                     self.search_focus = false;
                 }
-                if search.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
-                    self.jump_to_first_match();
+                if search.changed() {
+                    self.search_navigation_active = false;
+                }
+                if enter_search_from_canvas
+                    || ((search.has_focus() || search.lost_focus())
+                        && ui.input(|input| input.key_pressed(egui::Key::Enter)))
+                {
+                    self.step_search(ui.input(|input| input.modifiers.shift));
                 }
                 if !self.search.is_empty() {
-                    let hits = self
+                    let matches = self
                         .visible_items()
                         .iter()
                         .filter(|item| self.search_matches(item))
-                        .count();
-                    ui.weak(format!("{hits} match"));
+                        .map(|item| item.item.id.to_string())
+                        .collect::<Vec<_>>();
+                    let current = self.selected.as_ref().and_then(|selected| {
+                        matches
+                            .iter()
+                            .position(|id| id == selected)
+                            .map(|index| index + 1)
+                    });
+                    if self.search_navigation_active {
+                        ui.weak(format!("{}/{}", current.unwrap_or(0), matches.len()));
+                    } else {
+                        let noun = if matches.len() == 1 {
+                            "match"
+                        } else {
+                            "matches"
+                        };
+                        ui.weak(format!("{} {noun}", matches.len()));
+                    }
+                    if self.search_navigation_active && !matches.is_empty() {
+                        if ui.small_button("Prev").clicked() {
+                            self.step_search(true);
+                        }
+                        if ui.small_button("Next").clicked() {
+                            self.step_search(false);
+                        }
+                    }
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.toggle_value(&mut self.show_inspector, "▣")
-                        .on_hover_text("Inspector (I)");
-                    ui.toggle_value(&mut self.show_settings, "⚙")
+                    ui.toggle_value(&mut self.show_inspector, "Info")
+                        .on_hover_text("Info (I)");
+                    ui.toggle_value(&mut self.show_settings, "Settings")
                         .on_hover_text("Settings (,)");
                 });
             });
         });
         if self.new_task_open {
+            let query = self.new_task_parent_query.trim().to_lowercase();
+            let parent_candidates = self
+                .items
+                .iter()
+                .filter(|item| !query.is_empty() && item.item.title.to_lowercase().contains(&query))
+                .take(5)
+                .map(|item| (item.item.id.to_string(), item.item.title.clone()))
+                .collect::<Vec<_>>();
+            let actor_query = self.new_task_person.trim().to_lowercase();
+            let actor_candidates = self
+                .namespaces
+                .iter()
+                .filter(|entry| entry.kind == NamespaceKind::Actor)
+                .map(|entry| actor_name(&entry.path).to_owned())
+                .filter(|name| {
+                    !actor_query.is_empty() && name.to_lowercase().contains(&actor_query)
+                })
+                .take(5)
+                .collect::<Vec<_>>();
+            let tag_query = self.new_task_tag.trim().to_lowercase();
+            let tag_candidates = self
+                .assigned_tag_paths()
+                .into_iter()
+                .filter(|path| !tag_query.is_empty() && path.to_lowercase().contains(&tag_query))
+                .take(5)
+                .collect::<Vec<_>>();
             egui::Window::new("New task")
                 .collapsible(false)
                 .resizable(false)
+                .anchor(Align2::CENTER_CENTER, Vec2::ZERO)
+                .default_width(440.0)
                 .show(ui.ctx(), |ui| {
-                    match self.new_task_parent.clone() {
-                        Some(parent) => {
-                            let described = self.describe(&parent);
-                            ui.label(format!("Creates an inbox task under {described}."));
-                        }
-                        None => {
-                            ui.label(
-                                "Creates an unscoped inbox task. Assign a project or parent afterward.",
-                            );
-                        }
+                    ui.set_min_width(420.0);
+                    ui.label("Name");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.new_task_title)
+                            .desired_width(f32::INFINITY),
+                    );
+                    ui.add_space(6.0);
+                    ui.label("Parent (optional)");
+                    if let Some(parent) = self.new_task_parent.clone() {
+                        ui.horizontal(|ui| {
+                            ui.label(self.describe(&parent));
+                            if ui.small_button("Remove").clicked() {
+                                self.new_task_parent = None;
+                            }
+                        });
+                    } else {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.new_task_parent_query)
+                                .hint_text("Find an existing task")
+                                .desired_width(f32::INFINITY),
+                        );
+                        ui.horizontal_wrapped(|ui| {
+                            for (id, title) in &parent_candidates {
+                                if ui.small_button(title).clicked() {
+                                    self.new_task_parent = Some(id.clone());
+                                    self.new_task_parent_query.clear();
+                                }
+                            }
+                        });
                     }
-                    ui.text_edit_singleline(&mut self.new_task_title);
+                    ui.label("Add child (optional)");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.new_task_child)
+                            .hint_text("Child task name")
+                            .desired_width(f32::INFINITY),
+                    );
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.label("Person");
+                        egui::ComboBox::from_id_salt("new-task-role")
+                            .selected_text(&self.new_task_role)
+                            .show_ui(ui, |ui| {
+                                for role in ROLES {
+                                    ui.selectable_value(
+                                        &mut self.new_task_role,
+                                        role.to_owned(),
+                                        role,
+                                    );
+                                }
+                            });
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.new_task_person)
+                                .hint_text("Name")
+                                .desired_width(190.0),
+                        );
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        for name in &actor_candidates {
+                            if ui.small_button(name).clicked() {
+                                self.new_task_person = name.clone();
+                            }
+                        }
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("Due");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.new_task_due)
+                                .hint_text("YYYY-MM-DD")
+                                .desired_width(125.0),
+                        );
+                        ui.label("Tag");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.new_task_tag)
+                                .hint_text("work/apps")
+                                .desired_width(170.0),
+                        );
+                    });
+                    ui.horizontal_wrapped(|ui| {
+                        for path in &tag_candidates {
+                            if ui.small_button(path.trim_start_matches("tag/")).clicked() {
+                                self.new_task_tag = path.clone();
+                            }
+                        }
+                    });
+                    ui.label("Note (optional)");
+                    ui.add(
+                        egui::TextEdit::multiline(&mut self.new_task_note)
+                            .desired_rows(3)
+                            .desired_width(f32::INFINITY),
+                    );
+                    if let Some(error) = &self.new_task_error {
+                        ui.colored_label(Color32::LIGHT_RED, error);
+                    }
+                    ui.add_space(8.0);
                     let valid = !self.new_task_title.trim().is_empty();
                     ui.horizontal(|ui| {
-                        if ui.add_enabled(valid, egui::Button::new("Create")).clicked() {
-                            self.add_task();
+                        if ui.add_enabled(valid, egui::Button::new("Save")).clicked() {
+                            self.add_task(AfterSave::Close);
+                        }
+                        if ui
+                            .add_enabled(valid, egui::Button::new("Save + New"))
+                            .clicked()
+                        {
+                            self.add_task(AfterSave::New);
+                        }
+                        if ui
+                            .add_enabled(valid, egui::Button::new("Edit more"))
+                            .on_hover_text("Save, center the card, and open Info")
+                            .clicked()
+                        {
+                            self.add_task(AfterSave::EditMore);
                         }
                         if ui.button("Cancel").clicked() {
+                            self.open_new_task(None);
                             self.new_task_open = false;
-                            self.new_task_title.clear();
-                            self.new_task_parent = None;
                         }
                     });
                 });
@@ -4535,12 +4933,33 @@ impl eframe::App for TodoGui {
                 .show(ui, |ui| self.draw_filters(ui));
         }
         if self.show_inspector {
-            egui::Panel::right("inspector")
+            let panel = egui::Panel::right("inspector")
                 .default_size(280.0)
                 .min_size(220.0)
                 .max_size(480.0)
                 .resizable(true)
                 .show(ui, |ui| self.draw_inspector(ui));
+            if let Some(start) = self.info_attention_start {
+                let elapsed = start.elapsed();
+                if elapsed < std::time::Duration::from_millis(1800) {
+                    ui.ctx()
+                        .request_repaint_after(std::time::Duration::from_millis(32));
+                    if elapsed >= std::time::Duration::from_millis(350) {
+                        let painter = ui.ctx().layer_painter(egui::LayerId::new(
+                            egui::Order::Foreground,
+                            egui::Id::new("info-attention"),
+                        ));
+                        painter.rect_stroke(
+                            panel.response.rect.shrink(2.0),
+                            6.0,
+                            Stroke::new(3.0, Color32::GOLD),
+                            egui::StrokeKind::Inside,
+                        );
+                    }
+                } else {
+                    self.info_attention_start = None;
+                }
+            }
         }
         // Declared after the side panels so it spans the canvas only.
         let chips = self.active_filters();
@@ -4553,6 +4972,26 @@ impl eframe::App for TodoGui {
 
 fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
     let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::drag());
+    if let Some(previous) = app.last_canvas_rect
+        && previous != rect
+    {
+        let items = app.visible_items();
+        rebase_offsets_for_rect(
+            &items,
+            &mut app.node_offsets,
+            previous,
+            rect,
+            app.graph_zoom,
+        );
+        rebase_offsets_for_rect(
+            &items,
+            &mut app.drawn_offsets,
+            previous,
+            rect,
+            app.graph_zoom,
+        );
+    }
+    app.last_canvas_rect = Some(rect);
     let painter = ui.painter_at(rect);
     // Dragging empty canvas moves the view. Cards are interacted with after this,
     // so a drag that starts on a card moves the card rather than the canvas.
@@ -4629,6 +5068,9 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
         app.timeline_requested = false;
         app.timeline_layout(rect);
     }
+    if let Some(id) = app.center_requested.take() {
+        app.center_card(rect, &id);
+    }
     let items = app.visible_items();
     // The wheel divides hues between the tags actually on screen, so the palette is
     // rebuilt whenever the visible set changes.
@@ -4699,10 +5141,26 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
         );
     }
     let child_index = child_index(&items);
+    let depths = ancestor_depth_index(&items);
+    // Weight walks descendant trees. Compute it only when a visible channel
+    // actually uses it, and share the result between sizing and painting.
+    let weights = if graph_needs_weights(&app.theme) {
+        items
+            .iter()
+            .map(|item| {
+                (
+                    item.item.id.to_string(),
+                    item_weight(item, &child_index, &app.theme),
+                )
+            })
+            .collect::<HashMap<_, _>>()
+    } else {
+        HashMap::new()
+    };
     // Every overlay must use the center of the card that is actually drawn. A
     // parent container used to move its card into a header after clouds had
     // already used the old graph position, leaving a visible orphaned circle.
-    let layouts = node_layouts(&painter, app, &items, &positions, &child_index);
+    let layouts = node_layouts(&painter, app, &items, &positions, &weights);
     let boxes = if !app.focus_mode
         && app.show_parent_regions
         && app.theme.parent.show_regions
@@ -4714,6 +5172,7 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
             &app.theme,
             app.graph_zoom,
             &app.family_presentations,
+            &depths,
         )
     } else {
         Vec::new()
@@ -4748,7 +5207,7 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
                 &effective,
             );
         } else if !boxes.is_empty() {
-            draw_family_boxes(&painter, app, &items, &boxes, &palette, &effective);
+            draw_family_boxes(&painter, app, &items, &boxes, &palette, &effective, &depths);
         }
     }
     if app.show_focus_window && app.theme.focus.show_frame {
@@ -4797,10 +5256,7 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
             let Some(parent) = rect_of(&parent_id) else {
                 continue;
             };
-            let depth = items
-                .iter()
-                .find(|item| item.item.id.to_string() == parent_id)
-                .map_or(0, |item| ancestor_depth(item, &items));
+            let depth = depths.get(&parent_id).copied().unwrap_or_default();
             draw_family_tree(
                 &painter,
                 parent,
@@ -4870,26 +5326,12 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
             }
         }
     }
-    let hidden_descendants = if app.theme.parent.child_depth == 0 {
-        HashMap::new()
-    } else {
-        let filtered = app.filtered_items();
-        let all_children = crate::child_index(&filtered);
-        let visible_ids = items
-            .iter()
-            .map(|item| item.item.id.to_string())
-            .collect::<std::collections::HashSet<_>>();
-        all_children
-            .keys()
-            .map(|parent| {
-                let hidden = collect_subtree(parent, &all_children)
-                    .into_iter()
-                    .filter(|id| id != parent && !visible_ids.contains(id))
-                    .count();
-                (parent.clone(), hidden)
-            })
-            .collect::<HashMap<_, _>>()
-    };
+    let filtered = app.filtered_items();
+    let visible_ids = items
+        .iter()
+        .map(|item| item.item.id.to_string())
+        .collect::<std::collections::HashSet<_>>();
+    let family_counts = family_visibility_counts(&filtered, &visible_ids);
     for item in &items {
         let id = item.item.id.to_string();
         let Some(layout) = layouts.get(&id).cloned() else {
@@ -4903,7 +5345,30 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
             ..
         } = layout;
         let response = ui.interact(node, ui.make_persistent_id(&id), Sense::click_and_drag());
+        let (descendants, hidden) = family_counts.get(&id).copied().unwrap_or_default();
+        let family_hidden = hidden > 0 || app.collapsed_families.contains(&id);
         response.context_menu(|ui| {
+            if descendants > 0 {
+                let label = if family_hidden {
+                    if hidden > 0 {
+                        format!("Show descendants ({hidden} hidden)")
+                    } else {
+                        "Show descendants".to_owned()
+                    }
+                } else {
+                    "Hide descendants".to_owned()
+                };
+                if ui.button(label).clicked() {
+                    let visibility = if family_hidden {
+                        FamilyVisibility::Show
+                    } else {
+                        FamilyVisibility::Hide
+                    };
+                    app.set_family_visibility(&id, visibility, rect);
+                    ui.close();
+                }
+                ui.separator();
+            }
             if ui.button("Normalize connected family (G)").clicked() {
                 app.normalize_family(rect, &id);
                 ui.close();
@@ -4938,7 +5403,7 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
         let holds_active = holding_active.contains(&id);
         let accent = node_tag_color(item, &app.theme, &palette, &effective);
         let status = status_color(item, holds_active);
-        let weight = item_weight(item, &child_index, &app.theme);
+        let weight = weights.get(&id).copied().unwrap_or_default();
         let fill = channel_color(
             app.theme.node.body_encodes,
             status,
@@ -5109,17 +5574,23 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
             let anchor = node.center() - title_galley.size() / 2.0;
             painter.galley(anchor, title_galley, dim(Color32::WHITE));
         }
-        if let Some(hidden) = hidden_descendants.get(&id)
-            && *hidden > 0
-        {
-            // This is deliberately at the card's child-side edge: an ellipsis
-            // reads as a continuation of the family tree, not a floating mode
-            // control in the card's corner.
+        if descendants > 0 {
+            // This lives at the card's child-side edge, where its tree would
+            // continue. It remains available even when the global depth is All.
             let badge = Rect::from_center_size(
                 node.center_bottom() + Vec2::new(0.0, 5.0),
-                Vec2::new(24.0, 12.0),
+                Vec2::new(44.0, 16.0),
             );
-            let tooltip = format!("Show {hidden} hidden task(s)");
+            let label = if family_hidden { "Show" } else { "Hide" };
+            let tooltip = if family_hidden {
+                if hidden > 0 {
+                    format!("Show {hidden} hidden task(s) in this family")
+                } else {
+                    "Show this family".to_owned()
+                }
+            } else {
+                format!("Hide up to {descendants} descendant task(s)")
+            };
             let toggle = ui
                 .interact(
                     badge,
@@ -5137,12 +5608,17 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
             painter.text(
                 badge.center(),
                 Align2::CENTER_CENTER,
-                "…",
-                FontId::proportional(14.0),
+                label,
+                FontId::proportional(11.0),
                 Color32::WHITE,
             );
             if toggle.clicked() {
-                app.toggle_family_expanded(&id, rect);
+                let visibility = if family_hidden {
+                    FamilyVisibility::Show
+                } else {
+                    FamilyVisibility::Hide
+                };
+                app.set_family_visibility(&id, visibility, rect);
                 ui.ctx().request_repaint();
             }
         }
@@ -5255,6 +5731,25 @@ fn graph_positions(
         positions.insert(id, position);
     }
     positions
+}
+
+/// Keeps cards at the same screen coordinates when a drawer changes canvas size.
+/// The grid slot depends on the canvas bounds; without this adjustment, opening
+/// a panel silently rearranges cards even though no layout action was requested.
+fn rebase_offsets_for_rect(
+    items: &[StoredItem],
+    offsets: &mut HashMap<String, Vec2>,
+    before: Rect,
+    after: Rect,
+    zoom: f32,
+) {
+    let center_shift = (before.center() - after.center()) * (1.0 / zoom - 1.0);
+    for (index, item) in items.iter().enumerate() {
+        let id = item.item.id.to_string();
+        let current = offsets.get(&id).copied().unwrap_or(Vec2::ZERO);
+        let slot_shift = grid_slot(index, before) - grid_slot(index, after);
+        offsets.insert(id, current + slot_shift + center_shift);
+    }
 }
 
 /// Draws a node's body in the configured shape, with its tag accent.
@@ -5857,15 +6352,58 @@ fn child_index(items: &[StoredItem]) -> HashMap<String, Vec<String>> {
     children
 }
 
+/// Counts all eligible descendants and the subset hidden by the graph view.
+/// Walking each card's ancestor chain avoids recomputing a whole subtree for
+/// every parent on every frame; ordinary shallow trees stay near linear work.
+fn family_visibility_counts(
+    eligible: &[StoredItem],
+    visible: &std::collections::HashSet<String>,
+) -> HashMap<String, (usize, usize)> {
+    let present = eligible
+        .iter()
+        .map(|item| item.item.id.to_string())
+        .collect::<std::collections::HashSet<_>>();
+    let parent_of = eligible
+        .iter()
+        .filter_map(|item| {
+            let parent = item.item.parent_id?.to_string();
+            present
+                .contains(&parent)
+                .then(|| (item.item.id.to_string(), parent))
+        })
+        .collect::<HashMap<_, _>>();
+    let mut counts = HashMap::<String, (usize, usize)>::new();
+    for item in eligible {
+        let id = item.item.id.to_string();
+        let hidden = !visible.contains(&id);
+        let mut cursor = id.clone();
+        let mut seen = std::collections::HashSet::new();
+        while let Some(parent) = parent_of.get(&cursor) {
+            if parent == &id || !seen.insert(parent.clone()) {
+                break;
+            }
+            let entry = counts.entry(parent.clone()).or_default();
+            entry.0 += 1;
+            if hidden {
+                entry.1 += 1;
+            }
+            cursor = parent.clone();
+        }
+    }
+    counts
+}
+
 /// Collapses only the view, preserving active and selected ancestor paths.
-/// An expanded parent reveals its complete subtree regardless of the global cap.
+/// Explicitly hidden parents outrank the global cap and expansion, while active
+/// paths remain visible so a collapsed family cannot silently bury live work.
 fn limit_child_depth(
     eligible: Vec<StoredItem>,
     limit: usize,
     expanded: &std::collections::HashSet<String>,
+    collapsed: &std::collections::HashSet<String>,
     selected: Option<&str>,
 ) -> Vec<StoredItem> {
-    if limit == 0 {
+    if limit == 0 && collapsed.is_empty() {
         return eligible;
     }
     let present = eligible
@@ -5904,6 +6442,8 @@ fn limit_child_depth(
             }
             let mut cursor = id;
             let mut depth = 0;
+            let mut within_expanded = false;
+            let mut within_collapsed = false;
             let mut seen = std::collections::HashSet::new();
             while let Some(parent) = parent_of.get(&cursor) {
                 if !seen.insert(cursor.clone()) {
@@ -5911,11 +6451,12 @@ fn limit_child_depth(
                 }
                 depth += 1;
                 if expanded.contains(parent) {
-                    return true;
+                    within_expanded = true;
                 }
+                within_collapsed |= collapsed.contains(parent);
                 cursor = parent.clone();
             }
-            depth <= limit
+            !within_collapsed && (within_expanded || limit == 0 || depth <= limit)
         })
         .collect()
 }
@@ -5942,18 +6483,14 @@ fn draw_family_boxes(
     boxes: &[FamilyBox],
     palette: &TagPalette,
     effective: &HashMap<String, Vec<String>>,
+    depths: &HashMap<String, usize>,
 ) {
     // Complete each ancestor before its descendants. Rectangle-area ordering can
     // swap nearly equal animated boards from frame to frame, causing borders to
     // flash above and below one another; structural depth is stable instead.
     let mut ordered = boxes.iter().collect::<Vec<_>>();
     ordered.sort_by(|left, right| {
-        let depth = |id: &str| {
-            items
-                .iter()
-                .find(|item| item.item.id.to_string() == id)
-                .map_or(usize::MAX, |item| ancestor_depth(item, items))
-        };
+        let depth = |id: &str| depths.get(id).copied().unwrap_or(usize::MAX);
         depth(&left.parent_id)
             .cmp(&depth(&right.parent_id))
             .then_with(|| left.parent_id.cmp(&right.parent_id))
@@ -6247,10 +6784,52 @@ fn draw_parent_regions(
     }
 }
 
-/// Returns how many visible ancestors a task has above it.
+/// Indexes how many visible ancestors each task has above it.
 ///
 /// Nested boxes use this to grow outward, so an outer box always has room for the
 /// one inside it.
+fn ancestor_depth_index(items: &[StoredItem]) -> HashMap<String, usize> {
+    let parents = items
+        .iter()
+        .map(|item| {
+            (
+                item.item.id.to_string(),
+                item.item.parent_id.map(|parent| parent.to_string()),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    fn depth(
+        id: &str,
+        parents: &HashMap<String, Option<String>>,
+        depths: &mut HashMap<String, usize>,
+        visiting: &mut std::collections::HashSet<String>,
+    ) -> usize {
+        if let Some(known) = depths.get(id) {
+            return *known;
+        }
+        if !visiting.insert(id.to_owned()) {
+            // A stale cyclic view must not recurse forever; the ledger rejects
+            // cycles on write, but the graph should still be able to draw.
+            return 0;
+        }
+        let found = parents
+            .get(id)
+            .and_then(|parent| parent.as_deref())
+            .filter(|parent| parents.contains_key(*parent))
+            .map_or(0, |parent| depth(parent, parents, depths, visiting) + 1);
+        visiting.remove(id);
+        depths.insert(id.to_owned(), found);
+        found
+    }
+    let mut depths = HashMap::new();
+    let mut visiting = std::collections::HashSet::new();
+    for id in parents.keys() {
+        depth(id, &parents, &mut depths, &mut visiting);
+    }
+    depths
+}
+
+/// Counts depth on demand for the less common hull view.
 fn ancestor_depth(item: &StoredItem, items: &[StoredItem]) -> usize {
     let mut depth = 0;
     let mut current = item.item.parent_id;
@@ -6267,6 +6846,17 @@ fn ancestor_depth(item: &StoredItem, items: &[StoredItem]) -> usize {
         current = found.item.parent_id;
     }
     depth
+}
+
+/// Skips descendant counting when neither card size nor color uses weight.
+fn graph_needs_weights(theme: &Theme) -> bool {
+    theme.weight.size_nodes_by_weight
+        || [
+            theme.node.bar_encodes,
+            theme.node.body_encodes,
+            theme.node.outline_encodes,
+        ]
+        .contains(&Channel::Weight)
 }
 
 /// Returns the presentation weight of one task, from 0.0 to 1.0.
@@ -6666,9 +7256,19 @@ fn tag_cloud_links(points: &[Pos2], theme: &Theme, zoom: f32) -> Vec<(Pos2, Pos2
                     .filter(|(other, _)| *other != index)
                     .map(|(other, candidate)| (point.distance(*candidate), other))
                     .collect::<Vec<_>>();
-                candidates
-                    .sort_by(|left, right| left.0.total_cmp(&right.0).then(left.1.cmp(&right.1)));
-                for (_, other) in candidates.into_iter().take(theme.tag.cloud_neighbor_count) {
+                let nearest = theme.tag.cloud_neighbor_count.min(candidates.len());
+                let by_distance = |left: &(f32, usize), right: &(f32, usize)| {
+                    left.0.total_cmp(&right.0).then(left.1.cmp(&right.1))
+                };
+                // A cloud may contain hundreds of cards but draws only a few
+                // links from each one. Partition first; sorting every distant
+                // candidate on every frame contributes no visible information.
+                if nearest < candidates.len() {
+                    candidates.select_nth_unstable_by(nearest, by_distance);
+                    candidates.truncate(nearest);
+                }
+                candidates.sort_by(by_distance);
+                for (_, other) in candidates.into_iter().take(nearest) {
                     links.insert((index.min(other), index.max(other)));
                 }
             }
@@ -7089,7 +7689,7 @@ fn node_layouts(
     app: &TodoGui,
     items: &[StoredItem],
     positions: &HashMap<String, Pos2>,
-    child_index: &HashMap<String, Vec<String>>,
+    weights: &HashMap<String, f32>,
 ) -> HashMap<String, NodeLayout> {
     let mut layouts = HashMap::new();
     for item in items {
@@ -7101,7 +7701,7 @@ fn node_layouts(
         let scale = app
             .theme
             .weight
-            .scale(item_weight(item, child_index, &app.theme));
+            .scale(weights.get(&id).copied().unwrap_or_default());
         let zoom = app.graph_zoom * scale;
         let title_font = FontId::proportional(app.theme.node.title_font_size * zoom);
         let meta_font = FontId::proportional(app.theme.node.meta_font_size * zoom);
@@ -7148,11 +7748,19 @@ fn family_boxes(
     theme: &Theme,
     zoom: f32,
     presentations: &HashMap<String, FamilyPresentation>,
+    depths: &HashMap<String, usize>,
 ) -> Vec<FamilyBox> {
     let children = child_index(items);
     let mut boxes: Vec<FamilyBox> = Vec::new();
     let mut ordered = items.iter().collect::<Vec<_>>();
-    ordered.sort_by_key(|item| std::cmp::Reverse(ancestor_depth(item, items)));
+    ordered.sort_by_key(|item| {
+        std::cmp::Reverse(
+            depths
+                .get(&item.item.id.to_string())
+                .copied()
+                .unwrap_or_default(),
+        )
+    });
     for item in ordered {
         let id = item.item.id.to_string();
         let direct_children = children.get(&id).cloned().unwrap_or_default();
@@ -7664,8 +8272,8 @@ fn inspector_key(ui: &mut egui::Ui, key: &str) {
     );
 }
 
-/// One read-first inspector row: a key, its value, and `✕` while hovered.
-/// Returns whether the value and whether `✕` were clicked.
+/// One read-first info row: a key, its value, and Remove while hovered.
+/// Returns whether the value and whether Remove were clicked.
 fn inspector_row(
     ui: &mut egui::Ui,
     key: &str,
@@ -7676,13 +8284,13 @@ fn inspector_row(
         let hovered = ui.rect_contains_pointer(ui.max_rect());
         inspector_key(ui, key);
         let value = ui.add(egui::Label::new(value).sense(Sense::click()).truncate());
-        let remove = removable && hovered && ui.small_button("✕").on_hover_text("Remove").clicked();
+        let remove = removable && hovered && ui.small_button("Remove").clicked();
         (value.clicked(), remove)
     })
     .inner
 }
 
-/// A one-line in-place editor. Returns `Some(true)` on Enter or `✓`,
+/// A one-line in-place editor. Returns `Some(true)` on Enter or Apply,
 /// `Some(false)` on Escape, and `None` while still editing.
 fn inline_text(
     ui: &mut egui::Ui,
@@ -7702,7 +8310,7 @@ fn inline_text(
         return Some(false);
     }
     let entered = field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
-    let confirmed = ui.small_button("✓").clicked();
+    let confirmed = ui.small_button("Apply").clicked();
     (entered || confirmed).then_some(true)
 }
 
@@ -7723,11 +8331,13 @@ fn short_title(title: &str) -> String {
 )]
 mod tests {
     use super::{
-        AgentFilter, FamilyPresentation, FilterChip, GroupBy, LedgerAccess, LocalGraphLayout,
-        Runtime, TodoGui, collect_subtree, compare_group_labels, fallback_tag_colors, family_box,
-        family_dependency_bands, family_ring_mesh, family_tree_geometry, file_stamp,
-        focus_is_active, hierarchy_levels, limit_child_depth, matches_query, node_meta,
-        segment_outside_rect,
+        AgentFilter, Channel, FamilyPresentation, FilterChip, GroupBy, LedgerAccess,
+        LocalGraphLayout, Runtime, TagCloudLinkMode, TodoGui, ancestor_depth, ancestor_depth_index,
+        collect_subtree, compare_group_labels, fallback_tag_colors, family_box,
+        family_dependency_bands, family_ring_mesh, family_tree_geometry, family_visibility_counts,
+        file_stamp, focus_is_active, graph_needs_weights, graph_positions, hierarchy_levels,
+        limit_child_depth, matches_query, node_meta, rebase_offsets_for_rect, search_step,
+        segment_outside_rect, tag_cloud_links,
     };
     use eframe::egui::{Color32, Pos2, Rect, pos2, vec2};
     use std::collections::{HashMap, HashSet};
@@ -7814,6 +8424,67 @@ mod tests {
             .iter()
             .find(|item| item.item.title == format!("task {id}"))
             .is_some_and(|item| holders.contains(&item.item.id.to_string()))
+    }
+
+    #[test]
+    fn graph_skips_weight_work_when_no_visible_channel_uses_it() {
+        let mut theme = super::Theme::default();
+        assert!(!graph_needs_weights(&theme));
+        theme.weight.size_nodes_by_weight = true;
+        assert!(graph_needs_weights(&theme));
+        theme.weight.size_nodes_by_weight = false;
+        theme.node.outline_encodes = Channel::Weight;
+        assert!(graph_needs_weights(&theme));
+    }
+
+    #[test]
+    fn indexed_family_depths_match_the_previous_tree_walk() {
+        let items = vec![
+            task("01", None, ItemState::Inbox),
+            task("02", Some("01"), ItemState::Inbox),
+            task("03", Some("02"), ItemState::Inbox),
+            task("04", Some("99"), ItemState::Inbox),
+        ];
+        let depths = ancestor_depth_index(&items);
+        for item in &items {
+            assert_eq!(
+                depths.get(&item.item.id.to_string()).copied(),
+                Some(ancestor_depth(item, &items))
+            );
+        }
+        let cycle = vec![
+            task("05", Some("06"), ItemState::Inbox),
+            task("06", Some("05"), ItemState::Inbox),
+        ];
+        assert_eq!(ancestor_depth_index(&cycle).len(), cycle.len());
+    }
+
+    #[test]
+    fn nearest_cloud_links_keep_the_full_sort_result() {
+        let mut theme = super::Theme::default();
+        theme.tag.cloud_link_mode = TagCloudLinkMode::Nearest;
+        theme.tag.cloud_neighbor_count = 3;
+        let points = (0_u8..16)
+            .map(|index| pos2(f32::from(index % 4) * 50.0, f32::from(index / 4) * 50.0))
+            .collect::<Vec<_>>();
+        let mut expected = std::collections::BTreeSet::new();
+        for (index, point) in points.iter().enumerate() {
+            let mut candidates = points
+                .iter()
+                .enumerate()
+                .filter(|(other, _)| *other != index)
+                .map(|(other, candidate)| (point.distance(*candidate), other))
+                .collect::<Vec<_>>();
+            candidates.sort_by(|left, right| left.0.total_cmp(&right.0).then(left.1.cmp(&right.1)));
+            for (_, other) in candidates.into_iter().take(theme.tag.cloud_neighbor_count) {
+                expected.insert((index.min(other), index.max(other)));
+            }
+        }
+        let expected = expected
+            .into_iter()
+            .filter_map(|(from, to)| Some((*points.get(from)?, *points.get(to)?)))
+            .collect::<Vec<_>>();
+        assert_eq!(tag_cloud_links(&points, &theme, 1.0), expected);
     }
 
     #[test]
@@ -7932,7 +8603,13 @@ mod tests {
                 .map(|item| item.item.title.clone())
                 .collect::<Vec<_>>()
         };
-        let collapsed = ids(limit_child_depth(items.clone(), 1, &HashSet::new(), None));
+        let collapsed = ids(limit_child_depth(
+            items.clone(),
+            1,
+            &HashSet::new(),
+            &HashSet::new(),
+            None,
+        ));
         assert!(collapsed.contains(&"task 4".to_owned()));
         assert!(!collapsed.contains(&"task 3".to_owned()));
         let root = items.first().map(|item| item.item.id.to_string()).unwrap();
@@ -7940,13 +8617,76 @@ mod tests {
             items.clone(),
             1,
             &HashSet::from([root]),
+            &HashSet::new(),
             None,
         ));
         assert_eq!(expanded.len(), items.len());
         assert_eq!(
-            ids(limit_child_depth(items.clone(), 0, &HashSet::new(), None)).len(),
+            ids(limit_child_depth(
+                items.clone(),
+                0,
+                &HashSet::new(),
+                &HashSet::new(),
+                None,
+            ))
+            .len(),
             items.len()
         );
+    }
+
+    #[test]
+    fn explicit_hide_overrides_all_depth_but_keeps_active_paths() {
+        let items = vec![
+            task("1", None, ItemState::Inbox),
+            task("2", Some("1"), ItemState::Inbox),
+            task("3", Some("2"), ItemState::Inbox),
+            task("4", Some("2"), ItemState::Active),
+        ];
+        let root = items.first().map(|item| item.item.id.to_string()).unwrap();
+        let parent = items.get(1).map(|item| item.item.id.to_string()).unwrap();
+        let inactive = items.get(2).map(|item| item.item.id.to_string()).unwrap();
+        let shown = limit_child_depth(
+            items.clone(),
+            0,
+            &HashSet::from([root]),
+            &HashSet::from([parent.clone()]),
+            None,
+        );
+        assert_eq!(shown.len(), 3);
+        assert!(
+            !shown
+                .iter()
+                .any(|item| item.item.id.to_string() == inactive)
+        );
+        let selected = limit_child_depth(
+            items,
+            0,
+            &HashSet::new(),
+            &HashSet::from([parent]),
+            Some(&inactive),
+        );
+        assert_eq!(selected.len(), 4);
+    }
+
+    #[test]
+    fn family_visibility_counts_hidden_descendants_once_per_ancestor() {
+        let items = vec![
+            task("1", None, ItemState::Inbox),
+            task("2", Some("1"), ItemState::Inbox),
+            task("3", Some("2"), ItemState::Inbox),
+            task("4", Some("2"), ItemState::Active),
+        ];
+        let root = items.first().map(|item| item.item.id.to_string()).unwrap();
+        let parent = items.get(1).map(|item| item.item.id.to_string()).unwrap();
+        let hidden = items.get(2).map(|item| item.item.id.to_string()).unwrap();
+        let visible = items
+            .iter()
+            .map(|item| item.item.id.to_string())
+            .filter(|id| id != &hidden)
+            .collect::<HashSet<_>>();
+        let counts = family_visibility_counts(&items, &visible);
+        assert_eq!(counts.get(&root), Some(&(3, 1)));
+        assert_eq!(counts.get(&parent), Some(&(2, 1)));
     }
 
     #[test]
@@ -8225,6 +8965,45 @@ mod tests {
         assert!(matches_query("BABAD", "Write the report", &ids, &tags));
         assert!(matches_query("cdint", "Write the report", &ids, &tags));
         assert!(!matches_query("missing", "Write the report", &ids, &tags));
+    }
+
+    #[test]
+    fn search_steps_from_enter_and_wraps_in_both_directions() {
+        let matches = vec!["first".to_owned(), "second".to_owned()];
+        assert_eq!(search_step(&matches, None, false).as_deref(), Some("first"));
+        assert_eq!(
+            search_step(&matches, Some("first"), false).as_deref(),
+            Some("second")
+        );
+        assert_eq!(
+            search_step(&matches, Some("second"), false).as_deref(),
+            Some("first")
+        );
+        assert_eq!(
+            search_step(&matches, Some("first"), true).as_deref(),
+            Some("second")
+        );
+        assert_eq!(search_step(&[], None, false), None);
+    }
+
+    #[test]
+    fn opening_a_drawer_keeps_card_screen_positions() {
+        let items = vec![
+            task("1", None, ItemState::Inbox),
+            task("2", None, ItemState::Inbox),
+        ];
+        let before = Rect::from_min_size(pos2(0.0, 40.0), vec2(900.0, 600.0));
+        let after = Rect::from_min_size(pos2(230.0, 40.0), vec2(670.0, 600.0));
+        let pan = vec2(30.0, -45.0);
+        let zoom = 1.5;
+        let mut offsets = HashMap::new();
+        let original = graph_positions(&items, before, &offsets, pan, zoom);
+        rebase_offsets_for_rect(&items, &mut offsets, before, after, zoom);
+        let resized = graph_positions(&items, after, &offsets, pan, zoom);
+        for (id, position) in original {
+            let rebased = resized.get(&id).copied().unwrap();
+            assert!((position - rebased).length() < 0.01);
+        }
     }
 
     #[test]

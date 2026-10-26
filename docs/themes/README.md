@@ -40,6 +40,12 @@ selection, and links; card colors stay with the visual channels above. Because
 the format is Ghostty's, one generated file can drive both the terminal and the
 editor: point a matugen Ghostty template's output path here.
 
+`mode = "system"` follows the operating system for the whole window. A light
+palette colors the light appearance, and a dark palette colors the dark
+appearance; the other appearance uses egui's built-in colors. Choose `dark` or
+`light` in Settings → Colors to hold one appearance manually. A palette whose
+background conflicts with that choice is not applied to the visible appearance.
+
 The editor watches `theme.toml` and the palette file and reloads within about a
 second of either changing, including a re-pointed home-manager symlink. If the
 Settings window holds unsaved edits, it says the file changed instead of

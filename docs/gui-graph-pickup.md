@@ -1,6 +1,6 @@
 # GUI Graph Implementation Pickup
 
-Updated: 2026-10-14
+Updated: 2026-10-26
 
 ## Session, October 14
 
@@ -203,9 +203,28 @@ transitive-proximity rule needs to change.
 - Tag filter tri-states, Today date shortcuts, calendar pickers, citations with
   explicit Open controls, notes, and a Focus Window around active work.
 - Search across titles, both identifier renderings, and effective tags. `/`
-  reaches the box from the canvas, Escape clears it, Enter selects the first
-  match, and non-matching cards dim rather than vanish so edges survive a query.
+  reaches the box from the canvas, Escape clears it, and non-matching cards dim
+  rather than vanish so edges survive a query. Enter selects and centers the
+  first visible match; subsequent Enter or Next steps forward, while Shift+Enter
+  or Prev steps backward. Navigation starts only after Enter. Info's Center
+  button centers the selected card without changing zoom or its saved position.
 - Both sidebars collapse from the toolbar.
+- The centered **New task** window accepts a name, an optional existing parent
+  and one new child, person with role, due date, tag, and note. **Save** closes
+  after creation; **Save + New** clears the form for another task. **Edit more**
+  saves, selects and centers the new card with its gold outline, opens Info,
+  then briefly outlines that pane. If necessary it relaxes focused, agent-only,
+  or tag-only filters so the new card is visible. Invalid
+  dates, tags, and people are rejected before creation. Title, tag, and parent
+  are created together; if a later detail fails, the task remains created and
+  the editor reports the partial result instead of inviting a duplicate Save.
+- On macOS, Apple Symbols is appended as an outline-font fallback after egui's
+  bundled fonts. This covers missing symbol glyphs such as checkbox controls;
+  it does not enable Apple's color-only emoji font or guarantee every emoji
+  sequence in user task text. The earlier text labels remain as a reliable
+  control fallback.
+- Opening or closing a drawer keeps cards at their current screen positions;
+  the canvas resize no longer silently reflows the default grid.
 - Event-backed focus sequences: `todo focus create|add|ls` and inspector
   controls append existing tasks in cognitive order without changing readiness.
 - Event-backed sessions: `todo session start|stop|ls` and inspector Start/Stop
@@ -252,11 +271,13 @@ Deletion is deliberately absent from the editor. `todo rm --force` and
   board; the family tree continues to its actual card instead. A forced Box
   draws the complete span. A short stalk attaches a detached parent card to
   a genuine nearby child outline.
-- The collapsed-family continuation is a small `…` button centered on the
-  parent card's child-side edge, where its tree would continue, rather than a
-  corner badge. It appears only while children are hidden and reveals them on
-  click. Right-clicking a card offers **Family display → Box / Tree**;
-  that global display choice is intentionally not a persistent inspector control.
+- Every parent has a small **Hide / Show** control at its child-side edge, and
+  the same action in its context menu. Hide removes inactive descendants even
+  when child depth is All; active-task paths remain visible. Hiding a branch
+  containing the selected card selects its parent. Show reveals the whole branch
+  past the global depth cap, including nested explicitly hidden families.
+  Right-click also offers **Family display → Box / Tree**; that display
+  choice is separate from visibility.
 - G over empty graph canvas normalizes the visible graph. G over a card, or its
   context-menu command, normalizes only that connected parent/child tree and
   leaves unrelated families in place. Focus now separates wrapped active rows,
@@ -277,6 +298,13 @@ Deletion is deliberately absent from the editor. `todo rm --force` and
   area order. Same-tag child outlines can soften within their family well; selected
   and differently tagged cards keep their contrast. Appearance can also hide a
   redundant same-family outline completely.
+- The per-frame graph path now skips descendant-weight computation unless card
+  size or a color channel uses weight, reuses one weight per card when enabled,
+  indexes family depth once, and selects only the configured nearest tag-cloud
+  links instead of fully sorting every candidate. These are source-level hot-path
+  reductions, not a measured frame-time claim. For a running-window comparison,
+  toggle Settings → Motion → Glide to new positions to distinguish deliberate
+  easing from slow drawing, then toggle tag clouds to isolate cloud rendering.
 
 ## Completed goal: slices 1-7 and the follow-on slices 8-17
 
@@ -469,7 +497,7 @@ Values that carry data or protocol meaning are deliberately not configurable.
 
 ```sh
 ./dev check   # cargo fmt --check, then clippy --workspace --all-targets -D warnings
-./dev test    # 257 tests: 166 todo-gui, 42 todo-core, 27 todo-store, 22 todo-cli (2026-10-20)
+./dev test    # full workspace suite
 ```
 
 `./dev check` passed after the live Dynamic-family update. A full `./dev test` run
@@ -482,6 +510,15 @@ passed in a subsequent focused run of
 `nix develop --command cargo test -p todo-gui --bin todo-gui` (155 passed,
 0 failed) after the Dynamic-family update. Do not silently treat the CLI lock
 as a passing test.
+
+On 2026-10-25, before the latest GUI changes, `./dev check` and the full
+259-test `./dev test` passed on October 26, including
+`simultaneous_readers_wait_for_the_local_ledger`. After the GUI changes,
+`./dev check` also passed. The earlier lock failure above remains historical
+evidence. Search navigation, Info labels, palette/system appearance, symbol
+fallback, the centered creation window, and Edit more's visual handoff still
+need running-window review. The graph hot-path changes also need a subjective
+drag, pan, and zoom comparison on the live ledger.
 
 The editor's own coverage is the pure layers only: `geometry.rs`, `theme.rs`,
 `palette.rs`, `tags.rs`, and free functions lifted out of `main.rs` for the
@@ -509,15 +546,18 @@ what to check there first:
   and overlapping unrelated tags; confirm labels stay with their clouds;
 - scroll-wheel and trackpad zoom on the canvas: it should stop as soon as the
   physical gesture stops, while still anchoring the hovered card;
+- Hide / Show on a parent with inactive and active descendants: inactive cards
+  should disappear, the active path should remain, and Show should restore the
+  branch; confirm a selected descendant hands selection to its parent;
 - the compact chevron child-depth control at both a parent card and its attached
   family frame, plus same-family outline softening with and without selection;
 - the TE-0015 screenshot cases: normalize a large family, expand one child,
   arrange that family from its context menu, then switch to Focus and confirm no
   inactive card sits inside the gold boundary.
 
-Expansion state is deliberately in memory only. It is not written to
-`gui-layout.json`, so a restart returns to the configured child depth. Node
-offsets still persist.
+Expansion and explicit hide state are deliberately in memory only. Neither is
+written to `gui-layout.json`, so a restart returns to the configured child
+depth. Both are covered by Undo layout; node offsets still persist.
 
 ## Deferred by decision
 
