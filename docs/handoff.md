@@ -42,8 +42,11 @@ Covers: workspace v0.3.0, protocol v15, graph verification through `82c4ef8`.
   release build pass. Human visual verification is still needed before closing.
 - **Still open:** The exact empty-canvas deselect gesture (`rugub-tivit`) has
   synthetic pointer coverage but awaits developer review. Relation-based
-  proximity/order is split into `voros-vomoh`: symmetric `relates-to` cannot
-  be treated as directed precedence.
+  placement (`voros-vomoh`) is deferred by the developer's October 26 decision:
+  relations may affect proximity within existing layers, never precedence or
+  readiness. Keep hierarchy, dependency, and blocker ordering authoritative;
+  revisit the affinity rule when connections become richer. No relation-driven
+  placement has been implemented.
 - **Validation for the normalization tree:** `./dev fmt`, `./dev check`,
   `./dev test`, and `./dev build --release` passed. The later deselection test
   commit also passed `./dev check` and `./dev test` (185 GUI tests). No push or

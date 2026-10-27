@@ -29,8 +29,12 @@ and leaves other families at their drawn positions. Selected G keeps the
 selection's center and changes only selected card positions. Whole-graph G
 still owns viewport framing and optional tag separation/overlap relaxation;
 those whole-canvas post-passes are not run on local scopes because they would
-move unrelated cards. Relation-based proximity/order (`voros-vomoh`) remains unresolved:
-`relates-to` is symmetric, so it cannot simply become a directed layer edge.
+move unrelated cards. Relation-based placement (`voros-vomoh`) is deferred:
+relations may guide proximity within the existing layers, but must not set
+precedence or override hierarchy, dependencies, or blockers. In particular,
+`relates-to` is symmetric and cannot become a directed layer edge. Revisit the
+exact affinity rule when typed connections are richer; no relation-placement
+behavior is implemented yet.
 
 Unverified: `mode = "system"` applies the palette only to the appearance that
 was current at load (marked `ponytail:` in `apply_colors`).
