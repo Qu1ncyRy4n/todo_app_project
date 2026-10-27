@@ -213,13 +213,16 @@ transitive-proximity rule needs to change.
   even inside hidden families; clearing it restores the prior family visibility.
 - Both sidebars collapse from the toolbar.
 - The centered **New task** window accepts a name, an optional existing parent
-  and one new child, person with role, due date, tag, and note. **Save** closes
-  after creation; **Save + New** clears the form for another task. **Edit more**
+  and repeatable new child rows, person with role, due date, tag, and note.
+  Empty child rows are ignored. **Save** closes after creation; **Save + New**
+  clears the form for another task and keeps the selected parent, so another
+  sibling can be entered. **Edit more**
   saves, selects and centers the new card with its gold outline, opens Info,
   then briefly outlines that pane. If necessary it relaxes focused, agent-only,
   or tag-only filters so the new card is visible. Invalid
   dates, tags, and people are rejected before creation. Title, tag, and parent
-  are created together; if a later detail fails, the task remains created and
+  are created together; child rows and other later details are separate events.
+  If a later detail fails, the task remains created and
   the editor reports the partial result instead of inviting a duplicate Save.
 - **Layout → Done timeline** is a preset on the graph, not another history
   window. It filters to currently Done cards and uses the existing Group

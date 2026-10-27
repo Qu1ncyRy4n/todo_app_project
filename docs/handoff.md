@@ -31,6 +31,11 @@ Covers: workspace v0.3.0, protocol v15, graph verification through `82c4ef8`.
   reopen. Layout → Done timeline presets the existing graph to Done-only and
   completion-time sort, showing local completion days on cards. It does not
   replace the scheduled-date planning Timeline or add a history window.
+- **New task form (`fukiv-fugan`, pending GUI acceptance).** The centered form
+  now supports repeatable child rows and Save + New retains the selected parent
+  for sibling entry. A GUI integration test creates two grandchildren, ignores
+  an empty row, and checks parent preservation. Child creation remains a later
+  event after the parent, with a partial-result message if a later detail fails.
 - **Still open:** The exact empty-canvas deselect gesture (`rugub-tivit`) has
   synthetic pointer coverage but awaits developer review. Relation-based
   proximity/order is split into `voros-vomoh`: symmetric `relates-to` cannot

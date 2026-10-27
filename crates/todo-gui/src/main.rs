@@ -539,7 +539,7 @@ struct TodoGui {
     new_task_title: String,
     new_task_parent: Option<String>,
     new_task_parent_query: String,
-    new_task_child: String,
+    new_task_children: Vec<String>,
     new_task_person: String,
     new_task_role: String,
     new_task_note: String,
@@ -712,7 +712,7 @@ impl TodoGui {
             new_task_title: String::new(),
             new_task_parent: None,
             new_task_parent_query: String::new(),
-            new_task_child: String::new(),
+            new_task_children: vec![String::new()],
             new_task_person: String::new(),
             new_task_role: ASSIGNEE.to_owned(),
             new_task_note: String::new(),
@@ -4323,7 +4323,7 @@ impl TodoGui {
         self.new_task_title.clear();
         self.new_task_parent = parent;
         self.new_task_parent_query.clear();
-        self.new_task_child.clear();
+        self.new_task_children = vec![String::new()];
         self.new_task_person.clear();
         self.new_task_role = ASSIGNEE.to_owned();
         self.new_task_note.clear();
@@ -4411,7 +4411,12 @@ impl TodoGui {
                 let id = item.item.id.to_string();
                 let role = self.new_task_role.clone();
                 let note = self.new_task_note.trim().to_owned();
-                let child = self.new_task_child.trim().to_owned();
+                let children = self
+                    .new_task_children
+                    .iter()
+                    .map(|child| child.trim().to_owned())
+                    .filter(|child| !child.is_empty())
+                    .collect::<Vec<_>>();
                 // The ledger creates title, tag, and parent atomically. The
                 // remaining event-backed fields are applied after creation;
                 // their failure must never invite a duplicate Save.
@@ -4425,15 +4430,15 @@ impl TodoGui {
                     if !note.is_empty() {
                         ledger.add_note(&id, &note).await?;
                     }
-                    if !child.is_empty() {
+                    for child in &children {
                         ledger
-                            .add_item_with(&child, project.as_ref(), &[], Some(&id))
+                            .add_item_with(child, project.as_ref(), &[], Some(&id))
                             .await?;
                     }
                     Ok(())
                 });
                 if after_save == AfterSave::New {
-                    self.open_new_task(None);
+                    self.open_new_task(self.new_task_parent.clone());
                 } else {
                     self.new_task_open = false;
                 }
@@ -5239,12 +5244,34 @@ impl eframe::App for TodoGui {
                             }
                         });
                     }
-                    ui.label("Add child (optional)");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.new_task_child)
-                            .hint_text("Child task name")
-                            .desired_width(f32::INFINITY),
-                    );
+                    ui.label("Children (optional)");
+                    let mut remove_child = None;
+                    egui::ScrollArea::vertical()
+                        .max_height(180.0)
+                        .show(ui, |ui| {
+                            for (index, child) in self.new_task_children.iter_mut().enumerate() {
+                                ui.horizontal(|ui| {
+                                    ui.add(
+                                        egui::TextEdit::singleline(child)
+                                            .hint_text("Child task name")
+                                            .desired_width(360.0),
+                                    );
+                                    if ui
+                                        .small_button("×")
+                                        .on_hover_text("Remove child row")
+                                        .clicked()
+                                    {
+                                        remove_child = Some(index);
+                                    }
+                                });
+                            }
+                        });
+                    if let Some(index) = remove_child {
+                        self.new_task_children.remove(index);
+                    }
+                    if ui.small_button("+ Add child").clicked() {
+                        self.new_task_children.push(String::new());
+                    }
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
                         ui.label("Person");
@@ -9039,9 +9066,9 @@ fn short_title(title: &str) -> String {
 )]
 mod tests {
     use super::{
-        AgentFilter, CPress, Channel, ExpansionRestore, FamilyPresentation, FilterChip, GroupBy,
-        LedgerAccess, LocalGraphLayout, NormalizeScope, Runtime, SortBy, TagCloudLinkMode, TodoGui,
-        ancestor_depth, ancestor_depth_index, c_chord_is_double, collect_subtree,
+        AfterSave, AgentFilter, CPress, Channel, ExpansionRestore, FamilyPresentation, FilterChip,
+        GroupBy, LedgerAccess, LocalGraphLayout, NormalizeScope, Runtime, SortBy, TagCloudLinkMode,
+        TodoGui, ancestor_depth, ancestor_depth_index, c_chord_is_double, collect_subtree,
         compare_group_labels, connected_family_root, contraction_targets, expand_family_sets,
         fallback_tag_colors, family_box, family_control_rect, family_cycle_step,
         family_dependency_bands, family_ring_mesh, family_tree_geometry, family_visibility_counts,
@@ -9053,7 +9080,7 @@ mod tests {
     use std::collections::{HashMap, HashSet};
     use std::time::{Duration, Instant};
     use todo_core::{ItemState, Priority};
-    use todo_store::StoredItem;
+    use todo_store::{ItemScope, StoredItem};
 
     #[test]
     fn a_file_stamp_sees_edits_and_repointed_links() {
@@ -10269,5 +10296,51 @@ mod tests {
 
         app.clear_filter(&FilterChip::DoneOnly);
         assert_eq!(app.filtered_items().len(), 1);
+    }
+
+    #[test]
+    fn new_task_saves_multiple_children_and_keeps_parent_for_next_sibling() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = TodoGui::new(
+            Runtime::new().unwrap(),
+            LedgerAccess {
+                path: dir.path().join("ledger.db"),
+                actor_id: "test".to_owned(),
+            },
+            dir.path().join("layout.json"),
+            dir.path().join("theme.toml"),
+            AgentFilter::Show,
+        );
+        app.new_task_title = "Parent".to_owned();
+        app.add_task(AfterSave::Close);
+        let parent = app.selected.clone().unwrap();
+
+        app.open_new_task(Some(parent.clone()));
+        app.new_task_title = "Child".to_owned();
+        app.new_task_children = vec![
+            "First grandchild".to_owned(),
+            String::new(),
+            "Second grandchild".to_owned(),
+        ];
+        app.add_task(AfterSave::New);
+        assert_eq!(app.new_task_parent.as_deref(), Some(parent.as_str()));
+        assert!(app.new_task_open);
+        assert!(app.new_task_title.is_empty());
+        let items = app
+            .with_ledger(async |ledger| ledger.list_items(ItemScope::All, true).await)
+            .unwrap();
+        assert_eq!(items.len(), 4);
+        let child = items
+            .iter()
+            .find(|item| item.item.title == "Child")
+            .unwrap();
+        assert_eq!(child.item.parent_id.unwrap().to_string(), parent);
+        assert_eq!(
+            items
+                .iter()
+                .filter(|item| item.item.parent_id == Some(child.item.id))
+                .count(),
+            2
+        );
     }
 }
