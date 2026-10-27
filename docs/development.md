@@ -68,6 +68,11 @@ requirements:
   such as `~/.zfunc/_todo`, and run `compdef _todo todo` after `compinit` so it
   overrides `_devtodo`. Until then, `compdef -d todo` in `.zshrc` silences the
   error. Item IDs can be completed dynamically later.
+- Scoped `next` (`ditul-nodis`, deferred): consider `todo next --tag <path>`
+  and `todo next <parent-id>` to rank only matching work. Decide whether tag
+  matching includes descendant tags and whether a parent scope includes every
+  descendant before fixing the command syntax. Keep the existing global/project
+  ranking unchanged until that behavior is specified.
 
 Do not enable broad Clippy groups such as `pedantic`, `nursery`, or
 `restriction` wholesale. Trial individual lints as warnings, fix or document
