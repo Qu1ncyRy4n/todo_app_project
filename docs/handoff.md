@@ -26,11 +26,15 @@ Covers: workspace v0.3.0, protocol v15, graph verification through `82c4ef8`.
   these controls and shared G normalization in the running app on October 26;
   `pizof-tohod`, `kajim-sifog`, `zadin-nizud`, `mumuf-nukum`, `vohas-bitop`, and
   `hurik-duliv` are done in the CLI ledger.
+- **Done timeline (`punun-hopoj`, pending GUI acceptance).** A read-only store
+  query derives every transition into Done, including re-completions after a
+  reopen. Layout → Done timeline presets the existing graph to Done-only and
+  completion-time sort, showing local completion days on cards. It does not
+  replace the scheduled-date planning Timeline or add a history window.
 - **Still open:** The exact empty-canvas deselect gesture (`rugub-tivit`) has
   synthetic pointer coverage but awaits developer review. Relation-based
   proximity/order is split into `voros-vomoh`: symmetric `relates-to` cannot
-  be treated as directed precedence. The done timeline (`punun-hopoj`) has not
-  been built.
+  be treated as directed precedence.
 - **Validation for the normalization tree:** `./dev fmt`, `./dev check`,
   `./dev test`, and `./dev build --release` passed. The later deselection test
   commit also passed `./dev check` and `./dev test` (185 GUI tests). No push or

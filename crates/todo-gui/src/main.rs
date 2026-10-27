@@ -193,10 +193,12 @@ enum SortBy {
     Sequence,
     /// Oldest first; identifiers are time-ordered, so this is capture order.
     Created,
+    /// Most recently completed first, using the latest transition into Done.
+    Completed,
 }
 
 impl SortBy {
-    fn all() -> [Self; 7] {
+    fn all() -> [Self; 8] {
         [
             Self::Priority,
             Self::Sequence,
@@ -205,6 +207,7 @@ impl SortBy {
             Self::Title,
             Self::State,
             Self::Created,
+            Self::Completed,
         ]
     }
 
@@ -217,6 +220,7 @@ impl SortBy {
             Self::State => "State",
             Self::Sequence => "Sequence position",
             Self::Created => "Capture order",
+            Self::Completed => "Completed recently",
         }
     }
 }
@@ -311,6 +315,7 @@ impl SettingsTab {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum FilterChip {
     Completed,
+    DoneOnly,
     ActiveOnly,
     Agent,
     Tag(String, TagFilterState),
@@ -478,6 +483,8 @@ struct TodoGui {
     relation_draft: RelationKind,
     show_focus_window: bool,
     show_completed: bool,
+    done_only: bool,
+    completed_at: HashMap<String, String>,
     tag_filter: String,
     tag_states: TagFilter,
     message: Option<String>,
@@ -654,6 +661,8 @@ impl TodoGui {
             relation_draft: RelationKind::ContributesTo,
             show_focus_window: true,
             show_completed: false,
+            done_only: false,
+            completed_at: HashMap::new(),
             tag_filter: String::new(),
             tag_states: TagFilter::default(),
             message: theme_message,
@@ -829,6 +838,7 @@ impl TodoGui {
                     .default_open(true)
                     .show(ui, |ui| {
                         ui.checkbox(&mut self.show_completed, "Completed and canceled");
+                        ui.checkbox(&mut self.done_only, "Done only");
                         ui.checkbox(&mut self.focus_only, "Active work only");
                         ui.weak("Active work only hides everything that is not active.");
                         ui.horizontal(|ui| {
@@ -881,6 +891,7 @@ impl TodoGui {
     /// to the initial view, not a tour through every individual control.
     fn reset_filters(&mut self) {
         self.show_completed = false;
+        self.done_only = false;
         self.focus_only = false;
         self.show_parent_graph = true;
         self.show_dependency_graph = true;
@@ -907,6 +918,9 @@ impl TodoGui {
         let mut chips = Vec::new();
         if self.show_completed {
             chips.push(FilterChip::Completed);
+        }
+        if self.done_only {
+            chips.push(FilterChip::DoneOnly);
         }
         if self.focus_only {
             chips.push(FilterChip::ActiveOnly);
@@ -942,6 +956,7 @@ impl TodoGui {
     fn chip_label(&self, chip: &FilterChip) -> String {
         match chip {
             FilterChip::Completed => "showing done".to_owned(),
+            FilterChip::DoneOnly => "done only".to_owned(),
             FilterChip::ActiveOnly => "active only".to_owned(),
             FilterChip::Agent => match self.agent_filter {
                 AgentFilter::Only => "agent tasks only".to_owned(),
@@ -959,6 +974,7 @@ impl TodoGui {
     fn clear_filter(&mut self, chip: &FilterChip) {
         match chip {
             FilterChip::Completed => self.show_completed = false,
+            FilterChip::DoneOnly => self.done_only = false,
             FilterChip::ActiveOnly => self.focus_only = false,
             FilterChip::Agent => self.agent_filter = AgentFilter::Show,
             FilterChip::Tag(path, _) => self.tag_states.reset(path),
@@ -1017,6 +1033,9 @@ impl TodoGui {
         if ui.button("Timeline").clicked() {
             self.timeline_requested = true;
         }
+        if ui.button("Done timeline").clicked() {
+            self.done_timeline();
+        }
         ui.separator();
         if ui.button("Unstack").clicked() {
             self.relax_requested = true;
@@ -1028,6 +1047,17 @@ impl TodoGui {
         if ui.button("Undo layout").clicked() {
             self.undo_layout();
         }
+    }
+
+    /// A preset over the existing Done filter, group arrangement, and sort.
+    /// The scheduled-date timeline remains a separate planning layout.
+    fn done_timeline(&mut self) {
+        self.done_only = true;
+        self.show_completed = false;
+        self.focus_only = false;
+        self.group_by = [GroupBy::None; 3];
+        self.sort_by = SortBy::Completed;
+        self.group_requested = true;
     }
 
     /// Draws the Settings window: how the graph looks and moves, in tabs, with the
@@ -2804,9 +2834,14 @@ impl TodoGui {
                         .find(|candidate| candidate.item.id.to_string() == *id)
                 };
                 match (find(left), find(right)) {
-                    (Some(first), Some(second)) => {
-                        sort_items(sort, first, second, &weights, &sequence_rank)
-                    }
+                    (Some(first), Some(second)) => sort_items(
+                        sort,
+                        first,
+                        second,
+                        &weights,
+                        &sequence_rank,
+                        &self.completed_at,
+                    ),
                     _ => left.cmp(right),
                 }
             });
@@ -2924,9 +2959,14 @@ impl TodoGui {
                     .find(|candidate| candidate.item.id.to_string() == *id)
             };
             match (find(left), find(right)) {
-                (Some(first), Some(second)) => {
-                    sort_items(sort, first, second, &weights, &sequence_rank)
-                }
+                (Some(first), Some(second)) => sort_items(
+                    sort,
+                    first,
+                    second,
+                    &weights,
+                    &sequence_rank,
+                    &self.completed_at,
+                ),
                 _ => left.cmp(right),
             }
         };
@@ -3031,6 +3071,7 @@ impl TodoGui {
             .collect::<Vec<_>>();
         let sort = self.sort_by;
         let sequence_rank = self.sequence_ranks();
+        let completed_at = &self.completed_at;
         let mut columns: std::collections::BTreeMap<String, Vec<&StoredItem>> =
             std::collections::BTreeMap::new();
         for item in &items {
@@ -3060,7 +3101,7 @@ impl TodoGui {
                         return ordering;
                     }
                 }
-                sort_items(sort, left, right, &weights, &sequence_rank)
+                sort_items(sort, left, right, &weights, &sequence_rank, completed_at)
             });
             let mut rows = Vec::new();
             let mut previous: Option<Vec<String>> = None;
@@ -3810,10 +3851,13 @@ impl TodoGui {
         self.items
             .iter()
             .filter(|item| {
-                (self.show_completed
-                    || (item.item.state != ItemState::Done
-                        && item.item.state != ItemState::Canceled))
-                    && (!self.focus_only || item.item.state == ItemState::Active)
+                (if self.done_only {
+                    item.item.state == ItemState::Done
+                } else {
+                    self.show_completed
+                        || (item.item.state != ItemState::Done
+                            && item.item.state != ItemState::Canceled)
+                }) && (!self.focus_only || item.item.state == ItemState::Active)
                     && self.agent_filter.keeps(item)
                     && self
                         .tag_states
@@ -3987,6 +4031,21 @@ impl TodoGui {
                     Ok(sequences) => self.focus_sequences = sequences,
                     Err(error) => {
                         self.message = Some(format!("Could not load focus sequences: {error:#}"))
+                    }
+                }
+                match self.with_ledger(async |ledger| ledger.completion_history().await) {
+                    Ok(history) => {
+                        self.completed_at.clear();
+                        // History is newest first; the first entry per item is
+                        // the completion that belongs to its current Done state.
+                        for entry in history {
+                            self.completed_at
+                                .entry(entry.item_id.to_string())
+                                .or_insert(entry.completed_at);
+                        }
+                    }
+                    Err(error) => {
+                        self.message = Some(format!("Could not load completions: {error:#}"))
                     }
                 }
             }
@@ -5917,7 +5976,19 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
             painter.text(
                 node.center_bottom() - Vec2::new(0.0, padding / 2.0),
                 Align2::CENTER_BOTTOM,
-                node_meta(item, holds_active),
+                if app.done_only {
+                    app.completed_at
+                        .get(&id)
+                        .and_then(|timestamp| chrono::DateTime::parse_from_rfc3339(timestamp).ok())
+                        .map_or_else(
+                            || node_meta(item, holds_active),
+                            |when| {
+                                format!("done · {}", when.with_timezone(&Local).format("%Y-%m-%d"))
+                            },
+                        )
+                } else {
+                    node_meta(item, holds_active)
+                },
                 meta_font,
                 dim(Color32::LIGHT_GRAY),
             );
@@ -8566,6 +8637,7 @@ fn sort_items(
     right: &StoredItem,
     weights: &HashMap<String, f32>,
     sequence_rank: &HashMap<String, usize>,
+    completed_at: &HashMap<String, String>,
 ) -> std::cmp::Ordering {
     let title = || left.item.title.cmp(&right.item.title);
     match sort {
@@ -8611,6 +8683,15 @@ fn sort_items(
         }
         // Identifiers are time-ordered, so comparing them is capture order.
         SortBy::Created => left.item.id.to_string().cmp(&right.item.id.to_string()),
+        SortBy::Completed => {
+            let date = |item: &StoredItem| completed_at.get(&item.item.id.to_string());
+            match (date(left), date(right)) {
+                (Some(first), Some(second)) => second.cmp(first).then_with(title),
+                (Some(_), None) => std::cmp::Ordering::Less,
+                (None, Some(_)) => std::cmp::Ordering::Greater,
+                (None, None) => title(),
+            }
+        }
     }
 }
 
@@ -8959,14 +9040,14 @@ fn short_title(title: &str) -> String {
 mod tests {
     use super::{
         AgentFilter, CPress, Channel, ExpansionRestore, FamilyPresentation, FilterChip, GroupBy,
-        LedgerAccess, LocalGraphLayout, NormalizeScope, Runtime, TagCloudLinkMode, TodoGui,
+        LedgerAccess, LocalGraphLayout, NormalizeScope, Runtime, SortBy, TagCloudLinkMode, TodoGui,
         ancestor_depth, ancestor_depth_index, c_chord_is_double, collect_subtree,
         compare_group_labels, connected_family_root, contraction_targets, expand_family_sets,
         fallback_tag_colors, family_box, family_control_rect, family_cycle_step,
         family_dependency_bands, family_ring_mesh, family_tree_geometry, family_visibility_counts,
         file_stamp, focus_is_active, graph_needs_weights, graph_positions, grid_slot,
         hierarchy_levels, limit_child_depth, matches_query, node_meta, rebase_offsets_for_rect,
-        search_step, segment_outside_rect, tag_cloud_links,
+        search_step, segment_outside_rect, sort_items, tag_cloud_links,
     };
     use eframe::egui::{Color32, Pos2, Rect, pos2, vec2};
     use std::collections::{HashMap, HashSet};
@@ -10150,5 +10231,43 @@ mod tests {
         app.reset_filters();
         // Reset returns to the configured agent default, which still hides.
         assert_eq!(app.active_filters(), vec![FilterChip::Agent]);
+    }
+
+    #[test]
+    fn done_timeline_is_a_done_only_recent_completion_preset() {
+        let mut app = app(AgentFilter::Show);
+        let older = task("1", None, ItemState::Done);
+        let newer = task("2", None, ItemState::Done);
+        let active = task("3", None, ItemState::Active);
+        app.completed_at.insert(
+            older.item.id.to_string(),
+            "2026-10-24T12:00:00+00:00".to_owned(),
+        );
+        app.completed_at.insert(
+            newer.item.id.to_string(),
+            "2026-10-25T12:00:00+00:00".to_owned(),
+        );
+        app.items = vec![older.clone(), active, newer.clone()];
+
+        app.done_timeline();
+        assert!(app.done_only && app.group_requested);
+        assert_eq!(app.sort_by, SortBy::Completed);
+        assert_eq!(app.group_by, [GroupBy::None; 3]);
+        assert_eq!(app.filtered_items().len(), 2);
+        assert_eq!(app.active_filters(), vec![FilterChip::DoneOnly]);
+        assert!(
+            sort_items(
+                SortBy::Completed,
+                &newer,
+                &older,
+                &HashMap::new(),
+                &HashMap::new(),
+                &app.completed_at,
+            )
+            .is_lt()
+        );
+
+        app.clear_filter(&FilterChip::DoneOnly);
+        assert_eq!(app.filtered_items().len(), 1);
     }
 }

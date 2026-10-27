@@ -221,6 +221,13 @@ transitive-proximity rule needs to change.
   dates, tags, and people are rejected before creation. Title, tag, and parent
   are created together; if a later detail fails, the task remains created and
   the editor reports the partial result instead of inviting a duplicate Save.
+- **Layout → Done timeline** is a preset on the graph, not another history
+  window. It filters to currently Done cards and uses the existing Group
+  arrangement with **Completed recently** order. The card meta line shows the
+  latest completion day in local time. A reopened task disappears until done
+  again; earlier completion events remain in the ledger. Clear the **done only**
+  filter chip to return to the normal task set. **Timeline** still arranges by
+  scheduled date and is a separate planning view.
 - On macOS, Apple Symbols is appended as an outline-font fallback after egui's
   bundled fonts. This covers missing symbol glyphs such as checkbox controls;
   it does not enable Apple's color-only emoji font or guarantee every emoji
