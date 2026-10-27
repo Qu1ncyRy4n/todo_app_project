@@ -296,6 +296,8 @@ Deletion is deliberately absent from the editor. `todo rm --force` and
   omits spanning family fills.
 - Shift-click toggles cards in a temporary graph selection. Shift-drag draws
   an additive selection box; an ordinary card click clears the multi-selection.
+  Clicking empty graph space clears both the multi-selection and the focused
+  card, returning the Info pane to its empty prompt.
   When cards are selected, C, E, and G use only those cards as their scope:
   C/E change their descendant visibility, while G arranges just the selected
   cards and leaves every other card in place. The Info pane follows the last
@@ -559,7 +561,9 @@ what to check there first:
   `C` then a quick second `C` collapses inactive then all descendants in the
   original scope, even if the first press changes the card under the pointer;
 - Shift-click two cards, then Shift-drag across others; verify the gold outlines,
-  no canvas pan or card movement during the marquee, and selected-only C/E/G;
+  no canvas pan or card movement during the marquee, and selected-only C/E/G.
+  Click empty canvas: all selection outlines should disappear and Info should
+  return to its empty prompt;
 - whether a family band now reads as a border at every parent-to-child distance,
   which is the TE-0015 image 9 case;
 - the dashed boundary on an open family, which appears only mid-drag;

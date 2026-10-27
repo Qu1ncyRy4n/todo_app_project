@@ -4104,6 +4104,12 @@ impl TodoGui {
         }
     }
 
+    fn clear_graph_selection(&mut self) {
+        self.selected_cards.clear();
+        self.selected = None;
+        self.editing = None;
+    }
+
     fn selected_scope(&self) -> Option<NormalizeScope> {
         if self.selected_cards.is_empty() {
             return None;
@@ -5311,7 +5317,7 @@ impl eframe::App for TodoGui {
 }
 
 fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
-    let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::drag());
+    let (rect, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
     if ui.input(|input| input.pointer.primary_pressed() && input.modifiers.shift)
         && let Some(pointer) = ui.input(|input| input.pointer.hover_pos())
         && rect.contains(pointer)
@@ -6118,7 +6124,7 @@ fn draw_graph(ui: &mut egui::Ui, app: &mut TodoGui) {
     if response.clicked() {
         app.drag_anchor = None;
         if clicked.is_none() && !ui.input(|input| input.modifiers.shift) {
-            app.selected_cards.clear();
+            app.clear_graph_selection();
         }
     }
 }
@@ -10075,6 +10081,17 @@ mod tests {
             missing.join("theme.toml"),
             agent_filter,
         )
+    }
+
+    #[test]
+    fn clearing_graph_selection_removes_multi_select_and_info_focus() {
+        let mut app = app(AgentFilter::Show);
+        app.selected = Some("focused".to_owned());
+        app.selected_cards.insert("focused".to_owned());
+        app.selected_cards.insert("other".to_owned());
+        app.clear_graph_selection();
+        assert!(app.selected.is_none());
+        assert!(app.selected_cards.is_empty());
     }
 
     #[test]
