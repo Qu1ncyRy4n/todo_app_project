@@ -5,6 +5,12 @@ Covers: workspace v0.3.0, protocol v15, normalization through `f3a0dcd`.
 
 ## Where we left off, October 26
 
+- **Empty-canvas deselection (`41b4e48`).** A plain click off cards now clears
+  both the Shift-selection and the Info-focused card. A synthetic egui pointer
+  test exercises the click path in addition to the state-level test. The editor
+  builds and launches here, but the standalone window is not exposed to this
+  environment's window-control interface, so visual acceptance remains with
+  the developer.
 - **Graph normalization (`168c66c`, `f3a0dcd`).** Canvas G, card/family G,
   and Shift-selected G now compute positions through the same configured
   Hierarchy or Layered placement. Family G reveals hidden descendants, anchors

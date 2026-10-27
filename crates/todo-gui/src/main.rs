@@ -10095,6 +10095,43 @@ mod tests {
     }
 
     #[test]
+    fn empty_canvas_click_deselects_without_a_window() {
+        use eframe::egui::{CentralPanel, Context, Event, Modifiers, PointerButton, RawInput};
+
+        let mut app = app(AgentFilter::Show);
+        app.selected = Some("focused".to_owned());
+        app.selected_cards.insert("focused".to_owned());
+        let context = Context::default();
+        let screen = Rect::from_min_size(pos2(0.0, 0.0), vec2(900.0, 700.0));
+        let pointer = pos2(450.0, 350.0);
+        for pressed in [None, Some(true), Some(false)] {
+            let mut events = vec![Event::PointerMoved(pointer)];
+            if let Some(pressed) = pressed {
+                events.push(Event::PointerButton {
+                    pos: pointer,
+                    button: PointerButton::Primary,
+                    pressed,
+                    modifiers: Modifiers::NONE,
+                });
+            }
+            context
+                .run_ui(
+                    RawInput {
+                        screen_rect: Some(screen),
+                        events,
+                        ..Default::default()
+                    },
+                    |ui| {
+                        CentralPanel::default().show(ui, |ui| super::draw_graph(ui, &mut app));
+                    },
+                )
+                .drop_without_applying_deltas();
+        }
+        assert!(app.selected.is_none());
+        assert!(app.selected_cards.is_empty());
+    }
+
+    #[test]
     fn each_changed_filter_is_one_chip_that_clears_itself() {
         let mut app = app(AgentFilter::Hide);
         assert_eq!(app.active_filters(), vec![FilterChip::Agent]);

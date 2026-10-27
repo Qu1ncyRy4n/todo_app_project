@@ -540,12 +540,12 @@ fallback, the centered creation window, and Edit more's visual handoff still
 need running-window review. The graph hot-path changes also need a subjective
 drag, pan, and zoom comparison on the live ledger.
 
-The editor's own coverage is the pure layers only: `geometry.rs`, `theme.rs`,
-`palette.rs`, `tags.rs`, and free functions lifted out of `main.rs` for the
-purpose, such as `matches_query`. Nothing drives an actual window, so any change
-to panel wiring, hotkeys, or focus handling has to be confirmed by running
-`./dev gui`. The following have not been exercised in a running window and are
-what to check there first:
+The editor's automated coverage includes pure layers (`geometry.rs`,
+`theme.rs`, `palette.rs`, `tags.rs`, and helpers in `main.rs`) plus a synthetic
+egui click test for empty-canvas deselection. Nothing drives an actual window,
+so panel wiring, hotkeys, focus, and rendered behavior still need confirmation
+in `./dev gui`. The following have not been exercised in a running window and
+are what to check there first:
 
 - the TE-0018 layout (slices 59 and 60): `F`, `,`, and `I` toggles; filter
   chips; the Settings tabs and footer; inspector bands, their stripes and
