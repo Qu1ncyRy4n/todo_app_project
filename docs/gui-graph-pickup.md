@@ -231,11 +231,11 @@ transitive-proximity rule needs to change.
   again; earlier completion events remain in the ledger. Clear the **done only**
   filter chip to return to the normal task set. **Timeline** still arranges by
   scheduled date and is a separate planning view.
-- On macOS, Apple Symbols is appended as an outline-font fallback after egui's
-  bundled fonts. This covers missing symbol glyphs such as checkbox controls;
-  it does not enable Apple's color-only emoji font or guarantee every emoji
-  sequence in user task text. The earlier text labels remain as a reliable
-  control fallback.
+- The editor uses eframe 0.37's native system-font fallback for missing glyphs,
+  including system color emoji. The former Apple Symbols-only override was
+  removed so it cannot take precedence over color emoji. Exact compound emoji
+  sequences still need a running-window check; text labels remain the control
+  fallback.
 - Opening or closing a drawer keeps cards at their current screen positions;
   the canvas resize no longer silently reflows the default grid.
 - Event-backed focus sequences: `todo focus create|add|ls` and inspector

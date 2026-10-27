@@ -36,6 +36,10 @@ Covers: workspace v0.3.0, protocol v15, graph verification through `82c4ef8`.
   for sibling entry. A GUI integration test creates two grandchildren, ignores
   an empty row, and checks parent preservation. Child creation remains a later
   event after the parent, with a partial-result message if a later detail fails.
+- **Emoji (`kodov-vidus`, pending GUI acceptance).** eframe moves from 0.36.2
+  to 0.37.0 for native system-font and color-emoji support; the old Apple
+  Symbols outline-only override is gone. Strict check, workspace tests, and
+  release build pass. Human visual verification is still needed before closing.
 - **Still open:** The exact empty-canvas deselect gesture (`rugub-tivit`) has
   synthetic pointer coverage but awaits developer review. Relation-based
   proximity/order is split into `voros-vomoh`: symmetric `relates-to` cannot

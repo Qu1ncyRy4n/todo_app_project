@@ -57,9 +57,10 @@ fn main() -> Result<()> {
     let theme_path = paths.config_dir.join("theme.toml");
     eframe::run_native(
         "Todo Ledger",
+        // eframe's native system-font fallback covers emoji and symbols that
+        // its bundled outline fonts do not contain.
         eframe::NativeOptions::default(),
-        Box::new(move |creation| {
-            install_symbol_fallback(&creation.egui_ctx);
+        Box::new(move |_creation| {
             Ok(Box::new(TodoGui::new(
                 runtime,
                 access,
@@ -70,32 +71,6 @@ fn main() -> Result<()> {
         }),
     )
     .context("run native Todo Ledger window")
-}
-
-/// egui does not consult the operating system's font fallback when a glyph is
-/// missing. macOS's outline symbol font fills gaps left by its bundled fonts;
-/// the color-only Apple emoji font cannot be rasterized as an outline fallback.
-fn install_symbol_fallback(ctx: &egui::Context) {
-    #[cfg(target_os = "macos")]
-    {
-        let Ok(bytes) = fs::read("/System/Library/Fonts/Apple Symbols.ttf") else {
-            return;
-        };
-        let mut fonts = egui::FontDefinitions::default();
-        let name = "Apple Symbols".to_owned();
-        fonts.font_data.insert(
-            name.clone(),
-            std::sync::Arc::new(egui::FontData::from_owned(bytes)),
-        );
-        for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-            if let Some(chain) = fonts.families.get_mut(&family) {
-                chain.push(name.clone());
-            }
-        }
-        ctx.set_fonts(fonts);
-    }
-    #[cfg(not(target_os = "macos"))]
-    let _ = ctx;
 }
 
 /// Where the ledger lives and who the editor writes as.
@@ -5379,7 +5354,7 @@ impl eframe::App for TodoGui {
                     if elapsed >= std::time::Duration::from_millis(350) {
                         let painter = ui.ctx().layer_painter(egui::LayerId::new(
                             egui::Order::Foreground,
-                            egui::Id::new("info-attention"),
+                            egui::Id::unique("info-attention"),
                         ));
                         painter.rect_stroke(
                             panel.response.rect.shrink(2.0),
