@@ -5,6 +5,7 @@ mod ledger;
 
 pub use config::{AppConfig, AppPaths, DEFAULT_AGENT_ENV};
 pub use ledger::{
-    BatchItem, Citation, DeletedItem, EventRecord, FocusSequence, HistoryEntry, ItemPatch,
-    ItemScope, Ledger, MEMBER_OF, NamespaceEntry, NextItem, Note, StoredItem, WorkSession,
+    BatchItem, Citation, CompletionEntry, DeletedItem, EventRecord, FocusSequence, HistoryEntry,
+    ItemPatch, ItemScope, Ledger, MEMBER_OF, NamespaceEntry, NextItem, Note, StoredItem,
+    WorkSession,
 };

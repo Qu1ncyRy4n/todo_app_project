@@ -247,6 +247,14 @@ pub struct HistoryEntry {
     pub agent: Option<String>,
 }
 
+/// One transition into Done, including earlier completions of a reopened task.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompletionEntry {
+    pub item_id: ItemId,
+    pub completed_at: String,
+    pub cid: String,
+}
+
 /// An immutable event as it was accepted by this ledger. The stored CID is
 /// carried separately because historical protocols need not use v5's codec.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1972,6 +1980,43 @@ impl Ledger {
         Ok(result)
     }
 
+    /// Derives completion history from immutable lifecycle events, newest first.
+    /// A patch that leaves an already-done item Done is not another completion.
+    pub async fn completion_history(&self) -> Result<Vec<CompletionEntry>> {
+        let mut rows = self.connection.query(
+            "SELECT envelope FROM events WHERE kind IN ('item.created', 'item.state-changed', 'item.patched') ORDER BY recorded_at, event_id",
+            Vec::<Value>::new(),
+        ).await?;
+        let mut states = std::collections::HashMap::<ItemId, ItemState>::new();
+        let mut completed = Vec::new();
+        while let Some(row) = rows.next().await? {
+            let Value::Blob(bytes) = row.get_value(0)? else {
+                bail!("completion event envelope is not a blob");
+            };
+            let event = decode_envelope(&bytes).context("decode completion event")?;
+            let next = match event.payload.kind {
+                EventKind::ItemCreated | EventKind::ItemPatched => event.payload.data.get("state"),
+                EventKind::ItemStateChanged => event.payload.data.get("to"),
+                _ => None,
+            };
+            let Some(next) = next else {
+                continue;
+            };
+            let next: ItemState = next.parse()?;
+            let id = ItemId::parse(&event.payload.subject_id)?;
+            let previous = states.insert(id, next);
+            if next == ItemState::Done && previous != Some(ItemState::Done) {
+                completed.push(CompletionEntry {
+                    item_id: id,
+                    completed_at: event.payload.recorded_at.to_rfc3339(),
+                    cid: event.cid.to_string(),
+                });
+            }
+        }
+        completed.reverse();
+        Ok(completed)
+    }
+
     /// The signing agent of the item's creation, or else an author actor whose
     /// `kind` is `agent`, which is how items from before v15 are labeled.
     async fn item_agent(&self, item: ItemId) -> Result<Option<String>> {
@@ -3363,6 +3408,46 @@ mod tests {
         assert_eq!(ledger.notes(stored.item.id).await.unwrap().len(), 1);
         assert_eq!(ledger.citations(stored.item.id).await.unwrap().len(), 1);
         assert_eq!(ledger.history(stored.item.id).await.unwrap().len(), 5);
+    }
+
+    #[tokio::test]
+    async fn completion_history_keeps_reopened_completions_without_duplicate_done_patches() {
+        let ledger = ledger().await;
+        let item = ledger.add_item("Review", None).await.unwrap();
+        let id = item.item.id.to_string();
+        ledger.set_state(&id, ItemState::Done).await.unwrap();
+        let first = ledger.completion_history().await.unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].item_id, item.item.id);
+
+        ledger
+            .apply_patch(
+                &id,
+                ItemPatch {
+                    state: Some(ItemState::Done),
+                    ..ItemPatch::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(ledger.completion_history().await.unwrap(), first);
+
+        ledger.set_state(&id, ItemState::Active).await.unwrap();
+        ledger
+            .apply_patch(
+                &id,
+                ItemPatch {
+                    state: Some(ItemState::Done),
+                    ..ItemPatch::default()
+                },
+            )
+            .await
+            .unwrap();
+        let history = ledger.completion_history().await.unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].item_id, item.item.id);
+        assert_ne!(history[0].cid, history[1].cid);
+        assert_eq!(history[1], first[0]);
     }
 
     #[tokio::test]
