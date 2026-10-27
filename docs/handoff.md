@@ -1,7 +1,7 @@
 # Project Handoff
 
 Updated: 2026-10-26
-Covers: workspace v0.3.0, protocol v15, normalization through `f3a0dcd`.
+Covers: workspace v0.3.0, protocol v15, graph verification through `82c4ef8`.
 
 ## Where we left off, October 26
 
@@ -22,23 +22,19 @@ Covers: workspace v0.3.0, protocol v15, normalization through `f3a0dcd`.
 - **Recent graph controls (`4d7b42b`, `d99f9da`, `1744b56`).** Family badges
   report their current `+`, `-`, or `-*` visibility. C then quick CC contracts
   inactive then every descendant in the same scope. Shift-click and Shift-drag
-  make a temporary selection; C, E, and G operate on it. These changes are
-  built and tested but await developer review in a running window.
-- **Open verification.** The developer reported normalization looking strange
-  before the shared-algorithm change, without a reproducible case yet. Do not
-  infer that the report is resolved from unit tests. Run `./dev gui` and compare
-  G over empty canvas, a card in a family with hidden descendants, and a
-  Shift-selection, in both Settings → Layout styles. Check that local G keeps
-  unrelated cards in place and Undo restores prior visibility/positions. The
-  detailed checklist is in `docs/gui-graph-pickup.md`.
-- **Still open:** `hurik-duliv` remains active pending visual acceptance and a
-  decision on relation-based proximity/order. A symmetric `relates-to` link is
-  not a directed precedence edge. The new badge, C/CC, marquee, and
-  selected-scope items are likewise active pending GUI confirmation. A done
-  timeline is tracked separately as `punun-hopoj` and has not been built.
+  make a temporary selection; C, E, and G operate on it. The developer confirmed
+  these controls and shared G normalization in the running app on October 26;
+  `pizof-tohod`, `kajim-sifog`, `zadin-nizud`, `mumuf-nukum`, `vohas-bitop`, and
+  `hurik-duliv` are done in the CLI ledger.
+- **Still open:** The exact empty-canvas deselect gesture (`rugub-tivit`) has
+  synthetic pointer coverage but awaits developer review. Relation-based
+  proximity/order is split into `voros-vomoh`: symmetric `relates-to` cannot
+  be treated as directed precedence. The done timeline (`punun-hopoj`) has not
+  been built.
 - **Validation for the normalization tree:** `./dev fmt`, `./dev check`,
-  `./dev test`, and `./dev build --release` passed. No GUI interaction was
-  automated or confirmed by the developer. No push or sync was performed.
+  `./dev test`, and `./dev build --release` passed. The later deselection test
+  commit also passed `./dev check` and `./dev test` (185 GUI tests). No push or
+  sync was performed.
 
 ## Where we left off, October 20
 

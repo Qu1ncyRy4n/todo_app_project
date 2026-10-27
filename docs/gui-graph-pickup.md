@@ -19,7 +19,7 @@ Shipped and confirmed in a running window by the developer:
   describe the sketch are history; the code is recoverable from commit
   `1f3d7b8` and earlier.
 
-Normalization (`hurik-duliv`, pending running-window review): G now uses the
+Normalization (`hurik-duliv`, developer-confirmed in a running window): G now uses the
 configured hierarchy or layered placement for the whole graph, one connected
 family, or an explicit Shift-selection. Hierarchy scopes share active-first
 ordering, dependency levels, finished prerequisites, and family packing;
@@ -29,7 +29,7 @@ and leaves other families at their drawn positions. Selected G keeps the
 selection's center and changes only selected card positions. Whole-graph G
 still owns viewport framing and optional tag separation/overlap relaxation;
 those whole-canvas post-passes are not run on local scopes because they would
-move unrelated cards. Relation-based proximity/order remains unresolved:
+move unrelated cards. Relation-based proximity/order (`voros-vomoh`) remains unresolved:
 `relates-to` is symmetric, so it cannot simply become a directed layer edge.
 
 Unverified: `mode = "system"` applies the palette only to the appearance that
@@ -543,9 +543,10 @@ drag, pan, and zoom comparison on the live ledger.
 The editor's automated coverage includes pure layers (`geometry.rs`,
 `theme.rs`, `palette.rs`, `tags.rs`, and helpers in `main.rs`) plus a synthetic
 egui click test for empty-canvas deselection. Nothing drives an actual window,
-so panel wiring, hotkeys, focus, and rendered behavior still need confirmation
-in `./dev gui`. The following have not been exercised in a running window and
-are what to check there first:
+so new panel wiring, hotkeys, focus, and rendered behavior still need confirmation
+in `./dev gui`. The developer confirmed badges, C/CC, Shift-selection,
+selected-only C/E/G, and G normalization on October 26. The following is a
+regression checklist; the exact empty-canvas deselect gesture is still unreviewed:
 
 - the TE-0018 layout (slices 59 and 60): `F`, `,`, and `I` toggles; filter
   chips; the Settings tabs and footer; inspector bands, their stripes and
